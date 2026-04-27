@@ -1,0 +1,203 @@
+/* ============================================================
+   RLI motion — CSS-only animations.
+   These don't need React state, so they're cheaper as CSS keyframes
+   than as Motion library variants. Paired with motion.ts class names.
+
+   See motion.md for the choreography and rationale.
+   ============================================================ */
+
+/* ------------------------------------------------------------------
+   Streaming-agent status dot pulse.
+   The hero motion partner to the tab indicator slide.
+   Opacity-only — never scale (scale on a status dot reads as alarm).
+   ------------------------------------------------------------------ */
+
+@keyframes rli-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
+.rli-pulse {
+  animation: rli-pulse 1.4s var(--ease-in-out) infinite;
+  will-change: opacity;
+}
+
+/* ------------------------------------------------------------------
+   Three-dot loading indicator.
+   Used inside: highlight-and-ask card while waiting for Gemini,
+   "Generate commit message" button while streaming, agent-startup state.
+
+   Renders as three "•" dots; this animation cycles their opacity in
+   a rolling wave.
+   ------------------------------------------------------------------ */
+
+.rli-loading-dots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: baseline;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1;
+  color: var(--text-secondary);
+}
+
+.rli-loading-dots > span {
+  animation: rli-loading-dot 1.2s var(--ease-in-out) infinite;
+  will-change: opacity;
+}
+.rli-loading-dots > span:nth-child(1) { animation-delay:    0ms; }
+.rli-loading-dots > span:nth-child(2) { animation-delay:  200ms; }
+.rli-loading-dots > span:nth-child(3) { animation-delay:  400ms; }
+
+@keyframes rli-loading-dot {
+  0%, 100% { opacity: 0.25; }
+  40%      { opacity: 1; }
+}
+
+/* ------------------------------------------------------------------
+   Button press (:active) scale-down.
+   GPU-cheap, restored quickly. The base hover/state colors are
+   handled by CSS color transitions on the button itself; this is
+   only the press.
+   ------------------------------------------------------------------ */
+
+.rli-press {
+  transition:
+    transform var(--motion-fast) var(--ease-out-quart),
+    background-color var(--motion-instant) var(--ease-out-quart);
+  will-change: transform;
+}
+.rli-press:active {
+  transform: scale(0.97);
+  transition:
+    transform 80ms var(--ease-in-quart),
+    background-color var(--motion-instant) var(--ease-in-quart);
+}
+
+/* ------------------------------------------------------------------
+   Resizable split divider hover widen.
+   The Tauri panes use react-resizable-panels which renders dividers
+   as <PanelResizeHandle/>. We style by attribute.
+
+   On hover: 1px → 3px width (or height for horizontal divides) +
+   color shift to accent-muted, 100ms quart-out.
+
+   Active drag: instant width swap + accent color, no transition.
+   ------------------------------------------------------------------ */
+
+[data-panel-resize-handle-enabled="true"] {
+  background: var(--border-hairline);
+  transition:
+    background-color var(--motion-instant) var(--ease-out-quart),
+    width  var(--motion-instant) var(--ease-out-quart),
+    height var(--motion-instant) var(--ease-out-quart);
+  will-change: width, height, background-color;
+}
+
+[data-panel-resize-handle-enabled="true"]:hover {
+  background: var(--accent-muted);
+}
+
+/* While dragging — react-resizable-panels sets data-resize-handle-active="pointer" */
+[data-panel-resize-handle-active="pointer"] {
+  background: var(--accent) !important;
+  transition: none !important;     /* follow mouse 1:1 */
+}
+
+/* Vertical divider (between horizontal splits) */
+[data-panel-group-direction="horizontal"]
+  [data-panel-resize-handle-enabled="true"] {
+  width: 1px;
+  cursor: col-resize;
+}
+[data-panel-group-direction="horizontal"]
+  [data-panel-resize-handle-enabled="true"]:hover,
+[data-panel-group-direction="horizontal"]
+  [data-panel-resize-handle-active="pointer"] {
+  width: 3px;
+}
+
+/* Horizontal divider (between vertical splits) */
+[data-panel-group-direction="vertical"]
+  [data-panel-resize-handle-enabled="true"] {
+  height: 1px;
+  cursor: row-resize;
+}
+[data-panel-group-direction="vertical"]
+  [data-panel-resize-handle-enabled="true"]:hover,
+[data-panel-group-direction="vertical"]
+  [data-panel-resize-handle-active="pointer"] {
+  height: 3px;
+}
+
+/* ------------------------------------------------------------------
+   Pane focus inner ring.
+   Applied to the focused pane's outer container when keyboard-focused
+   (NOT mouse-focused — JS toggles a class based on :focus-visible
+   semantics on a focusable wrapper).
+   ------------------------------------------------------------------ */
+
+.rli-pane-focused {
+  box-shadow: inset 0 0 0 1px var(--accent-muted);
+  transition: box-shadow var(--motion-instant) var(--ease-out-quart);
+}
+
+/* ------------------------------------------------------------------
+   Drop zone tint (drag-and-drop targets).
+   Applied via JS class while a drag is hovering a valid target.
+   ------------------------------------------------------------------ */
+
+.rli-drop-target {
+  position: relative;
+}
+.rli-drop-target::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--accent-muted);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-instant) var(--ease-out-quart);
+}
+.rli-drop-target.is-dragging-over::before {
+  opacity: 0.15;
+}
+
+/* ------------------------------------------------------------------
+   Drop-accepted flash (success on drop completion).
+   Apply class once, remove after the animation.
+   ------------------------------------------------------------------ */
+
+@keyframes rli-drop-flash {
+  0%   { background-color: var(--state-success-bg); }
+  100% { background-color: transparent; }
+}
+
+.rli-drop-flash {
+  animation: rli-drop-flash 400ms var(--ease-out-quart);
+}
+
+/* ------------------------------------------------------------------
+   Reduced motion — strip everything spatial.
+   This block REINFORCES the global one in tokens.css for the
+   specifically-named animations above.
+   ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  .rli-pulse {
+    animation: none;
+    opacity: 1;
+  }
+  .rli-loading-dots > span {
+    animation: none;
+    opacity: 0.6;
+  }
+  .rli-press:active {
+    transform: none;
+  }
+  [data-panel-resize-handle-enabled="true"]:hover,
+  [data-panel-resize-handle-active="pointer"] {
+    width: 1px !important;
+    height: 1px !important;
+  }
+}

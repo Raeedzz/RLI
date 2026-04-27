@@ -1,0 +1,30 @@
+/* ============================================================
+   RLI font stack
+   Geist + JetBrains Mono variable fonts are loaded by importing
+   the @fontsource-variable packages in src/styles.css. Those
+   packages register their own @font-face blocks with bundled
+   woff2 assets, so RLI works fully offline.
+
+   Below: fallback metric overrides for "Geist Fallback" and
+   "JetBrains Mono Fallback" font-family names, used in the font
+   stacks in tokens.css. They minimize FOUT layout shift while
+   the variable fonts decode on cold start.
+   ============================================================ */
+
+@font-face {
+  font-family: "Geist Fallback";
+  src: local("SF Pro Text"), local("BlinkMacSystemFont"), local("system-ui");
+  size-adjust: 102%;
+  ascent-override: 92%;
+  descent-override: 22%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: "JetBrains Mono Fallback";
+  src: local("SF Mono"), local("Menlo");
+  size-adjust: 100%;
+  ascent-override: 88%;
+  descent-override: 22%;
+  line-gap-override: 0%;
+}

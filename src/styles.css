@@ -1,0 +1,16 @@
+/* Variable font assets (bundled via Fontsource — no runtime network fetch).
+   Imported first so @font-face is registered before tokens consume them. */
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* Fallback metric overrides for FOUT */
+@import "./design/fonts.css";
+
+/* Token system — CSS variables consumed everywhere below */
+@import "./design/tokens.css";
+
+/* Chrome motion — CSS keyframes (status pulse, loading dots, etc.) */
+@import "./design/motion.css";
+
+/* xterm.js base styles — required for terminal rendering */
+@import "@xterm/xterm/css/xterm.css";

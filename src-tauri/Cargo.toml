@@ -1,0 +1,33 @@
+[package]
+name = "rli"
+version = "0.0.1"
+description = "A confident dark instrument for running CLI coding agents."
+authors = ["raeedz"]
+edition = "2021"
+rust-version = "1.78"
+
+[lib]
+name = "rli_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-os = "2"
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+# Profile tweaks for release builds — small + fast binary.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+panic = "abort"
