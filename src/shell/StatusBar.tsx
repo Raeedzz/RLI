@@ -1,5 +1,6 @@
 import { useActiveProject, useActiveSession } from "@/state/AppState";
 import { tagVar } from "@/state/types";
+import { ClaudePill } from "@/terminal/ClaudePill";
 
 /**
  * Always-on 24px context strip at the bottom.
@@ -73,6 +74,9 @@ export function StatusBar() {
           flexShrink: 0,
         }}
       >
+        {session?.agentRunning && session?.claudeStartedAt != null && (
+          <ClaudePill startedAt={session.claudeStartedAt} />
+        )}
         <span>
           <Mono>⌘K</Mono> commands
         </span>

@@ -1,11 +1,23 @@
 import { useEffect } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import {
   useActiveProject,
   useActiveSession,
   useAppDispatch,
   useAppState,
 } from "@/state/AppState";
+import { defaultWorkspaceWithEditor } from "@/state/paneTree";
+import { openProjectDialog } from "@/lib/projectDialog";
+
+/**
+ * Match a number-row digit press regardless of modifier-induced char
+ * shifting. ⌘1 produces e.key === "1", but ⌘⇧1 produces "!" on a US
+ * keyboard — so we read the physical key code instead. Returns 1..9
+ * for Digit1..Digit9, otherwise null.
+ */
+function digitKey(e: KeyboardEvent): number | null {
+  const m = /^Digit([1-9])$/.exec(e.code);
+  return m ? Number(m[1]) : null;
+}
 
 /**
  * Global keyboard shortcuts (v1, fixed). Per CONTEXT.md the keymap is
@@ -19,7 +31,7 @@ export function useKeyboardShortcuts() {
   const dispatch = useAppDispatch();
   const project = useActiveProject();
   const session = useActiveSession();
-  const { sessions } = useAppState();
+  const { sessions, projects } = useAppState();
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -34,13 +46,19 @@ export function useKeyboardShortcuts() {
       }
       if (cmd && !shift && e.key.toLowerCase() === "b") {
         e.preventDefault();
-        dispatch({ type: "toggle-file-tree" });
+        dispatch({ type: "toggle-left-panel", panel: "files" });
+        return;
+      }
+      // ⌃⇧G — source-control panel (matches VS Code muscle memory)
+      if (e.ctrlKey && shift && e.key.toLowerCase() === "g") {
+        e.preventDefault();
+        dispatch({ type: "toggle-left-panel", panel: "git" });
         return;
       }
       if (cmd && shift && e.key === ":") {
         // ⌘⇧; produces ":" with shift on US keyboards
         e.preventDefault();
-        dispatch({ type: "toggle-connections" });
+        dispatch({ type: "toggle-left-panel", panel: "connections" });
         return;
       }
       if (cmd && shift && e.key.toLowerCase() === "f") {
@@ -69,6 +87,8 @@ export function useKeyboardShortcuts() {
             branch: `rli/session-${n}`,
             status: "idle",
             createdAt: Date.now(),
+            workspace: defaultWorkspaceWithEditor(),
+            openFile: null,
           },
         });
         return;
@@ -81,22 +101,35 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      // ⌘1..⌘9 — switch to nth session in the active project
-      if (cmd && !shift && project && /^[1-9]$/.test(e.key)) {
-        const idx = Number(e.key) - 1;
-        const projectSessions = sessions.filter(
-          (s) => s.projectId === project.id,
-        );
-        const target = projectSessions[idx];
-        if (target) {
-          e.preventDefault();
-          dispatch({
-            type: "set-active-session",
-            projectId: project.id,
-            sessionId: target.id,
-          });
+      // ⌘1..⌘9 — switch to nth session in the active project.
+      // ⌘⇧1..⌘⇧9 — switch to nth project in the projects array.
+      // Both read the physical Digit code so Shift's "1 → !" remap on
+      // US keyboards doesn't drop the shifted variant.
+      const n = cmd ? digitKey(e) : null;
+      if (n !== null) {
+        if (shift) {
+          const target = projects[n - 1];
+          if (target) {
+            e.preventDefault();
+            dispatch({ type: "set-active-project", id: target.id });
+          }
+          return;
         }
-        return;
+        if (project) {
+          const projectSessions = sessions.filter(
+            (s) => s.projectId === project.id,
+          );
+          const target = projectSessions[n - 1];
+          if (target) {
+            e.preventDefault();
+            dispatch({
+              type: "set-active-session",
+              projectId: project.id,
+              sessionId: target.id,
+            });
+          }
+          return;
+        }
       }
 
       // ⌘O — open folder as a project
@@ -105,13 +138,16 @@ export function useKeyboardShortcuts() {
         void openProjectDialog(dispatch);
         return;
       }
+      // ⌘⇧O — same dialog, mirrored for muscle memory
+      // (left out intentionally to keep the chord set tight)
 
       if (e.key === "Escape") {
         // Pane-managed Esc handlers run first via their own listeners.
-        // This catches Esc when focus is elsewhere — close all overlays.
+        // This catches Esc when focus is elsewhere — close transient
+        // overlays. The persistent left panel (files/git/connections)
+        // stays put on Esc so it doesn't disappear out from under you.
         dispatch({ type: "set-palette", open: false });
         dispatch({ type: "set-search", open: false });
-        dispatch({ type: "set-connections", visible: false });
         return;
       }
 
@@ -125,34 +161,6 @@ export function useKeyboardShortcuts() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [dispatch, project, session, sessions]);
+  }, [dispatch, project, session, sessions, projects]);
 }
 
-async function openProjectDialog(
-  dispatch: ReturnType<typeof useAppDispatch>,
-): Promise<void> {
-  try {
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title: "Open project",
-    });
-    if (typeof selected !== "string") return;
-    const path = selected;
-    const name = path.split("/").filter(Boolean).pop() ?? path;
-    const glyph = name.charAt(0).toUpperCase();
-    const id = `p_${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}_${Date.now().toString(36)}`;
-    dispatch({
-      type: "add-project",
-      project: {
-        id,
-        path,
-        name,
-        glyph,
-        pinned: false,
-      },
-    });
-  } catch {
-    // User cancelled or dialog plugin unavailable
-  }
-}

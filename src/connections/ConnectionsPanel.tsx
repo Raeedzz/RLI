@@ -1,29 +1,18 @@
-import { motion } from "motion/react";
 import { useEffect, useMemo, useState } from "react";
-import { connectionsViewVariants } from "@/design/motion";
 import { connections, type Connection } from "@/lib/connections";
-import { useActiveProject } from "@/state/AppState";
 
 interface Props {
-  onClose: () => void;
+  projectPath?: string;
 }
 
 type Filter = "all" | "skill" | "mcp";
 
 /**
- * Combined skills + MCPs panel (⌘⇧;).
- *
- * Slides in from the right edge, takes over the right column. v1 is
- * read-only: we list, you click → SKILL.md preview opens (deferred to
- * the editor pane wiring). MCP rows expand inline to show the command
- * line.
- *
- * Status reporting from latest Claude session log is deferred (Task
- * #13's tab summary infra hasn't been turned on for the connections
- * pane yet); rows currently show "loaded" if discovered.
+ * Left-rail edition of the skills + MCPs panel. No overlay framing,
+ * no internal close button — visibility is owned by the AppShell's
+ * leftPanel state and dismissed via the ActivityRail toggle.
  */
-export function ConnectionsView({ onClose }: Props) {
-  const project = useActiveProject();
+export function ConnectionsPanel({ projectPath }: Props) {
   const [items, setItems] = useState<Connection[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
   const [search, setSearch] = useState("");
@@ -36,7 +25,7 @@ export function ConnectionsView({ onClose }: Props) {
     setLoading(true);
     setError(null);
     connections
-      .scan(project?.path)
+      .scan(projectPath)
       .then((rows) => {
         if (!cancelled) setItems(rows);
       })
@@ -49,18 +38,7 @@ export function ConnectionsView({ onClose }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [project?.path]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [projectPath]);
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
@@ -82,26 +60,16 @@ export function ConnectionsView({ onClose }: Props) {
   }, [items]);
 
   return (
-    <motion.aside
-      variants={connectionsViewVariants}
-      initial="hidden"
-      animate="visible"
-      exit="exit"
+    <div
       style={{
-        position: "absolute",
-        top: 0,
-        right: 0,
-        bottom: 0,
-        width: "min(560px, 50vw)",
-        backgroundColor: "var(--surface-1)",
-        borderLeft: "var(--border-1)",
-        boxShadow: "var(--shadow-popover)",
-        zIndex: "var(--z-modal)",
+        height: "100%",
         display: "flex",
         flexDirection: "column",
+        backgroundColor: "var(--surface-1)",
+        minHeight: 0,
       }}
     >
-      <Header counts={counts} onClose={onClose} />
+      <Header counts={counts} />
       <FilterBar
         filter={filter}
         onFilter={setFilter}
@@ -132,77 +100,49 @@ export function ConnectionsView({ onClose }: Props) {
           />
         ))}
       </div>
-    </motion.aside>
+    </div>
   );
 }
 
 function Header({
   counts,
-  onClose,
 }: {
   counts: { skills: number; mcps: number };
-  onClose: () => void;
 }) {
   return (
     <div
       style={{
-        height: 36,
+        height: "var(--pane-header-height)",
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
         padding: "0 var(--space-3)",
         borderBottom: "var(--border-1)",
-        userSelect: "none",
+        flexShrink: 0,
       }}
     >
-      <div style={{ display: "flex", gap: "var(--space-3)", alignItems: "baseline" }}>
-        <span
-          style={{
-            fontFamily: "var(--font-sans)",
-            fontSize: "var(--text-sm)",
-            fontWeight: "var(--weight-medium)",
-            color: "var(--text-primary)",
-            letterSpacing: "var(--tracking-tight)",
-          }}
-        >
-          connections
-        </span>
-        <span
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: "var(--text-2xs)",
-            color: "var(--text-tertiary)",
-          }}
-          className="tabular"
-        >
-          {counts.skills} skills · {counts.mcps} mcps
-        </span>
-      </div>
-      <button
-        type="button"
-        onClick={onClose}
-        title="close (esc)"
+      <span
         style={{
-          width: 24,
-          height: 24,
-          backgroundColor: "transparent",
+          fontFamily: "var(--font-sans)",
+          fontSize: "var(--text-2xs)",
+          fontWeight: "var(--weight-semibold)",
+          letterSpacing: "var(--tracking-caps)",
+          textTransform: "uppercase",
           color: "var(--text-tertiary)",
-          fontFamily: "var(--font-mono)",
-          fontSize: "var(--text-md)",
-          borderRadius: "var(--radius-sm)",
-          cursor: "default",
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.backgroundColor = "var(--surface-2)";
-          e.currentTarget.style.color = "var(--text-primary)";
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.backgroundColor = "transparent";
-          e.currentTarget.style.color = "var(--text-tertiary)";
         }}
       >
-        ×
-      </button>
+        skills · mcps
+      </span>
+      <span
+        className="tabular"
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: "var(--text-2xs)",
+          color: "var(--text-tertiary)",
+        }}
+      >
+        {counts.skills} skl · {counts.mcps} mcp
+      </span>
     </div>
   );
 }
@@ -234,10 +174,10 @@ function FilterBar({
         all
       </Chip>
       <Chip active={filter === "skill"} onClick={() => onFilter("skill")}>
-        skills
+        skl
       </Chip>
       <Chip active={filter === "mcp"} onClick={() => onFilter("mcp")}>
-        mcps
+        mcp
       </Chip>
       <input
         value={search}
@@ -246,6 +186,7 @@ function FilterBar({
         className="allow-select"
         style={{
           flex: 1,
+          minWidth: 0,
           height: 22,
           padding: "0 var(--space-2)",
           backgroundColor: "var(--surface-2)",
@@ -284,11 +225,9 @@ function Chip({
         backgroundColor: active ? "var(--surface-3)" : "transparent",
         border: "var(--border-1)",
         borderRadius: "var(--radius-sm)",
-        cursor: "default",
+        cursor: "pointer",
         textTransform: "lowercase",
         letterSpacing: "var(--tracking-base)",
-        transition:
-          "background-color var(--motion-instant) var(--ease-out-quart)",
       }}
     >
       {children}
@@ -318,9 +257,7 @@ function Row({
         display: "flex",
         flexDirection: "column",
         gap: "var(--space-1)",
-        cursor: "default",
-        transition:
-          "background-color var(--motion-instant) var(--ease-out-quart)",
+        cursor: "pointer",
       }}
       onMouseEnter={(e) =>
         (e.currentTarget.style.backgroundColor = "var(--surface-2)")
@@ -342,25 +279,32 @@ function Row({
             flex: 1,
             minWidth: 0,
             fontFamily: "var(--font-sans)",
-            fontSize: "var(--text-sm)",
+            fontSize: "var(--text-xs)",
             fontWeight: "var(--weight-medium)",
             color: "var(--text-primary)",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
-            letterSpacing: "var(--tracking-tight)",
           }}
         >
           {conn.name}
         </span>
-        <SourceBadge source={conn.source} />
+        <span
+          style={{
+            fontFamily: "var(--font-sans)",
+            fontSize: "var(--text-2xs)",
+            color: "var(--text-tertiary)",
+          }}
+        >
+          {conn.source}
+        </span>
       </div>
       {conn.description && (
         <span
           style={{
-            paddingLeft: 36,
+            paddingLeft: 30,
             fontFamily: "var(--font-sans)",
-            fontSize: "var(--text-xs)",
+            fontSize: "var(--text-2xs)",
             color: "var(--text-tertiary)",
             overflow: "hidden",
             textOverflow: expanded ? "clip" : "ellipsis",
@@ -374,16 +318,34 @@ function Row({
       {expanded && (
         <div
           style={{
-            paddingLeft: 36,
+            paddingLeft: 30,
             display: "flex",
             flexDirection: "column",
             gap: 2,
           }}
         >
           {conn.command && (
-            <Mono style={{ color: "var(--text-secondary)" }}>{conn.command}</Mono>
+            <span
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "var(--text-2xs)",
+                color: "var(--text-secondary)",
+                wordBreak: "break-all",
+              }}
+            >
+              {conn.command}
+            </span>
           )}
-          <Mono style={{ color: "var(--text-tertiary)" }}>{conn.path}</Mono>
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: "var(--text-2xs)",
+              color: "var(--text-tertiary)",
+              wordBreak: "break-all",
+            }}
+          >
+            {conn.path}
+          </span>
         </div>
       )}
     </button>
@@ -393,7 +355,8 @@ function Row({
 function KindBadge({ kind }: { kind: "skill" | "mcp" }) {
   const label = kind === "skill" ? "skl" : "mcp";
   const fg = kind === "skill" ? "var(--state-info)" : "var(--state-success)";
-  const bg = kind === "skill" ? "var(--state-info-bg)" : "var(--state-success-bg)";
+  const bg =
+    kind === "skill" ? "var(--state-info-bg)" : "var(--state-success-bg)";
   return (
     <span
       style={{
@@ -404,47 +367,9 @@ function KindBadge({ kind }: { kind: "skill" | "mcp" }) {
         backgroundColor: bg,
         padding: "1px 6px",
         borderRadius: "var(--radius-xs)",
-        letterSpacing: "var(--tracking-base)",
       }}
     >
       {label}
-    </span>
-  );
-}
-
-function SourceBadge({ source }: { source: "user" | "project" | "plugin" }) {
-  return (
-    <span
-      style={{
-        fontFamily: "var(--font-sans)",
-        fontSize: "var(--text-2xs)",
-        color: "var(--text-tertiary)",
-        letterSpacing: "var(--tracking-base)",
-      }}
-    >
-      {source}
-    </span>
-  );
-}
-
-function Mono({
-  children,
-  style,
-}: {
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-}) {
-  return (
-    <span
-      style={{
-        fontFamily: "var(--font-mono)",
-        fontSize: "var(--text-xs)",
-        fontVariantLigatures: "none",
-        wordBreak: "break-all",
-        ...style,
-      }}
-    >
-      {children}
     </span>
   );
 }
@@ -456,7 +381,7 @@ function Empty({ label }: { label: string }) {
         padding: "var(--space-6) var(--space-4)",
         textAlign: "center",
         color: "var(--text-tertiary)",
-        fontSize: "var(--text-sm)",
+        fontSize: "var(--text-xs)",
         fontFamily: "var(--font-sans)",
       }}
     >

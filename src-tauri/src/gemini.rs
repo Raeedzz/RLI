@@ -16,6 +16,7 @@
 //! streaming variant.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,13 @@ const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 const KEYRING_SERVICE: &str = "dev.raeedz.rli";
 const KEYRING_USER: &str = "gemini-api-key";
+
+// Without a timeout, a stalled connection (Wi-Fi handoff, captive portal,
+// API outage) blocks the call indefinitely — the highlight-and-ask card,
+// the AI commit-message button, and the embeddings layer all sit on this
+// path. 30s is generous for Flash-Lite (typically <2s) but short enough
+// that a clear error surfaces before the user gives up.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub struct GeminiState {
@@ -44,9 +52,23 @@ impl Client {
             api_key,
             http: reqwest::Client::builder()
                 .user_agent("rli/0.0.1")
+                .timeout(REQUEST_TIMEOUT)
                 .build()
                 .expect("reqwest client init"),
         }
+    }
+}
+
+/// Map a non-success Gemini HTTP response to a user-facing message that
+/// the frontend can display verbatim. AskCard.tsx pattern-matches on
+/// "api key" / "not configured" to switch into "set API key" mode, so
+/// keep those phrases for 401/403.
+fn classify_http_error(status: reqwest::StatusCode, body: &str) -> String {
+    match status.as_u16() {
+        401 | 403 => format!("gemini api key rejected (status {status}): {}", body.trim()),
+        429 => "gemini rate limited — wait a moment and try again".into(),
+        500..=599 => format!("gemini upstream error (status {status})"),
+        _ => format!("gemini {status}: {body}"),
     }
 }
 
@@ -234,12 +256,18 @@ pub async fn gemini_generate(
         .json(&body)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            if e.is_timeout() {
+                "gemini request timed out — check your connection".to_string()
+            } else {
+                e.to_string()
+            }
+        })?;
 
     let status = res.status();
     let text = res.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
-        return Err(format!("gemini {status}: {text}"));
+        return Err(classify_http_error(status, &text));
     }
 
     let parsed: GenerateResponse = serde_json::from_str(&text)
@@ -301,12 +329,18 @@ pub async fn gemini_embed(
         .json(&body)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            if e.is_timeout() {
+                "gemini embed timed out — check your connection".to_string()
+            } else {
+                e.to_string()
+            }
+        })?;
 
     let status = res.status();
     let body_text = res.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
-        return Err(format!("gemini embed {status}: {body_text}"));
+        return Err(classify_http_error(status, &body_text));
     }
 
     let parsed: EmbedResponse = serde_json::from_str(&body_text)
@@ -375,5 +409,62 @@ mod tests {
         // Cache should now hold the new client
         let guard = inner.lock().unwrap();
         assert_eq!(guard.as_ref().unwrap().api_key, "fresh-key");
+    }
+
+    /* ---------- HTTP error classification ----------
+       AskCard.tsx (frontend) toggles into "set API key" mode by
+       matching "api key" or "not configured" case-insensitively, so
+       401/403 paths must contain "api key". */
+
+    #[test]
+    fn http_401_mentions_api_key() {
+        let msg = classify_http_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"error":{"message":"API key not valid"}}"#,
+        );
+        assert!(
+            msg.to_lowercase().contains("api key"),
+            "401 must contain 'api key' for frontend re-auth flow, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn http_403_mentions_api_key() {
+        let msg = classify_http_error(reqwest::StatusCode::FORBIDDEN, "permission denied");
+        assert!(msg.to_lowercase().contains("api key"));
+    }
+
+    #[test]
+    fn http_429_says_rate_limited_without_dumping_body() {
+        // Rate-limit responses can be huge JSON; the user just needs the gist.
+        let msg = classify_http_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":{"message":"Quota exceeded","details":[/* lots */]}}"#,
+        );
+        assert!(msg.to_lowercase().contains("rate limit"));
+        assert!(
+            !msg.contains("Quota"),
+            "429 message should not regurgitate the response body, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn http_500_does_not_leak_response_body() {
+        // 5xx bodies are almost always upstream HTML/stack traces — useless to
+        // the user and noisy in the UI. Status code is enough.
+        let msg = classify_http_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "<html>nginx 502</html>",
+        );
+        assert!(msg.contains("upstream"));
+        assert!(!msg.contains("nginx"));
+    }
+
+    #[test]
+    fn http_other_4xx_passes_through() {
+        // Catch-all for unexpected statuses — surface body so we can debug.
+        let msg = classify_http_error(reqwest::StatusCode::BAD_REQUEST, "bad payload");
+        assert!(msg.contains("400"));
+        assert!(msg.contains("bad payload"));
     }
 }

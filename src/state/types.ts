@@ -81,6 +81,21 @@ export interface Session {
   workspace: PaneNode;
   /** Currently open file in this session's editor pane(s). */
   openFile: OpenFile | null;
+  /**
+   * Wall-clock millis at which Claude was first detected in any
+   * terminal pane of this session. Drives the 5h-window pill's %
+   * and remaining-time math. Null until detection; persists across
+   * app restarts (the 5h Anthropic window outlives a relaunch).
+   */
+  claudeStartedAt?: number | null;
+  /**
+   * True iff a foreground TUI agent (claude, etc.) is currently
+   * running in some terminal pane of this session. Gates whether
+   * the global status bar shows the Claude pill — `claudeStartedAt`
+   * alone keeps the pill stuck on after the agent exits.
+   * Runtime-only (always reset to `false` on persistence).
+   */
+  agentRunning?: boolean;
 }
 
 export interface OpenFile {
@@ -88,20 +103,22 @@ export interface OpenFile {
   content: string;
 }
 
+export type LeftPanel = "files" | "git" | "connections" | null;
+
 export interface AppState {
   projects: Project[];
   sessions: Session[];
   activeProjectId: ProjectId | null;
   activeSessionByProject: Record<ProjectId, SessionId | null>;
-  openFile: OpenFile | null;
   paletteOpen: boolean;
-  fileTreeVisible: boolean;
-  connectionsVisible: boolean;
+  /**
+   * Which side panel is showing on the left. Only one of files / git /
+   * connections at a time — clicking a tab in the ActivityRail swaps
+   * the slot. `null` hides the left panel entirely.
+   */
+  leftPanel: LeftPanel;
   searchOpen: boolean;
-  browserVisible: boolean;
   apiKeyDialogOpen: boolean;
-  /** Root of the dynamic split tree (everything to the right of the file tree). */
-  workspace: PaneNode;
 }
 
 export type AppAction =
@@ -111,17 +128,15 @@ export type AppAction =
   | { type: "set-active-session"; projectId: ProjectId; sessionId: SessionId }
   | { type: "toggle-palette" }
   | { type: "set-palette"; open: boolean }
-  | { type: "toggle-file-tree" }
-  | { type: "toggle-connections" }
-  | { type: "set-connections"; visible: boolean }
+  | { type: "set-left-panel"; panel: LeftPanel }
+  | { type: "toggle-left-panel"; panel: Exclude<LeftPanel, null> }
   | { type: "toggle-search" }
   | { type: "set-search"; open: boolean }
   | { type: "toggle-browser" }
-  | { type: "set-browser"; visible: boolean }
   | { type: "toggle-api-key" }
   | { type: "set-api-key-dialog"; open: boolean }
-  | { type: "open-file"; file: OpenFile }
-  | { type: "close-file" }
+  | { type: "open-file"; sessionId: SessionId; file: OpenFile }
+  | { type: "close-file"; sessionId: SessionId }
   | { type: "add-session"; session: Session }
   | { type: "remove-session"; id: SessionId }
   | { type: "update-session"; id: SessionId; patch: Partial<Session> }
@@ -131,10 +146,46 @@ export type AppAction =
   | { type: "reorder-sessions"; projectId: ProjectId; ids: SessionId[] }
   | {
       type: "split-pane";
+      sessionId: SessionId;
       paneId: PaneNodeId;
       direction: SplitDirection;
       content: PaneContent;
     }
-  | { type: "close-pane"; paneId: PaneNodeId }
-  | { type: "set-pane-content"; paneId: PaneNodeId; content: PaneContent }
-  | { type: "swap-panes"; aId: PaneNodeId; bId: PaneNodeId };
+  | { type: "close-pane"; sessionId: SessionId; paneId: PaneNodeId }
+  | {
+      type: "set-pane-content";
+      sessionId: SessionId;
+      paneId: PaneNodeId;
+      content: PaneContent;
+    }
+  | {
+      type: "swap-panes";
+      sessionId: SessionId;
+      aId: PaneNodeId;
+      bId: PaneNodeId;
+    }
+  | {
+      /**
+       * Relocate a pane next to another pane on a chosen edge. Used by
+       * drag-and-drop with edge-zone detection — drop on a target's
+       * left/right/up/down edge to land the source on that side.
+       */
+      type: "move-pane";
+      sessionId: SessionId;
+      sourceId: PaneNodeId;
+      targetId: PaneNodeId;
+      direction: SplitDirection;
+    }
+  | {
+      /**
+       * Replace the persistent slice (projects, sessions, active pointers)
+       * with a snapshot loaded from disk. Transient UI flags (palette,
+       * dialogs) are left at their current values so we don't briefly
+       * flash open menus on boot. Dispatched once after the store loads.
+       */
+      type: "hydrate";
+      projects: Project[];
+      sessions: Session[];
+      activeProjectId: ProjectId | null;
+      activeSessionByProject: Record<ProjectId, SessionId | null>;
+    };

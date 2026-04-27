@@ -6,6 +6,7 @@ import {
   paletteVariants,
 } from "@/design/motion";
 import { useAppDispatch, useAppState } from "@/state/AppState";
+import { openProjectDialog } from "@/lib/projectDialog";
 
 /**
  * The ⌘K palette. Mounts as a controlled overlay above all other surfaces.
@@ -100,14 +101,22 @@ function PaletteContents({ onClose }: { onClose: () => void }) {
         label: "Open project…",
         keys: ["⌘", "O"],
         run: () => {
-          /* Task #16 — dialog plugin */
+          onClose();
+          void openProjectDialog(dispatch);
         },
       },
       {
         id: "toggle-file-tree",
         label: "Toggle file tree",
         keys: ["⌘", "B"],
-        run: () => dispatch({ type: "toggle-file-tree" }),
+        run: () => dispatch({ type: "toggle-left-panel", panel: "files" }),
+      },
+      {
+        id: "toggle-source-control",
+        label: "Toggle source control",
+        hint: "git status + stage + commit + push",
+        keys: ["⌃", "⇧", "G"],
+        run: () => dispatch({ type: "toggle-left-panel", panel: "git" }),
       },
       {
         id: "open-connections",

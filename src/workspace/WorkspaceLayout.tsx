@@ -1,10 +1,11 @@
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { Terminal } from "@/terminal/Terminal";
+import { BlockTerminal } from "@/terminal/BlockTerminal";
 import { Editor } from "@/editor/Editor";
 import { BrowserPane } from "@/browser/BrowserPane";
-import { useActiveProject, useActiveSession, useAppDispatch, useAppState } from "@/state/AppState";
+import { useActiveProject, useActiveSession, useAppDispatch } from "@/state/AppState";
 import type { PaneContent, PaneNode, PaneNodeId, SessionId } from "@/state/types";
 import { PaneFrame } from "./PaneFrame";
+import { PaneDragProvider } from "./PaneDragContext";
 
 interface Props {
   /** Total leaf count in the tree — used so the close button is hidden when only one pane exists. */
@@ -22,12 +23,16 @@ interface Props {
  * within a single session.
  */
 export function WorkspaceLayout({ node, totalLeaves }: Props) {
-  return <PaneNodeRenderer node={node} totalLeaves={totalLeaves} />;
+  return (
+    <PaneDragProvider>
+      <PaneNodeRenderer node={node} totalLeaves={totalLeaves} />
+    </PaneDragProvider>
+  );
 }
 
 function PaneNodeRenderer({ node, totalLeaves }: Props) {
   const session = useActiveSession();
-  const { openFile } = useAppState();
+  const openFile = session?.openFile ?? null;
 
   if (node.kind === "leaf") {
     return (
@@ -88,48 +93,70 @@ function PaneBody({
 function TerminalBody({ paneId }: { paneId: PaneNodeId }) {
   const project = useActiveProject();
   const session = useActiveSession();
+  const dispatch = useAppDispatch();
   // First terminal pane uses the active session's terminal; subsequent
   // terminal panes get their own ephemeral session ids derived from pane
   // ids so each terminal pane runs an independent shell.
   const ptyId: SessionId = session ? `agent-${session.id}-${paneId}` : `agent-${paneId}`;
   if (!project) return <Empty label="open a project — ⌘O" />;
   return (
-    <Terminal
+    <BlockTerminal
       key={ptyId}
       id={ptyId}
       command="zsh"
       args={["-l"]}
       cwd={project.path}
+      onClaudeDetected={
+        session
+          ? (timestamp) =>
+              dispatch({
+                type: "update-session",
+                id: session.id,
+                patch: { claudeStartedAt: timestamp },
+              })
+          : undefined
+      }
+      onAgentRunningChange={
+        session
+          ? (running) =>
+              dispatch({
+                type: "update-session",
+                id: session.id,
+                patch: { agentRunning: running },
+              })
+          : undefined
+      }
     />
   );
 }
 
 function EditorBody() {
-  const { openFile } = useAppState();
+  const session = useActiveSession();
   const dispatch = useAppDispatch();
-  if (!openFile) {
+  const openFile = session?.openFile ?? null;
+  if (!openFile || !session) {
     return <Empty label="click a file in the tree to open it" />;
   }
   return (
     <Editor
-      key={openFile.path}
+      key={`${session.id}-${openFile.path}`}
       path={openFile.path}
       content={openFile.content}
       onChange={(content) =>
-        dispatch({ type: "open-file", file: { path: openFile.path, content } })
+        dispatch({
+          type: "open-file",
+          sessionId: session.id,
+          file: { path: openFile.path, content },
+        })
       }
     />
   );
 }
 
 function BrowserBody() {
-  const dispatch = useAppDispatch();
-  return (
-    <BrowserPane
-      embedded
-      onClose={() => dispatch({ type: "set-browser", visible: false })}
-    />
-  );
+  // Closing is handled by PaneFrame's × — BrowserPane just renders
+  // its content.
+  return <BrowserPane embedded onClose={() => {}} />;
 }
 
 function Empty({ label }: { label: string }) {

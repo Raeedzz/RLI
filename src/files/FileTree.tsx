@@ -5,7 +5,7 @@ import {
   useGitStatus,
   type GitStatusMap,
 } from "@/hooks/useGitStatus";
-import { FileTypeIcon } from "./FileTypeIcon";
+import { FileTypeIcon, fileTypeFor } from "./FileTypeIcon";
 
 interface Props {
   root: string;
@@ -217,6 +217,14 @@ function Row({
 }) {
   const statusEntry = node.isDir ? undefined : gitStatus.get(node.path);
   const visual = statusVisual(statusEntry);
+  // Tint each filename with its file-type pigment so a glance at the
+  // tree distinguishes Cargo.toml (rust) from package.json (amber) from
+  // Dockerfile (slate) without needing to read the icon. Git status
+  // takes priority — added/modified/deleted should still pop.
+  const typeColor = !node.isDir ? fileTypeFor(node.name).color : null;
+  const nameColor = active
+    ? "var(--text-primary)"
+    : (visual?.color ?? typeColor ?? "var(--text-secondary)");
   return (
     <button
       type="button"
@@ -280,7 +288,7 @@ function Row({
           fontWeight: node.isDir
             ? "var(--weight-medium)"
             : "var(--weight-regular)",
-          color: visual?.color,
+          color: nameColor,
         }}
       >
         {node.name}

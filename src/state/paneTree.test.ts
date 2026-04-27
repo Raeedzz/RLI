@@ -5,6 +5,7 @@ import {
   findLeaf,
   leaves,
   makeLeaf,
+  movePane,
   setLeafContent,
   splitLeaf,
   swapLeaves,
@@ -181,5 +182,89 @@ describe("swapLeaves", () => {
 
   test("swap with unknown id leaves the tree unchanged", () => {
     expect(swapLeaves(T, "T", "missing")).toBe(T);
+  });
+});
+
+describe("movePane", () => {
+  test("moving across in a 2-pane tree swaps positions", () => {
+    // [T | E] → drop T on E's right → [E | T_new]
+    const root: PaneNode = {
+      kind: "split",
+      id: "s",
+      direction: "horizontal",
+      children: [T, E],
+    };
+    const out = movePane(root, "T", "E", "right");
+    const ls = leaves(out);
+    expect(ls.map((l) => l.content)).toEqual(["editor", "terminal"]);
+  });
+
+  test("moving onto a sibling's left places source before target", () => {
+    const root: PaneNode = {
+      kind: "split",
+      id: "s",
+      direction: "horizontal",
+      children: [T, E],
+    };
+    // Move E onto T's left → [E_new | T]
+    const out = movePane(root, "E", "T", "left");
+    const ls = leaves(out);
+    expect(ls.map((l) => l.content)).toEqual(["editor", "terminal"]);
+  });
+
+  test("moving onto a target's bottom creates a vertical split", () => {
+    const B = makeLeaf("browser", "B");
+    // 3-pane tree: T on the left, [E | B] on the right. Move B down
+    // onto E so the right side becomes [E above B] vertically.
+    const root3: PaneNode = {
+      kind: "split",
+      id: "s",
+      direction: "horizontal",
+      children: [
+        T,
+        {
+          kind: "split",
+          id: "s2",
+          direction: "horizontal",
+          children: [E, B],
+        },
+      ],
+    };
+    const out = movePane(root3, "B", "E", "down");
+    // After: T is unchanged on the left; right side is E stacked over B.
+    expect(out.kind).toBe("split");
+    if (out.kind !== "split") return;
+    expect(out.children[0].kind).toBe("leaf");
+    expect(out.children[1].kind).toBe("split");
+    if (out.children[1].kind === "split") {
+      expect(out.children[1].direction).toBe("vertical");
+      const sub = leaves(out.children[1]);
+      expect(sub[0].content).toBe("editor");
+      expect(sub[1].content).toBe("browser");
+    }
+  });
+
+  test("moving onto self is a no-op", () => {
+    const root: PaneNode = {
+      kind: "split",
+      id: "s",
+      direction: "horizontal",
+      children: [T, E],
+    };
+    expect(movePane(root, "T", "T", "right")).toBe(root);
+  });
+
+  test("moving with unknown source returns the tree unchanged", () => {
+    const root: PaneNode = {
+      kind: "split",
+      id: "s",
+      direction: "horizontal",
+      children: [T, E],
+    };
+    expect(movePane(root, "missing", "T", "right")).toBe(root);
+  });
+
+  test("moving the only leaf is a no-op", () => {
+    expect(movePane(T, "T", "T", "right")).toBe(T);
   });
 });

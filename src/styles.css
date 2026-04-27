@@ -12,8 +12,12 @@
 /* Chrome motion — CSS keyframes (status pulse, loading dots, etc.) */
 @import "./design/motion.css";
 
-/* xterm.js base styles — required for terminal rendering */
-@import "@xterm/xterm/css/xterm.css";
+/* Prompt input placeholder ("Run commands") — explicit rule because
+   inline styles can't target the ::placeholder pseudo-element. */
+.rli-prompt-input::placeholder {
+  color: var(--text-tertiary);
+  opacity: 1;
+}
 
 /* react-resizable-panels resize handles — gap-style. Each handle is a
    strip of the workspace surface (surface-1) so panes appear to float

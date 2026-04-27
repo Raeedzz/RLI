@@ -20,13 +20,14 @@ interface GitInfo {
 const POLL_MS = 4000;
 
 /**
- * Slim Warp-style breadcrumb at the bottom of the terminal pane:
+ * Pill-badge breadcrumb at the BOTTOM of the terminal pane, Warp-style:
  *
- *   ✻ claude   ~/Developer/RLI   ⎇ main ↑2   +3 −1                ⌘K commands
+ *   [✻ claude]  [~/Developer/RLI]  [⎇ main ↑2]  [📄 17 +3 −1]                [⌘K]
  *
- * Polls `git status` at 4s cadence — glanceable info, not sub-second.
- * Sits below the xterm grid; the Claude usage bar (when active)
- * stacks underneath.
+ * Each context segment is its own rounded chip with a subtle border so
+ * the user can scan folder / branch / change-count in one glance and
+ * the chrome doesn't melt into the dark surface. Polls `git status` at
+ * 4s cadence — glanceable info, not sub-second.
  */
 export function TerminalStatusBar({ cwd, command }: Props) {
   const info = useGitInfo(cwd);
@@ -40,12 +41,12 @@ export function TerminalStatusBar({ cwd, command }: Props) {
       className="allow-select"
       style={{
         flexShrink: 0,
-        height: 26,
+        minHeight: 36,
         display: "flex",
         alignItems: "center",
-        gap: "var(--space-3)",
-        padding: "0 var(--space-3) 0 var(--space-3)",
-        backgroundColor: "var(--surface-1)",
+        gap: "var(--space-2)",
+        padding: "var(--space-2) var(--space-3)",
+        backgroundColor: "var(--surface-0)",
         borderTop: "var(--border-1)",
         fontFamily: "var(--font-sans)",
         fontSize: "var(--text-2xs)",
@@ -55,96 +56,115 @@ export function TerminalStatusBar({ cwd, command }: Props) {
         overflow: "hidden",
       }}
     >
-      <span
-        aria-hidden
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          width: 14,
-          color: shellGlyphColor(command),
-          fontFamily: "var(--font-mono)",
-          fontVariantLigatures: "none",
-          fontSize: "var(--text-xs)",
-        }}
-      >
-        {shellGlyph(command)}
-      </span>
-      <span
-        style={{
-          color: "var(--text-secondary)",
-          fontWeight: "var(--weight-medium)",
-          letterSpacing: "var(--tracking-tight)",
-        }}
-      >
-        {command}
-      </span>
+      <Pill>
+        <span
+          aria-hidden
+          style={{
+            color: shellGlyphColor(command),
+            fontFamily: "var(--font-mono)",
+            fontVariantLigatures: "none",
+            fontSize: "var(--text-xs)",
+            lineHeight: 1,
+          }}
+        >
+          {shellGlyph(command)}
+        </span>
+        <span
+          style={{
+            color: "var(--text-secondary)",
+            fontWeight: "var(--weight-medium)",
+            letterSpacing: "var(--tracking-tight)",
+          }}
+        >
+          {command}
+        </span>
+      </Pill>
 
-      <Sep />
-
-      <span
-        title={cwd}
-        style={{
-          color: "var(--text-secondary)",
-          fontFamily: "var(--font-mono)",
-          fontVariantLigatures: "none",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          minWidth: 0,
-        }}
-      >
-        {home}
-      </span>
+      <Pill title={cwd}>
+        <FolderGlyph />
+        <span
+          style={{
+            color: "var(--text-primary)",
+            fontFamily: "var(--font-mono)",
+            fontVariantLigatures: "none",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            minWidth: 0,
+            maxWidth: 360,
+          }}
+        >
+          {home}
+        </span>
+      </Pill>
 
       {info.branch && (
-        <>
-          <Sep />
-          <Branch
-            branch={info.branch}
-            ahead={info.ahead}
-            behind={info.behind}
-          />
-        </>
+        <Branch
+          branch={info.branch}
+          ahead={info.ahead}
+          behind={info.behind}
+        />
       )}
 
       {totalChanges > 0 && (
-        <>
-          <Sep />
-          <Diff
-            added={info.added}
-            modified={info.modified}
-            removed={info.removed}
-          />
-        </>
+        <Diff
+          added={info.added}
+          modified={info.modified}
+          removed={info.removed}
+        />
       )}
 
       <span style={{ flex: 1 }} />
-
-      <span
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: "var(--space-1-5)",
-          color: "var(--text-tertiary)",
-          letterSpacing: "var(--tracking-tight)",
-        }}
-      >
-        <span
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: "var(--text-2xs)",
-            padding: "1px var(--space-1-5)",
-            backgroundColor: "var(--surface-2)",
-            borderRadius: "var(--radius-xs)",
-            color: "var(--text-secondary)",
-            fontVariantLigatures: "none",
-          }}
-        >
-          ⌘K
-        </span>
-        <span>commands</span>
-      </span>
     </div>
+  );
+}
+
+/**
+ * Reusable rounded chip used for every status-bar segment. Surface-1
+ * fill + 1px border-1 reads as a tactile button on the surface-0 strip
+ * — not enough contrast to grab the eye, just enough to feel like
+ * separate chunks of context.
+ */
+function Pill({
+  children,
+  title,
+  style,
+}: {
+  children: React.ReactNode;
+  title?: string;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <span
+      title={title}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "var(--space-1-5)",
+        height: 22,
+        padding: "0 var(--space-2)",
+        backgroundColor: "var(--surface-1)",
+        border: "var(--border-1)",
+        borderRadius: "var(--radius-pill)",
+        flexShrink: 0,
+        minWidth: 0,
+        ...style,
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function FolderGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M2 5.5C2 4.7 2.7 4 3.5 4h2.4c.4 0 .7.1 1 .4l1.2 1.1H12.5c.8 0 1.5.7 1.5 1.5v4.5c0 .8-.7 1.5-1.5 1.5h-9C2.7 13 2 12.3 2 11.5V5.5Z"
+        stroke="var(--text-tertiary)"
+        strokeWidth="1.2"
+        fill="none"
+      />
+    </svg>
   );
 }
 
@@ -222,20 +242,6 @@ function shellGlyphColor(command: string): string {
   return "var(--text-tertiary)";
 }
 
-function Sep() {
-  return (
-    <span
-      aria-hidden
-      style={{
-        color: "var(--text-disabled)",
-        flexShrink: 0,
-      }}
-    >
-      ·
-    </span>
-  );
-}
-
 function Branch({
   branch,
   ahead,
@@ -246,24 +252,28 @@ function Branch({
   behind: number;
 }) {
   return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: "var(--space-1-5)",
-        color: "var(--text-secondary)",
-        flexShrink: 0,
-      }}
+    <Pill
       title={`branch ${branch}${
         ahead || behind ? `  ↑${ahead} ↓${behind}` : ""
       }`}
+      style={{
+        // Don't let a 100-char branch name push the rest of the status
+        // bar off-screen. Cap the visible width and keep the full name
+        // in the title.
+        maxWidth: 240,
+        flexShrink: 1,
+      }}
     >
       <BranchGlyph />
       <span
         style={{
-          color: "var(--state-info)",
+          color: "var(--state-success)",
           fontFamily: "var(--font-mono)",
           fontVariantLigatures: "none",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          minWidth: 0,
         }}
       >
         {branch}
@@ -292,7 +302,7 @@ function Branch({
           ↓{behind}
         </span>
       )}
-    </span>
+    </Pill>
   );
 }
 
@@ -305,27 +315,75 @@ function Diff({
   modified: number;
   removed: number;
 }) {
+  const total = added + modified + removed;
   return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: "var(--space-2)",
-        flexShrink: 0,
-        fontFamily: "var(--font-mono)",
-        fontVariantLigatures: "none",
-      }}
-    >
+    <Pill title={`${total} files changed`}>
+      <FileGlyph />
+      <span
+        style={{
+          color: "var(--text-primary)",
+          fontFamily: "var(--font-mono)",
+          fontSize: "var(--text-2xs)",
+        }}
+      >
+        {total}
+      </span>
       {added > 0 && (
-        <span style={{ color: "var(--diff-add-fg)" }}>+{added}</span>
+        <span
+          style={{
+            color: "var(--diff-add-fg)",
+            fontFamily: "var(--font-mono)",
+            fontSize: "var(--text-2xs)",
+            fontWeight: "var(--weight-semibold)",
+          }}
+        >
+          +{added}
+        </span>
       )}
       {modified > 0 && (
-        <span style={{ color: "var(--state-warning)" }}>~{modified}</span>
+        <span
+          style={{
+            color: "var(--state-warning)",
+            fontFamily: "var(--font-mono)",
+            fontSize: "var(--text-2xs)",
+            fontWeight: "var(--weight-semibold)",
+          }}
+        >
+          ~{modified}
+        </span>
       )}
       {removed > 0 && (
-        <span style={{ color: "var(--diff-remove-fg)" }}>−{removed}</span>
+        <span
+          style={{
+            color: "var(--diff-remove-fg)",
+            fontFamily: "var(--font-mono)",
+            fontSize: "var(--text-2xs)",
+            fontWeight: "var(--weight-semibold)",
+          }}
+        >
+          −{removed}
+        </span>
       )}
-    </span>
+    </Pill>
+  );
+}
+
+function FileGlyph() {
+  return (
+    <svg width="10" height="11" viewBox="0 0 12 14" fill="none" aria-hidden>
+      <path
+        d="M2 1.5h5l3 3v8a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1Z"
+        stroke="var(--text-tertiary)"
+        strokeWidth="1"
+        fill="none"
+      />
+      <path
+        d="M7 1.5v3h3"
+        stroke="var(--text-tertiary)"
+        strokeWidth="1"
+        fill="none"
+      />
+    </svg>
   );
 }
 

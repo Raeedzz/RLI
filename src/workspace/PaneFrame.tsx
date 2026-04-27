@@ -1,8 +1,51 @@
 import { AnimatePresence } from "motion/react";
 import { useState, type DragEvent, type ReactNode } from "react";
 import { SplitChooser } from "./SplitChooser";
-import { useAppDispatch, useAppState } from "@/state/AppState";
+import { useActiveSession, useAppDispatch } from "@/state/AppState";
 import type { PaneContent, PaneNodeId, SplitDirection } from "@/state/types";
+import { usePaneDrag } from "./PaneDragContext";
+
+type DropZone = "left" | "right" | "up" | "down" | "center";
+
+/**
+ * Map a drop point inside a pane's bounding rect to one of the five
+ * drop zones. The center occupies the inner ~50% (cursor more than 25%
+ * from every edge); otherwise we pick whichever edge is closest.
+ *
+ * Edge detection is what makes drag-to-rearrange feel like a real
+ * editor — dropping on the right edge of pane A lands the dragged pane
+ * to A's right, instead of just swapping content.
+ */
+function detectDropZone(e: DragEvent<HTMLDivElement>, rect: DOMRect): DropZone {
+  const x = (e.clientX - rect.left) / rect.width;
+  const y = (e.clientY - rect.top) / rect.height;
+  const dLeft = x;
+  const dRight = 1 - x;
+  const dUp = y;
+  const dDown = 1 - y;
+  const min = Math.min(dLeft, dRight, dUp, dDown);
+  if (min > 0.25) return "center";
+  if (min === dLeft) return "left";
+  if (min === dRight) return "right";
+  if (min === dUp) return "up";
+  return "down";
+}
+
+/** Map a drop zone to its `SplitDirection`, or null for the center swap. */
+function zoneToDirection(zone: DropZone): SplitDirection | null {
+  switch (zone) {
+    case "left":
+      return "left";
+    case "right":
+      return "right";
+    case "up":
+      return "up";
+    case "down":
+      return "down";
+    case "center":
+      return null;
+  }
+}
 
 interface Props {
   paneId: PaneNodeId;
@@ -41,20 +84,37 @@ export function PaneFrame({
   children,
 }: Props) {
   const dispatch = useAppDispatch();
+  const session = useActiveSession();
+  const { isDragging, setDragging } = usePaneDrag();
   const [chooser, setChooser] = useState<{
     anchor: { x: number; y: number };
     mode: "split" | "replace";
   } | null>(null);
-  const [dragOver, setDragOver] = useState(false);
-  const { workspace } = useAppState();
+  // null = cursor not over this pane; otherwise the active drop zone
+  // (which edge the cursor is hovering over, or "center" for a swap).
+  const [dropZone, setDropZone] = useState<DropZone | null>(null);
+  const workspace = session?.workspace;
 
   const onSplit = (direction: SplitDirection, newContent: PaneContent) => {
-    dispatch({ type: "split-pane", paneId, direction, content: newContent });
+    if (!session) return;
+    dispatch({
+      type: "split-pane",
+      sessionId: session.id,
+      paneId,
+      direction,
+      content: newContent,
+    });
     setChooser(null);
   };
 
   const onReplace = (newContent: PaneContent) => {
-    dispatch({ type: "set-pane-content", paneId, content: newContent });
+    if (!session) return;
+    dispatch({
+      type: "set-pane-content",
+      sessionId: session.id,
+      paneId,
+      content: newContent,
+    });
     setChooser(null);
   };
 
@@ -77,24 +137,68 @@ export function PaneFrame({
   const onDragStart = (e: DragEvent<HTMLDivElement>) => {
     e.dataTransfer.setData(DRAG_MIME, paneId);
     e.dataTransfer.effectAllowed = "move";
+    setDragging(true);
   };
 
+  const onDragEnd = () => {
+    setDragging(false);
+    setDropZone(null);
+  };
+
+  // We don't filter by `dataTransfer.types` here — WebKit hides custom
+  // MIME types during dragover. Instead we use the global isDragging
+  // flag (set by our own dragstart) to decide whether this is our drag.
   const onDragOver = (e: DragEvent<HTMLDivElement>) => {
-    if (e.dataTransfer.types.includes(DRAG_MIME)) {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-      if (!dragOver) setDragOver(true);
+    if (!isDragging) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const rect = e.currentTarget.getBoundingClientRect();
+    const zone = detectDropZone(e, rect);
+    if (zone !== dropZone) setDropZone(zone);
+  };
+
+  const onDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    // Only clear if we actually left the pane wrapper — dragleave fires
+    // every time the cursor crosses any nested boundary (e.g. into the
+    // header, into xterm's canvas), which would otherwise strobe the
+    // overlay off and on.
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (
+      e.clientX < rect.left ||
+      e.clientX >= rect.right ||
+      e.clientY < rect.top ||
+      e.clientY >= rect.bottom
+    ) {
+      setDropZone(null);
     }
   };
 
-  const onDragLeave = () => setDragOver(false);
-
   const onDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
-    setDragOver(false);
+    const zone = dropZone;
+    setDropZone(null);
+    setDragging(false);
+    if (!session) return;
     const sourceId = e.dataTransfer.getData(DRAG_MIME);
-    if (sourceId && sourceId !== paneId) {
-      dispatch({ type: "swap-panes", aId: sourceId, bId: paneId });
+    if (!sourceId || sourceId === paneId || !zone) return;
+    const direction = zoneToDirection(zone);
+    if (direction === null) {
+      // Center → swap content. Useful when you just want to flip
+      // two panes without rearranging the tree.
+      dispatch({
+        type: "swap-panes",
+        sessionId: session.id,
+        aId: sourceId,
+        bId: paneId,
+      });
+    } else {
+      dispatch({
+        type: "move-pane",
+        sessionId: session.id,
+        sourceId,
+        targetId: paneId,
+        direction,
+      });
     }
   };
 
@@ -115,7 +219,7 @@ export function PaneFrame({
         // surface-1 in the gaps so panes "float". Outline-only highlight
         // on drag-over so it never displaces layout.
         borderRadius: "var(--radius-md)",
-        outline: dragOver ? "2px solid var(--accent-bright)" : "none",
+        outline: dropZone ? "2px solid var(--accent-bright)" : "none",
         outlineOffset: -2,
         transition:
           "outline-color var(--motion-instant) var(--ease-out-quart)",
@@ -124,6 +228,7 @@ export function PaneFrame({
       <div
         draggable
         onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
         style={{
           height: HEADER_HEIGHT,
           flexShrink: 0,
@@ -142,6 +247,7 @@ export function PaneFrame({
       >
         <button
           type="button"
+          draggable={false}
           onClick={openReplace}
           title="Change content type"
           style={{
@@ -227,6 +333,7 @@ export function PaneFrame({
 
         <button
           type="button"
+          draggable={false}
           onClick={openSplit}
           title="Split this pane"
           aria-label="Split this pane"
@@ -255,7 +362,15 @@ export function PaneFrame({
         {!isOnly && (
           <button
             type="button"
-            onClick={() => dispatch({ type: "close-pane", paneId })}
+            draggable={false}
+            onClick={() => {
+              if (!session) return;
+              dispatch({
+                type: "close-pane",
+                sessionId: session.id,
+                paneId,
+              });
+            }}
             title="Close pane"
             aria-label="Close pane"
             style={{
@@ -287,18 +402,28 @@ export function PaneFrame({
 
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
         {children}
-        {dragOver && (
+        {/* Drop shield: while any pane is being dragged, this transparent
+            overlay sits above the body and captures dragover/drop events
+            directly. Inner widgets (xterm canvas, CodeMirror, GStack
+            screenshot iframe) often have their own drag handlers that
+            would otherwise swallow these events before they reach our
+            outer wrapper — so the shield is the canonical drop target
+            during a drag and snaps the pane into place reliably. */}
+        {isDragging && (
           <div
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
+            onDrop={onDrop}
             aria-hidden
             style={{
               position: "absolute",
               inset: 0,
-              backgroundColor:
-                "color-mix(in oklch, transparent, var(--accent-bright) 12%)",
-              pointerEvents: "none",
+              backgroundColor: "transparent",
+              zIndex: 20,
             }}
           />
         )}
+        {dropZone && <DropZoneOverlay zone={dropZone} />}
       </div>
 
       <AnimatePresence>
@@ -310,12 +435,42 @@ export function PaneFrame({
             onSplit={onSplit}
             onReplace={onReplace}
             onClose={() => setChooser(null)}
-            workspaceLeafCount={leafCount(workspace)}
+            workspaceLeafCount={workspace ? leafCount(workspace) : 1}
           />
         )}
       </AnimatePresence>
     </div>
   );
+}
+
+/**
+ * Translucent accent overlay covering the half (or whole) of the pane
+ * that the dragged source will land on. Visual key to the user about
+ * what dropping right now will do — a center hover floods the pane
+ * (swap), an edge hover lights up that side (split-and-place).
+ */
+function DropZoneOverlay({ zone }: { zone: DropZone }) {
+  const tint = "color-mix(in oklch, transparent, var(--accent-bright) 18%)";
+  const base = {
+    position: "absolute" as const,
+    pointerEvents: "none" as const,
+    backgroundColor: tint,
+    borderRadius: "var(--radius-md)",
+    transition:
+      "inset var(--motion-instant) var(--ease-out-quart)",
+  };
+  switch (zone) {
+    case "center":
+      return <div aria-hidden style={{ ...base, inset: 0 }} />;
+    case "left":
+      return <div aria-hidden style={{ ...base, top: 0, bottom: 0, left: 0, width: "50%" }} />;
+    case "right":
+      return <div aria-hidden style={{ ...base, top: 0, bottom: 0, right: 0, width: "50%" }} />;
+    case "up":
+      return <div aria-hidden style={{ ...base, left: 0, right: 0, top: 0, height: "50%" }} />;
+    case "down":
+      return <div aria-hidden style={{ ...base, left: 0, right: 0, bottom: 0, height: "50%" }} />;
+  }
 }
 
 function contentDot(content: PaneContent): string {

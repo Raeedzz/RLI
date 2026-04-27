@@ -136,6 +136,39 @@ export function swapLeaves(
   return tree;
 }
 
+/**
+ * Move the leaf with `sourceId` to a new position adjacent to the leaf
+ * with `targetId`. Used by drag-and-drop with edge-zone detection: drop
+ * on a target's left/right edge to land that pane on that side, etc.
+ *
+ * Implementation: pluck the source's content (`PaneContent`) out, drop
+ * the source leaf from the tree, then split the target with the source's
+ * content in the requested direction. The new pane gets a fresh id —
+ * losing the old leaf id is fine since drag-and-drop never preserves
+ * outer identity (xterm/CodeMirror are unmounted by the React key
+ * change anyway).
+ *
+ * No-op if either leaf is missing, source === target, or sourceId is the
+ * tree root (a single-leaf tree has nothing to "move within").
+ */
+export function movePane(
+  root: PaneNode,
+  sourceId: PaneNodeId,
+  targetId: PaneNodeId,
+  direction: SplitDirection,
+): PaneNode {
+  if (sourceId === targetId) return root;
+  const source = findLeaf(root, sourceId);
+  const target = findLeaf(root, targetId);
+  if (!source || !target) return root;
+  const trimmed = closeLeaf(root, sourceId);
+  // closeLeaf is a no-op when source is the only leaf — guard against
+  // re-splitting on the same content (would just look like a no-op too,
+  // but defending here keeps the intent explicit).
+  if (trimmed === root && root.kind === "leaf") return root;
+  return splitLeaf(trimmed, targetId, direction, source.content);
+}
+
 /** Default workspace tree — single terminal. */
 export function defaultWorkspace(): PaneNode {
   return makeLeaf("terminal", "pane-default-terminal");

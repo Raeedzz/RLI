@@ -6,6 +6,7 @@ import {
   type DragEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import { useIsFullscreen } from "@/hooks/useIsFullscreen";
 import { StatusDot } from "@/primitives/StatusDot";
 import { ColorPicker } from "@/primitives/ColorPicker";
 import {
@@ -20,6 +21,8 @@ import {
   useAppState,
   useProjectSessions,
 } from "@/state/AppState";
+import { defaultWorkspaceWithEditor } from "@/state/paneTree";
+import { openProjectDialog } from "@/lib/projectDialog";
 import {
   tagVar,
   type Project,
@@ -58,6 +61,7 @@ export function TopBar() {
   const dispatch = useAppDispatch();
   const { sessions, projects } = useAppState();
   const activeProject = useActiveProject();
+  const isFullscreen = useIsFullscreen();
 
   const openSessionPicker = (id: SessionId, e: ReactMouseEvent) => {
     e.preventDefault();
@@ -119,10 +123,14 @@ export function TopBar() {
           alignItems: "stretch",
           backgroundColor: "var(--surface-1)",
           borderBottom: "var(--border-1)",
-          // macOS overlay-titlebar leaves a 78px gap on the left for traffic lights
-          paddingLeft: 78,
+          // macOS overlay-titlebar leaves a 78px gap on the left for the
+          // traffic-light cluster — but in fullscreen the lights are
+          // hidden, so the tabs can slide flush against the left edge.
+          paddingLeft: isFullscreen ? 0 : 78,
           paddingRight: 0, // flush against window's right edge
           userSelect: "none",
+          transition:
+            "padding-left var(--motion-fast) var(--ease-out-quart)",
         }}
       >
         <SessionTabs onSessionContextMenu={openSessionPicker} />
@@ -163,6 +171,31 @@ function SessionTabs({
   const activeId = project ? state.activeSessionByProject[project.id] : null;
   const [editingId, setEditingId] = useState<SessionId | null>(null);
   const [dropTargetId, setDropTargetId] = useState<SessionId | null>(null);
+  // Track horizontal scroll state so we can fade the edges of the tab
+  // strip when content overflows — without this, ten-plus tabs just
+  // disappear under the project pill with no indication you can scroll.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [overflow, setOverflow] = useState({ left: false, right: false });
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const update = () => {
+      const left = el.scrollLeft > 1;
+      const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+      setOverflow((prev) =>
+        prev.left === left && prev.right === right ? prev : { left, right },
+      );
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => {
+      el.removeEventListener("scroll", update);
+      observer.disconnect();
+    };
+  }, [sessions.length]);
 
   if (!project) return <div />;
 
@@ -194,15 +227,23 @@ function SessionTabs({
 
   return (
     <div
+      ref={scrollRef}
       role="tablist"
       aria-label="Sessions"
       style={{
+        position: "relative",
         display: "flex",
         alignItems: "stretch",
         minWidth: 0,
         flex: 1,
         overflowX: "auto",
         overflowY: "hidden",
+        // Fade the edges when there's more tabs than fit. Using a mask
+        // means the gradient adapts to whatever surface is behind the
+        // header (light or dark, hover or not) without us painting our
+        // own color on top.
+        WebkitMaskImage: maskImageFor(overflow),
+        maskImage: maskImageFor(overflow),
       }}
     >
       {sessions.map((session) => (
@@ -464,6 +505,8 @@ function NewSessionButton({ projectId }: { projectId: ProjectId }) {
         branch: `rli/session-${n}`,
         status: "idle",
         createdAt: Date.now(),
+        workspace: defaultWorkspaceWithEditor(),
+        openFile: null,
       },
     });
   };
@@ -638,7 +681,10 @@ function ProjectSwitcher({
               active={false}
               label="open project…"
               keys="⌘O"
-              onSelect={() => setOpen(false)}
+              onSelect={() => {
+                setOpen(false);
+                void openProjectDialog(dispatch);
+              }}
             />
           </div>
         </div>
@@ -749,4 +795,23 @@ function ProjectMenuItem({
 
 function abbreviatePath(p: string): string {
   return p.replace(/^\/Users\/[^/]+/, "~");
+}
+
+/**
+ * Returns a CSS mask gradient that fades the start/end of the tab strip
+ * when those edges are scrolled past content. Empty string means no mask
+ * — the strip fits without scrolling. Pure-CSS so no extra DOM nodes.
+ */
+function maskImageFor({
+  left,
+  right,
+}: {
+  left: boolean;
+  right: boolean;
+}): string {
+  if (!left && !right) return "none";
+  const FADE = "20px";
+  const start = left ? "transparent" : "black";
+  const end = right ? "transparent" : "black";
+  return `linear-gradient(to right, ${start} 0, black ${FADE}, black calc(100% - ${FADE}), ${end} 100%)`;
 }

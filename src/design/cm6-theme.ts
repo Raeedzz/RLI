@@ -15,27 +15,31 @@ import { EditorView } from "@codemirror/view";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
 
+// Use CSS vars for surface tones so the editor tracks tokens.css —
+// previously these were hardcoded hexes derived from older OKLCH values
+// and had drifted (the old `surface0` was actually surface-1, leaving
+// the editor a noticeable shade lighter than the terminal).
 const COLORS = {
-  surface0:    "#1f1d1a",
-  surface1:    "#26241f",
-  surface2:    "#2f2c27",
-  surface3:    "#39362f",
+  surface0:    "var(--surface-0)",
+  surface1:    "var(--surface-1)",
+  surface2:    "var(--surface-2)",
+  surface3:    "var(--surface-3)",
 
-  borderHairline: "#322f28",
-  borderDefault:  "#3f3b33",
+  borderHairline: "var(--border-hairline)",
+  borderDefault:  "var(--border-default)",
 
-  textPrimary:    "#f3f1ed",
-  textSecondary:  "#b8b4ad",
-  textTertiary:   "#7d7975",
+  textPrimary:    "var(--text-primary)",
+  textSecondary:  "var(--text-secondary)",
+  textTertiary:   "var(--text-tertiary)",
 
-  accent:         "#5897d0",
-  accentMuted:    "#3a4d6a",
+  accent:         "var(--accent)",
+  accentMuted:    "color-mix(in oklch, var(--surface-1), var(--accent) 22%)",
 
-  stateInfo:      "#7eb1d9",
-  stateSuccess:   "#79b07d",
-  stateWarning:   "#d4a558",
-  stateError:     "#d96e5b",
-  stateInfoMuted: "#b87dba",
+  stateInfo:      "var(--state-info)",
+  stateSuccess:   "var(--state-success)",
+  stateWarning:   "var(--state-warning)",
+  stateError:     "var(--state-error)",
+  stateInfoMuted: "color-mix(in oklch, var(--surface-1), var(--state-info) 18%)",
 };
 
 export const cm6Theme = EditorView.theme(

@@ -1,42 +1,35 @@
-import { AnimatePresence } from "motion/react";
 import { TopBar } from "./TopBar";
 import { SplitLayout } from "./SplitLayout";
 import { StatusBar } from "./StatusBar";
 import { ActivityRail } from "./ActivityRail";
 import { CommandPalette } from "@/palette/CommandPalette";
 import { SearchOverlay } from "@/palette/SearchOverlay";
-import { ConnectionsView } from "@/connections/ConnectionsView";
-import { BrowserPane } from "@/browser/BrowserPane";
 import { ApiKeyDialog } from "@/onboarding/ApiKeyDialog";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useSessionSummary } from "@/hooks/useSessionSummary";
-import {
-  useActiveSession,
-  useAppDispatch,
-  useAppState,
-} from "@/state/AppState";
+import { useActiveSession } from "@/state/AppState";
 
 /**
  * Top-level frame:
  *
  *   ┌─────────────────────────────────────────────────────────────┐
  *   │ [● tab] [tab] [+]              project: RLI ▾              │  top bar (36px)
- *   ├─────────────────────────────────────────────────────────────┤
- *   │                                                             │
- *   │   workspace (single agent terminal default)                │
- *   │                                                             │
- *   ├─────────────────────────────────────────────────────────────┤
- *   │ ● rli/branch · subtitle                          ⌘K commands │  status bar (24px)
+ *   ├──┬──────────────────────────────────────────────────────────┤
+ *   │A │ [files | git | mcp]   workspace        [browser?]        │
+ *   │R │  left panel           pane tree        right pane         │
+ *   │  │                                        (when ⌘⇧B on)      │
+ *   ├──┴──────────────────────────────────────────────────────────┤
+ *   │ ● rli/branch · subtitle                ✻ Claude · ⌘K commands │  status bar (24px)
  *   └─────────────────────────────────────────────────────────────┘
  *
- * No left sidebar. ⌘K palette renders above everything.
+ * Files / Git / Skills + MCP share a single left slot — clicking a
+ * tab in the ActivityRail swaps which panel occupies the slot. Browser
+ * lives as a right-side workspace pane, not an overlay.
  */
 export function AppShell() {
   useKeyboardShortcuts();
   const session = useActiveSession();
   useSessionSummary(session?.id ?? null);
-  const { connectionsVisible, browserVisible } = useAppState();
-  const dispatch = useAppDispatch();
 
   return (
     <div
@@ -59,28 +52,11 @@ export function AppShell() {
           position: "relative",
         }}
       >
+        <ActivityRail />
+
         <div style={{ flex: 1, minWidth: 0, position: "relative" }}>
           <SplitLayout />
-
-          <AnimatePresence>
-            {connectionsVisible && (
-              <ConnectionsView
-                onClose={() =>
-                  dispatch({ type: "set-connections", visible: false })
-                }
-              />
-            )}
-            {browserVisible && (
-              <BrowserPane
-                onClose={() =>
-                  dispatch({ type: "set-browser", visible: false })
-                }
-              />
-            )}
-          </AnimatePresence>
         </div>
-
-        <ActivityRail />
       </div>
 
       <StatusBar />

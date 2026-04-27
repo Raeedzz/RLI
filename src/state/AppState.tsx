@@ -1,7 +1,9 @@
 import {
   createContext,
   useContext,
+  useEffect,
   useReducer,
+  useRef,
   type Dispatch,
   type ReactNode,
 } from "react";
@@ -14,10 +16,13 @@ import type {
 import {
   closeLeaf,
   defaultWorkspaceWithEditor,
+  leaves,
+  movePane,
   setLeafContent,
   splitLeaf,
   swapLeaves,
 } from "./paneTree";
+import { loadState, saveState } from "../lib/persistence";
 
 /* ------------------------------------------------------------------
    Stub data for the v1 visual scaffold. Real persistence + project
@@ -48,30 +53,28 @@ const DEFAULT_SESSION: Session = {
   branch: "main",
   status: "idle",
   createdAt: Date.now(),
+  workspace: defaultWorkspaceWithEditor(),
+  openFile: null,
 };
 
-const INITIAL_STATE: AppState = {
+export const INITIAL_STATE: AppState = {
   projects: [DEFAULT_PROJECT],
   sessions: [DEFAULT_SESSION],
   activeProjectId: DEFAULT_PROJECT.id,
   activeSessionByProject: {
     [DEFAULT_PROJECT.id]: DEFAULT_SESSION.id,
   },
-  openFile: null,
   paletteOpen: false,
-  fileTreeVisible: true,
-  connectionsVisible: false,
+  leftPanel: "files",
   searchOpen: false,
-  browserVisible: false,
   apiKeyDialogOpen: false,
-  workspace: defaultWorkspaceWithEditor(),
 };
 
 /* ------------------------------------------------------------------
    Reducer
    ------------------------------------------------------------------ */
 
-function reducer(state: AppState, action: AppAction): AppState {
+export function reducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "set-active-project":
       return { ...state, activeProjectId: action.id };
@@ -113,14 +116,14 @@ function reducer(state: AppState, action: AppAction): AppState {
     case "set-palette":
       return { ...state, paletteOpen: action.open };
 
-    case "toggle-file-tree":
-      return { ...state, fileTreeVisible: !state.fileTreeVisible };
+    case "set-left-panel":
+      return { ...state, leftPanel: action.panel };
 
-    case "toggle-connections":
-      return { ...state, connectionsVisible: !state.connectionsVisible };
-
-    case "set-connections":
-      return { ...state, connectionsVisible: action.visible };
+    case "toggle-left-panel":
+      return {
+        ...state,
+        leftPanel: state.leftPanel === action.panel ? null : action.panel,
+      };
 
     case "toggle-search":
       return { ...state, searchOpen: !state.searchOpen };
@@ -128,11 +131,33 @@ function reducer(state: AppState, action: AppAction): AppState {
     case "set-search":
       return { ...state, searchOpen: action.open };
 
-    case "toggle-browser":
-      return { ...state, browserVisible: !state.browserVisible };
-
-    case "set-browser":
-      return { ...state, browserVisible: action.visible };
+    case "toggle-browser": {
+      // Browser is just another pane — toggle = add or remove a browser
+      // leaf in the active session's workspace tree. That gets us the
+      // same PaneFrame chrome (drag, split, snap, header) for free.
+      const projectId = state.activeProjectId;
+      if (!projectId) return state;
+      const sessionId = state.activeSessionByProject[projectId];
+      if (!sessionId) return state;
+      const session = state.sessions.find((s) => s.id === sessionId);
+      if (!session) return state;
+      const allLeaves = leaves(session.workspace);
+      const browserLeaf = allLeaves.find((l) => l.content === "browser");
+      const nextWorkspace = browserLeaf
+        ? closeLeaf(session.workspace, browserLeaf.id)
+        : splitLeaf(
+            session.workspace,
+            allLeaves[allLeaves.length - 1].id,
+            "right",
+            "browser",
+          );
+      return {
+        ...state,
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId ? { ...s, workspace: nextWorkspace } : s,
+        ),
+      };
+    }
 
     case "toggle-api-key":
       return { ...state, apiKeyDialogOpen: !state.apiKeyDialogOpen };
@@ -141,10 +166,14 @@ function reducer(state: AppState, action: AppAction): AppState {
       return { ...state, apiKeyDialogOpen: action.open };
 
     case "open-file":
-      return { ...state, openFile: action.file };
+      return updateSession(state, action.sessionId, () => ({
+        openFile: action.file,
+      }));
 
     case "close-file":
-      return { ...state, openFile: null };
+      return updateSession(state, action.sessionId, () => ({
+        openFile: null,
+      }));
 
     case "add-session": {
       const next = [...state.sessions, action.session];
@@ -222,38 +251,73 @@ function reducer(state: AppState, action: AppAction): AppState {
     }
 
     case "split-pane":
-      return {
-        ...state,
+      return updateSession(state, action.sessionId, (s) => ({
         workspace: splitLeaf(
-          state.workspace,
+          s.workspace,
           action.paneId,
           action.direction,
           action.content,
         ),
-      };
+      }));
 
     case "close-pane":
-      return {
-        ...state,
-        workspace: closeLeaf(state.workspace, action.paneId),
-      };
+      return updateSession(state, action.sessionId, (s) => ({
+        workspace: closeLeaf(s.workspace, action.paneId),
+      }));
 
     case "set-pane-content":
-      return {
-        ...state,
+      return updateSession(state, action.sessionId, (s) => ({
         workspace: setLeafContent(
-          state.workspace,
+          s.workspace,
           action.paneId,
           action.content,
         ),
-      };
+      }));
 
     case "swap-panes":
+      return updateSession(state, action.sessionId, (s) => ({
+        workspace: swapLeaves(s.workspace, action.aId, action.bId),
+      }));
+
+    case "move-pane":
+      return updateSession(state, action.sessionId, (s) => ({
+        workspace: movePane(
+          s.workspace,
+          action.sourceId,
+          action.targetId,
+          action.direction,
+        ),
+      }));
+
+    case "hydrate":
       return {
         ...state,
-        workspace: swapLeaves(state.workspace, action.aId, action.bId),
+        projects: action.projects,
+        sessions: action.sessions,
+        activeProjectId: action.activeProjectId,
+        activeSessionByProject: action.activeSessionByProject,
       };
   }
+}
+
+/**
+ * Apply a partial update to one session by id. Used by pane and file
+ * mutations so non-targeted sessions keep their reference (React skips
+ * re-renders that depend on them).
+ */
+function updateSession(
+  state: AppState,
+  sessionId: string,
+  patch: (s: Session) => Partial<Session>,
+): AppState {
+  let changed = false;
+  const next = state.sessions.map((s) => {
+    if (s.id !== sessionId) return s;
+    changed = true;
+    return { ...s, ...patch(s) };
+  });
+  if (!changed) return state;
+  return { ...state, sessions: next };
 }
 
 /* ------------------------------------------------------------------
@@ -263,8 +327,72 @@ function reducer(state: AppState, action: AppAction): AppState {
 const AppStateContext = createContext<AppState | null>(null);
 const AppDispatchContext = createContext<Dispatch<AppAction> | null>(null);
 
+/**
+ * Debounce window for autosave. 400 ms is short enough that a Cmd-Q
+ * after a change still flushes (Tauri's window-close fires the unload
+ * event after this) but long enough that rapid pane shuffling doesn't
+ * pin the disk.
+ */
+const SAVE_DEBOUNCE_MS = 400;
+
 export function AppStateProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
+  // Suppress the autosave that would otherwise fire immediately after
+  // the hydrate dispatch (no real change, but still a state transition).
+  const hydratedRef = useRef(false);
+
+  // Hydrate on mount — fire-and-forget. If load fails or there's no
+  // saved state, the INITIAL_STATE default sticks.
+  useEffect(() => {
+    let cancelled = false;
+    loadState()
+      .then((persisted) => {
+        if (cancelled || !persisted) {
+          hydratedRef.current = true;
+          return;
+        }
+        dispatch({
+          type: "hydrate",
+          projects: persisted.projects,
+          sessions: persisted.sessions,
+          activeProjectId: persisted.activeProjectId,
+          activeSessionByProject: persisted.activeSessionByProject,
+        });
+        // Mark hydrated AFTER the dispatch lands so the save effect
+        // that observes the post-hydrate state doesn't re-write the
+        // same blob.
+        requestAnimationFrame(() => {
+          hydratedRef.current = true;
+        });
+      })
+      .catch(() => {
+        hydratedRef.current = true;
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Run once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Save the persistent slice whenever it changes — debounced.
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    const timer = window.setTimeout(() => {
+      saveState(state).catch(() => {
+        // Best-effort. A failed save shouldn't crash the app; the next
+        // change retries automatically. We could surface a toast once
+        // we have toast infra, but persistent failures here are rare
+        // (write-protected app data dir is the only realistic cause).
+      });
+    }, SAVE_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [
+    state.projects,
+    state.sessions,
+    state.activeProjectId,
+    state.activeSessionByProject,
+  ]);
 
   return (
     <AppStateContext.Provider value={state}>

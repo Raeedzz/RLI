@@ -6,24 +6,33 @@ import {
   SearchIcon,
   SettingsIcon,
 } from "@/primitives/Icon";
-import { useAppDispatch, useAppState } from "@/state/AppState";
+import {
+  useActiveSession,
+  useAppDispatch,
+  useAppState,
+} from "@/state/AppState";
+import { leaves } from "@/state/paneTree";
 import type { ReactNode } from "react";
 
 /**
- * 40px vertical rail on the right edge.
+ * 40px vertical rail on the left edge.
  *
  * Six icon buttons that summon the major panels: files, search,
  * connections, browser, git (todo), settings. Each shows its
  * keyboard shortcut on hover. The active panel's icon gets a
- * 2px steel-blue strip flush to the screen's right edge.
- *
- * Lives at the right edge — the project pill in the TopBar still
- * floats above it visually thanks to z-index ordering, but in the
- * column layout the rail anchors that side.
+ * 2px steel-blue strip flush to the rail's inner (right) edge so
+ * it points toward the workspace it controls.
  */
 export function ActivityRail() {
   const state = useAppState();
+  const session = useActiveSession();
   const dispatch = useAppDispatch();
+  // Derive browser visibility from the workspace tree so it stays in
+  // sync whether the browser was opened via this button, dragged into
+  // place, or closed via the pane × button.
+  const browserVisible = session
+    ? leaves(session.workspace).some((l) => l.content === "browser")
+    : false;
 
   return (
     <aside
@@ -32,7 +41,7 @@ export function ActivityRail() {
         flexShrink: 0,
         height: "100%",
         backgroundColor: "var(--surface-1)",
-        borderLeft: "var(--border-1)",
+        borderRight: "var(--border-1)",
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
@@ -43,12 +52,36 @@ export function ActivityRail() {
       aria-label="Workspace tools"
     >
       <RailButton
-        active={state.fileTreeVisible}
+        active={state.leftPanel === "files"}
         label="Files"
         chord="⌘B"
-        onClick={() => dispatch({ type: "toggle-file-tree" })}
+        onClick={() =>
+          dispatch({ type: "toggle-left-panel", panel: "files" })
+        }
       >
         <FolderIcon />
+      </RailButton>
+
+      <RailButton
+        active={state.leftPanel === "git"}
+        label="Source control"
+        chord="⌃⇧G"
+        onClick={() =>
+          dispatch({ type: "toggle-left-panel", panel: "git" })
+        }
+      >
+        <GitIcon />
+      </RailButton>
+
+      <RailButton
+        active={state.leftPanel === "connections"}
+        label="Skills & MCP"
+        chord="⌘⇧;"
+        onClick={() =>
+          dispatch({ type: "toggle-left-panel", panel: "connections" })
+        }
+      >
+        <ConnectionsIcon />
       </RailButton>
 
       <RailButton
@@ -61,16 +94,7 @@ export function ActivityRail() {
       </RailButton>
 
       <RailButton
-        active={state.connectionsVisible}
-        label="Connections"
-        chord="⌘⇧;"
-        onClick={() => dispatch({ type: "toggle-connections" })}
-      >
-        <ConnectionsIcon />
-      </RailButton>
-
-      <RailButton
-        active={state.browserVisible}
+        active={browserVisible}
         label="Browser"
         chord="⌘⇧B"
         onClick={() => dispatch({ type: "toggle-browser" })}
@@ -79,18 +103,6 @@ export function ActivityRail() {
       </RailButton>
 
       <div style={{ flex: 1 }} />
-
-      <RailButton
-        active={false}
-        label="Git"
-        chord="⌘G"
-        onClick={() => {
-          /* Git panel mounts inline in v2; for now this is a placeholder */
-        }}
-        disabled
-      >
-        <GitIcon />
-      </RailButton>
 
       <RailButton
         active={state.apiKeyDialogOpen}

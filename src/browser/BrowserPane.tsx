@@ -74,8 +74,11 @@ export function BrowserPane({ onClose, embedded = false }: Props) {
     return () => window.clearInterval(t);
   }, [health?.ok, status?.ready]);
 
-  // Esc to close
+  // Esc to close — overlay mode only. In embedded (in-pane) mode the
+  // PaneFrame's × is the canonical way to close, and a global Esc would
+  // collide with the user pressing Esc inside the pane for other reasons.
   useEffect(() => {
+    if (embedded) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -84,7 +87,7 @@ export function BrowserPane({ onClose, embedded = false }: Props) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, embedded]);
 
   const overlayStyle = {
     position: "absolute" as const,
@@ -145,15 +148,20 @@ function Header({
   onClose: () => void;
   embedded?: boolean;
 }) {
+  // Embedded mode: thin URL bar only (PaneFrame gives the title row).
+  // Overlay mode: full title + URL row.
+  const height = embedded ? 26 : 36;
   return (
     <div
       style={{
-        height: 36,
+        height,
+        flexShrink: 0,
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
         padding: "0 var(--space-3)",
         borderBottom: "var(--border-1)",
+        backgroundColor: "var(--surface-1)",
         userSelect: "none",
       }}
     >
@@ -174,17 +182,19 @@ function Header({
                 : "var(--text-tertiary)"
           }
         />
-        <span
-          style={{
-            fontFamily: "var(--font-sans)",
-            fontSize: "var(--text-sm)",
-            fontWeight: "var(--weight-medium)",
-            color: "var(--text-primary)",
-            letterSpacing: "var(--tracking-tight)",
-          }}
-        >
-          browser
-        </span>
+        {!embedded && (
+          <span
+            style={{
+              fontFamily: "var(--font-sans)",
+              fontSize: "var(--text-sm)",
+              fontWeight: "var(--weight-medium)",
+              color: "var(--text-primary)",
+              letterSpacing: "var(--tracking-tight)",
+            }}
+          >
+            browser
+          </span>
+        )}
         <span
           style={{
             fontFamily: "var(--font-mono)",
@@ -196,7 +206,7 @@ function Header({
             minWidth: 0,
           }}
         >
-          {status?.url ?? (health?.ok ? "no url" : "")}
+          {status?.url ?? (health?.ok ? "no url" : "daemon offline")}
         </span>
       </div>
 
@@ -207,7 +217,7 @@ function Header({
             onClick={() => void gstack.openInBrowser()}
             title="open in real browser"
             style={{
-              height: 22,
+              height: 20,
               padding: "0 var(--space-2)",
               fontFamily: "var(--font-sans)",
               fontSize: "var(--text-2xs)",
@@ -215,7 +225,7 @@ function Header({
               backgroundColor: "transparent",
               border: "var(--border-1)",
               borderRadius: "var(--radius-sm)",
-              cursor: "default",
+              cursor: "pointer",
             }}
           >
             open
@@ -234,7 +244,7 @@ function Header({
               fontFamily: "var(--font-mono)",
               fontSize: "var(--text-md)",
               borderRadius: "var(--radius-sm)",
-              cursor: "default",
+              cursor: "pointer",
             }}
           >
             ×

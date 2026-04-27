@@ -13,12 +13,13 @@ mod fs;
 mod gemini;
 mod git;
 mod memory;
-mod pty;
 mod search;
+mod state;
+mod term;
 
 use gemini::GeminiState;
 use memory::MemoryState;
-use pty::PtyState;
+use term::TerminalState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -28,15 +29,15 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
-        .manage(PtyState::default())
+        .manage(TerminalState::default())
         .manage(GeminiState::default())
         .manage(MemoryState::default())
         .invoke_handler(tauri::generate_handler![
-            // PTY (Task #6)
-            pty::pty_start,
-            pty::pty_write,
-            pty::pty_resize,
-            pty::pty_close,
+            // Terminal (alacritty_terminal + custom React renderer)
+            term::term_start,
+            term::term_input,
+            term::term_resize,
+            term::term_close,
             // Gemini (Task #11)
             gemini::gemini_set_key,
             gemini::gemini_clear_key,
@@ -71,6 +72,10 @@ pub fn run() {
             fs::fs_cwd,
             fs::system_open,
             fs::system_open_with,
+            // State persistence
+            state::state_save,
+            state::state_load,
+            state::state_clear,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RLI");
