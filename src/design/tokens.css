@@ -37,17 +37,19 @@
      COLOR — OKLCH, warm-tinted dark neutrals (hue 60, chroma 0.005)
      ============================================================ */
 
-  /* Surfaces — depth via lightness, not shadow */
-  --surface-0: oklch(11% 0.005 60);  /* terminal/editor backgrounds */
-  --surface-1: oklch(14% 0.005 60);  /* app background, panel backs */
-  --surface-2: oklch(17% 0.005 60);  /* raised — active tabs, palette */
-  --surface-3: oklch(21% 0.005 60);  /* tooltips, dropdowns, hover-on-2 */
-  --surface-4: oklch(26% 0.005 60);  /* hover-on-3 (rare) */
+  /* Surfaces — depth via lightness, not shadow.
+     Warm-tinted greys (chroma 0.008, hue 60). Lifted from pure black so
+     the app reads like a tuned dark instrument, not Apple Terminal. */
+  --surface-0: oklch(16% 0.008 60);  /* terminal/editor backgrounds */
+  --surface-1: oklch(19% 0.008 60);  /* app background, panel backs */
+  --surface-2: oklch(23% 0.008 60);  /* raised — active tabs, palette */
+  --surface-3: oklch(27% 0.008 60);  /* tooltips, dropdowns, hover-on-2 */
+  --surface-4: oklch(31% 0.008 60);  /* hover-on-3 (rare) */
 
   /* Borders — hairlines */
-  --border-hairline: oklch(20% 0.005 60);
-  --border-default:  oklch(26% 0.005 60);
-  --border-strong:   oklch(34% 0.005 60);
+  --border-hairline: oklch(24% 0.008 60);
+  --border-default:  oklch(30% 0.008 60);
+  --border-strong:   oklch(38% 0.008 60);
 
   /* Text */
   --text-primary:    oklch(95% 0.005 60);
@@ -62,17 +64,32 @@
   --accent-press:  oklch(62% 0.13 240);
   --accent-muted:  oklch(40% 0.08 240);
   --accent-focus:  oklch(72% 0.13 240 / 0.4);
+  /* Brighter accent for active-state icons — chroma bumped, lightness
+     up — reads as "on" but never neon. */
+  --accent-bright: oklch(74% 0.16 240);
 
-  /* Diagnostic colors */
+  /* Diagnostic colors — restrained vibrancy */
   --state-error:    oklch(64% 0.16 25);
   --state-warning:  oklch(78% 0.13 75);
   --state-success:  oklch(70% 0.13 145);
   --state-info:     oklch(72% 0.10 220);
 
+  --state-error-bright:   oklch(72% 0.18  25);
+  --state-warning-bright: oklch(82% 0.15  75);
+  --state-success-bright: oklch(76% 0.16 145);
+
   --state-error-bg:    oklch(22% 0.05 25);
   --state-warning-bg:  oklch(22% 0.04 75);
   --state-success-bg:  oklch(20% 0.04 145);
   --state-info-bg:     oklch(20% 0.03 220);
+
+  /* Pre-mixed surface tints — chrome warms toward the accent without
+     ever drowning the dark grey. Saves a color-mix() everywhere. */
+  --surface-accent-soft:   color-mix(in oklch, var(--surface-1), var(--accent) 6%);
+  --surface-accent-tinted: color-mix(in oklch, var(--surface-2), var(--accent) 10%);
+  --surface-success-soft:  color-mix(in oklch, var(--surface-1), var(--state-success) 8%);
+  --surface-warning-soft:  color-mix(in oklch, var(--surface-1), var(--state-warning) 8%);
+  --surface-error-soft:    color-mix(in oklch, var(--surface-1), var(--state-error) 8%);
 
   /* Diff (git panel) */
   --diff-add-bg:     oklch(22% 0.04 145);
@@ -83,6 +100,22 @@
 
   /* Modal backdrop — the only legit alpha besides focus ring */
   --backdrop: oklch(0% 0 0 / 0.45);
+
+  /* ============================================================
+     TAG PALETTE — user-assignable colors for sessions and projects.
+     Workshop-pigment names. Restrained chroma (0.10–0.13), consistent
+     ~64% lightness so no color screams louder than another. Distinct
+     on the warm-dark surfaces, none in the AI-slop neon zone.
+     ============================================================ */
+
+  --tag-default: var(--accent);          /* steel blue 240 — system default */
+  --tag-rust:    oklch(66% 0.13  25);    /* warm red-orange */
+  --tag-amber:   oklch(70% 0.13  60);    /* burnt orange */
+  --tag-moss:    oklch(64% 0.12 135);    /* deep sage */
+  --tag-pine:    oklch(60% 0.11 180);    /* shadow teal */
+  --tag-slate:   oklch(66% 0.10 215);    /* dusk blue-gray */
+  --tag-iris:    oklch(66% 0.13 275);    /* periwinkle indigo */
+  --tag-rose:    oklch(66% 0.12 340);    /* dusty rose */
 
   /* ============================================================
      SPACING — 4pt base
@@ -104,13 +137,14 @@
   --space-20:  80px;
 
   /* ============================================================
-     RADII — tight, desktop precision
+     RADII — friendlier curves, still desktop-precise
      ============================================================ */
 
-  --radius-xs:   2px;
-  --radius-sm:   4px;
-  --radius-md:   6px;
-  --radius-lg:   8px;
+  --radius-xs:   3px;
+  --radius-sm:   5px;
+  --radius-md:   8px;
+  --radius-lg:   12px;
+  --radius-xl:   16px;
   --radius-pill: 9999px;
 
   /* ============================================================

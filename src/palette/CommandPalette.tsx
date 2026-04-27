@@ -144,6 +144,12 @@ function PaletteContents({ onClose }: { onClose: () => void }) {
           /* Task #8 */
         },
       },
+      {
+        id: "set-api-key",
+        label: "Set Gemini API key…",
+        hint: "stored in macOS Keychain",
+        run: () => dispatch({ type: "set-api-key-dialog", open: true }),
+      },
     ],
     [dispatch],
   );

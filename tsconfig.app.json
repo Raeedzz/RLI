@@ -22,7 +22,8 @@
       "@/*": ["./src/*"],
       "@design/*": ["./src/design/*"]
     },
-    "baseUrl": "."
+    "baseUrl": ".",
+    "types": ["bun"]
   },
   "include": ["src"]
 }

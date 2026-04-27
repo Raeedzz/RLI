@@ -1,14 +1,25 @@
 /// RLI Tauri entry point.
 ///
 /// Plugin set is the minimum needed for v1 features:
-///   - shell:   spawn `git`, `rg`, `ast-grep`, etc.
+///   - shell:   spawn `git`, `rg`, `ast-grep`, etc. from the frontend
 ///   - fs:      read project files, write per-session config
 ///   - dialog:  "Open Folder" picker
 ///   - os:      platform queries (we're macOS-only v1, but used for paths)
-///   - process: required for the auto-update plugin's restart hook (Task #18)
+///   - process: required for the auto-update plugin's restart hook
 ///
-/// Per-feature plumbing (PTY, git, Gemini, memory, MCP scan, GStack client)
-/// is added in their respective tasks under `crate::commands::*`.
+/// Per-feature plumbing lives in `crate::*` modules — registered below.
+mod connections;
+mod fs;
+mod gemini;
+mod git;
+mod memory;
+mod pty;
+mod search;
+
+use gemini::GeminiState;
+use memory::MemoryState;
+use pty::PtyState;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -17,9 +28,49 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
+        .manage(PtyState::default())
+        .manage(GeminiState::default())
+        .manage(MemoryState::default())
         .invoke_handler(tauri::generate_handler![
-            // Tauri commands registered here as features land.
-            // Task #6 → pty::*, Task #8 → git::*, Task #11 → gemini::*, etc.
+            // PTY (Task #6)
+            pty::pty_start,
+            pty::pty_write,
+            pty::pty_resize,
+            pty::pty_close,
+            // Gemini (Task #11)
+            gemini::gemini_set_key,
+            gemini::gemini_clear_key,
+            gemini::gemini_key_status,
+            gemini::gemini_generate,
+            gemini::gemini_embed,
+            // Memory (Task #12)
+            memory::memory_store,
+            memory::memory_recall,
+            memory::memory_delete,
+            // Git (Task #8)
+            git::git_status,
+            git::git_diff,
+            git::git_stage,
+            git::git_unstage,
+            git::git_commit,
+            git::git_push,
+            git::git_branch_current,
+            git::git_worktree_add,
+            git::git_worktree_remove,
+            git::git_log,
+            git::git_ai_commit_message,
+            // Connections (Task #10)
+            connections::connections_scan,
+            // Search (Task #15)
+            search::search_rg,
+            search::search_ast_grep,
+            // Filesystem
+            fs::fs_read_dir,
+            fs::fs_read_text_file,
+            fs::fs_write_text_file,
+            fs::fs_cwd,
+            fs::system_open,
+            fs::system_open_with,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RLI");

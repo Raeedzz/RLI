@@ -37,7 +37,7 @@
   "bundle": {
     "active": true,
     "targets": ["dmg", "app"],
-    "icon": [],
+    "icon": ["icons/icon.png"],
     "macOS": {
       "minimumSystemVersion": "12.0",
       "frameworks": [],

@@ -1,15 +1,18 @@
-import { useActiveSession } from "@/state/AppState";
+import { useActiveProject, useActiveSession } from "@/state/AppState";
+import { tagVar } from "@/state/types";
 
 /**
  * Always-on 24px context strip at the bottom.
  *
- * Now carries the active session's live subtitle (the hero feature) —
- * since session tabs at top are single-line and don't show subtitles.
- *
- *   ● rli/fix-oauth-redirect-bug · Refactoring AuthProvider…       ⌘K commands
+ * Carries the active session's live subtitle plus a 2px tag-colored
+ * left strip that mirrors the project's identity color — so the user
+ * gets a quiet visual cue of which project they're in without another
+ * label.
  */
 export function StatusBar() {
   const session = useActiveSession();
+  const project = useActiveProject();
+  const projectColor = tagVar(project?.color);
 
   return (
     <footer
@@ -19,9 +22,10 @@ export function StatusBar() {
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
-        padding: "0 var(--space-3)",
+        padding: "0 var(--space-3) 0 var(--space-4)",
         backgroundColor: "var(--surface-1)",
         borderTop: "var(--border-1)",
+        boxShadow: `inset 2px 0 0 0 ${projectColor}`,
         fontFamily: "var(--font-sans)",
         fontSize: "var(--text-2xs)",
         color: "var(--text-tertiary)",
@@ -110,9 +114,9 @@ function Dot({ color }: { color: string }) {
 }
 
 function statusColor(s: "idle" | "streaming" | "error"): string {
-  if (s === "streaming") return "var(--accent)";
-  if (s === "error") return "var(--state-error)";
-  return "var(--text-tertiary)";
+  if (s === "streaming") return "var(--accent-bright)";
+  if (s === "error") return "var(--state-error-bright)";
+  return "var(--state-success)";
 }
 
 function statusLabel(s: "idle" | "streaming" | "error"): string {

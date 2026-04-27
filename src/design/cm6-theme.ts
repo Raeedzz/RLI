@@ -16,13 +16,13 @@ import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
 
 const COLORS = {
-  surface0:    "#161513",
-  surface1:    "#1c1b18",
-  surface2:    "#22211e",
-  surface3:    "#2b2a26",
+  surface0:    "#1f1d1a",
+  surface1:    "#26241f",
+  surface2:    "#2f2c27",
+  surface3:    "#39362f",
 
-  borderHairline: "#2a2925",
-  borderDefault:  "#363430",
+  borderHairline: "#322f28",
+  borderDefault:  "#3f3b33",
 
   textPrimary:    "#f3f1ed",
   textSecondary:  "#b8b4ad",
@@ -51,7 +51,10 @@ export const cm6Theme = EditorView.theme(
     ".cm-content": {
       caretColor: COLORS.accent,
       fontVariantLigatures: "none",
-      padding: "8px 0",
+      padding: "10px 0",
+    },
+    ".cm-line": {
+      padding: "0 12px 0 4px",
     },
     ".cm-cursor, .cm-dropCursor": {
       borderLeftColor: COLORS.accent,
@@ -64,18 +67,20 @@ export const cm6Theme = EditorView.theme(
     ".cm-gutters": {
       backgroundColor: COLORS.surface0,
       color: COLORS.textTertiary,
-      borderRight: `1px solid ${COLORS.borderHairline}`,
+      borderRight: "none",
+      paddingRight: "4px",
     },
     ".cm-activeLineGutter": {
-      backgroundColor: COLORS.surface1,
+      backgroundColor: "transparent",
       color: COLORS.textSecondary,
     },
     ".cm-activeLine": {
-      backgroundColor: "rgba(255, 255, 255, 0.015)", // barely-there active row
+      backgroundColor: "rgba(255, 255, 255, 0.025)",
     },
     ".cm-lineNumbers .cm-gutterElement": {
-      padding: "0 var(--space-3, 12px) 0 var(--space-2, 8px)",
+      padding: "0 8px 0 12px",
       fontVariantNumeric: "tabular-nums",
+      minWidth: "2ch",
     },
     ".cm-foldGutter .cm-gutterElement": {
       color: COLORS.textTertiary,

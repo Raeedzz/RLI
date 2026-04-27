@@ -3,6 +3,9 @@ import type { SessionStatus } from "@/state/types";
 
 interface Props {
   status: SessionStatus;
+  /** Optional color override (CSS color expression). When set, replaces the
+   *  status-derived color. The pulse animation for `streaming` still applies. */
+  color?: string;
   size?: number;
 }
 
@@ -13,15 +16,15 @@ const STATUS_COLOR: Record<SessionStatus, string> = {
 };
 
 /**
- * 6px dot used in session tabs and pane headers to indicate agent status.
+ * 6px dot used in session tabs, project pill, status bar.
  * Pulses opacity when streaming (CSS keyframe `rli-pulse` from motion.css).
  */
-export function StatusDot({ status, size = 6 }: Props) {
+export function StatusDot({ status, color, size = 6 }: Props) {
   const style: CSSProperties = {
     width: size,
     height: size,
     borderRadius: "var(--radius-pill)",
-    backgroundColor: STATUS_COLOR[status],
+    backgroundColor: color ?? STATUS_COLOR[status],
     flexShrink: 0,
     transition: "background-color var(--motion-base) var(--ease-out-quart)",
   };

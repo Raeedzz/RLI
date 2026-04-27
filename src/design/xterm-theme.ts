@@ -12,11 +12,11 @@
 import type { ITheme } from "@xterm/xterm";
 
 export const xtermTheme: ITheme = {
-  // Surfaces
-  background: "#161513",      // surface-0
+  // Surfaces — warm dark grey, not Apple-Terminal black
+  background: "#1f1d1a",      // surface-0
   foreground: "#f3f1ed",      // text-primary
   cursor: "#5897d0",          // accent
-  cursorAccent: "#161513",    // contrast against cursor
+  cursorAccent: "#1f1d1a",    // contrast against cursor
   selectionBackground: "#3a4d6a",  // accent-muted, ~40% lightness
   selectionForeground: "#f3f1ed",
 
