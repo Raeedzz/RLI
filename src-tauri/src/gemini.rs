@@ -6,9 +6,9 @@
 //!   - session naming + tab summaries (Task #13)
 //!   - memory layer embeddings (Task #12)
 //!
-//! API key is stored in the macOS Keychain via the `keyring` crate.
-//! No proxy server, no SDK bloat — just `reqwest` against the public
-//! `generativelanguage.googleapis.com` endpoint.
+//! API key is stored in the macOS Keychain with a `USER_PRESENCE`
+//! access control so reads route through Touch ID (passcode fallback)
+//! instead of the user's account password. See `crate::keychain`.
 //!
 //! v1 is non-streaming: one `gemini_generate` call returns full text
 //! when ready. Latency on Flash-Lite for 50–200-token outputs is
@@ -18,7 +18,6 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -76,15 +75,19 @@ fn classify_http_error(status: reqwest::StatusCode, body: &str) -> String {
    Key management
    ------------------------------------------------------------------ */
 
-fn keyring_entry() -> Result<Entry, String> {
-    Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| e.to_string())
+#[cfg(target_os = "macos")]
+fn load_key_from_keychain() -> Option<String> {
+    crate::keychain::load(KEYRING_SERVICE, KEYRING_USER)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn load_key_from_keychain() -> Option<String> {
-    keyring_entry()
-        .ok()
-        .and_then(|e| e.get_password().ok())
-        .filter(|s| !s.trim().is_empty())
+    // Non-macOS: no biometric backend yet. Fall back to env var so the
+    // dev workflow on Linux/Windows still works.
+    std::env::var("GEMINI_API_KEY").ok().filter(|s| !s.trim().is_empty())
 }
 
 #[tauri::command]
@@ -93,18 +96,25 @@ pub fn gemini_set_key(state: State<GeminiState>, key: String) -> Result<(), Stri
     if trimmed.is_empty() {
         return Err("API key is empty".into());
     }
-    keyring_entry()?
-        .set_password(&trimmed)
-        .map_err(|e| e.to_string())?;
-    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    *inner = Some(Client::new(trimmed));
-    Ok(())
+    #[cfg(target_os = "macos")]
+    crate::keychain::save_with_biometry(KEYRING_SERVICE, KEYRING_USER, &trimmed)?;
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Err("Setting API key requires macOS in this build".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        *inner = Some(Client::new(trimmed));
+        Ok(())
+    }
 }
 
 #[tauri::command]
 pub fn gemini_clear_key(state: State<GeminiState>) -> Result<(), String> {
-    if let Ok(entry) = keyring_entry() {
-        let _ = entry.delete_credential();
+    #[cfg(target_os = "macos")]
+    {
+        let _ = crate::keychain::delete(KEYRING_SERVICE, KEYRING_USER);
     }
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     *inner = None;

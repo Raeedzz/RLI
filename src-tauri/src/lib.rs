@@ -12,6 +12,8 @@ mod connections;
 mod fs;
 mod gemini;
 mod git;
+#[cfg(target_os = "macos")]
+mod keychain;
 mod memory;
 mod search;
 mod state;

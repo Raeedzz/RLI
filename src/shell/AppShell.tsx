@@ -1,4 +1,4 @@
-import { TopBar } from "./TopBar";
+import { WindowChrome } from "./WindowChrome";
 import { SplitLayout } from "./SplitLayout";
 import { StatusBar } from "./StatusBar";
 import { ActivityRail } from "./ActivityRail";
@@ -12,19 +12,23 @@ import { useActiveSession } from "@/state/AppState";
 /**
  * Top-level frame:
  *
- *   ┌─────────────────────────────────────────────────────────────┐
- *   │ [● tab] [tab] [+]              project: RLI ▾              │  top bar (36px)
- *   ├──┬──────────────────────────────────────────────────────────┤
- *   │A │ [files | git | mcp]   workspace        [browser?]        │
- *   │R │  left panel           pane tree        right pane         │
- *   │  │                                        (when ⌘⇧B on)      │
- *   ├──┴──────────────────────────────────────────────────────────┤
- *   │ ● rli/branch · subtitle                ✻ Claude · ⌘K commands │  status bar (24px)
- *   └─────────────────────────────────────────────────────────────┘
+ *   ┌──────────────────────────────────────────────────────────┐
+ *   │ ●●●         [⌕  Search      ⌘⇧F]              [⚙]        │  chrome (28px)
+ *   ├──┬──────────┬────────────────────────────────────────────┤
+ *   │  │          │ [● tab] [tab] [+]      [project: RLI ▾]   │  tabs over workspace
+ *   │AR│  left    │────────────────────────────────────────────│
+ *   │  │  panel   │                                             │
+ *   │  │          │   workspace                                │
+ *   │  │          │                                             │
+ *   ├──┴──────────┴────────────────────────────────────────────┤
+ *   │ ● rli/branch · subtitle           ✻ Claude · ⌘K commands  │  status bar (24px)
+ *   └──────────────────────────────────────────────────────────┘
  *
- * Files / Git / Skills + MCP share a single left slot — clicking a
- * tab in the ActivityRail swaps which panel occupies the slot. Browser
- * lives as a right-side workspace pane, not an overlay.
+ * Activity rail and the left panel run full height from the chrome
+ * down to the status bar. The session tabs only span the workspace
+ * column on the right — that's how Cursor / VS Code arrange tabs so
+ * they sit "above the file you're editing" rather than across the
+ * whole window.
  */
 export function AppShell() {
   useKeyboardShortcuts();
@@ -42,7 +46,7 @@ export function AppShell() {
         overflow: "hidden",
       }}
     >
-      <TopBar />
+      <WindowChrome />
 
       <div
         style={{

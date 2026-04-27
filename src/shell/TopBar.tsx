@@ -6,7 +6,6 @@ import {
   type DragEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { useIsFullscreen } from "@/hooks/useIsFullscreen";
 import { StatusDot } from "@/primitives/StatusDot";
 import { ColorPicker } from "@/primitives/ColorPicker";
 import {
@@ -61,7 +60,6 @@ export function TopBar() {
   const dispatch = useAppDispatch();
   const { sessions, projects } = useAppState();
   const activeProject = useActiveProject();
-  const isFullscreen = useIsFullscreen();
 
   const openSessionPicker = (id: SessionId, e: ReactMouseEvent) => {
     e.preventDefault();
@@ -123,14 +121,11 @@ export function TopBar() {
           alignItems: "stretch",
           backgroundColor: "var(--surface-1)",
           borderBottom: "var(--border-1)",
-          // macOS overlay-titlebar leaves a 78px gap on the left for the
-          // traffic-light cluster — but in fullscreen the lights are
-          // hidden, so the tabs can slide flush against the left edge.
-          paddingLeft: isFullscreen ? 0 : 78,
-          paddingRight: 0, // flush against window's right edge
+          // Traffic-light cluster lives one strip up in <WindowChrome>,
+          // so the tabs row sits flush against the window's left edge.
+          paddingLeft: 0,
+          paddingRight: 0,
           userSelect: "none",
-          transition:
-            "padding-left var(--motion-fast) var(--ease-out-quart)",
         }}
       >
         <SessionTabs onSessionContextMenu={openSessionPicker} />

@@ -1,10 +1,13 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from "react";
 
 /**
@@ -21,17 +24,38 @@ import {
  * over its body content (xterm/CodeMirror/iframe) — those widgets have
  * their own drag handlers that can swallow events before they reach
  * our wrapper, so the shield captures drag events directly.
+ *
+ * Why we expose both a ref and state: HTML5 D&D requires `dragover` to
+ * call `preventDefault()` synchronously to keep the drop alive. React
+ * state from context only flips after a re-render commits — by then,
+ * the very first few `dragover` events have already passed and missed
+ * their `preventDefault` window, so the browser silently refuses to
+ * fire `drop` at all. The ref is updated synchronously in `setDragging`
+ * so neighbor panes' `dragover` handlers can read it on the very next
+ * tick, no matter what React's reconciler is doing.
  */
 
 interface PaneDragContextValue {
   isDragging: boolean;
+  /**
+   * Mutable handle that mirrors `isDragging` but is updated
+   * synchronously so `dragover` can read it before React commits the
+   * matching state transition.
+   */
+  draggingRef: RefObject<boolean>;
   setDragging: (value: boolean) => void;
 }
 
 const PaneDragContext = createContext<PaneDragContextValue | null>(null);
 
 export function PaneDragProvider({ children }: { children: ReactNode }) {
-  const [isDragging, setDragging] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const draggingRef = useRef(false);
+
+  const setDragging = useCallback((value: boolean) => {
+    draggingRef.current = value;
+    setIsDragging(value);
+  }, []);
 
   // Belt-and-suspenders: even if a `dragend` listener is missed (e.g.
   // the user drops on something completely outside any pane), the
@@ -46,11 +70,11 @@ export function PaneDragProvider({ children }: { children: ReactNode }) {
       window.removeEventListener("dragend", clear);
       window.removeEventListener("drop", clear);
     };
-  }, [isDragging]);
+  }, [isDragging, setDragging]);
 
   const value = useMemo(
-    () => ({ isDragging, setDragging }),
-    [isDragging],
+    () => ({ isDragging, draggingRef, setDragging }),
+    [isDragging, setDragging],
   );
 
   return (
@@ -62,7 +86,16 @@ export function PaneDragProvider({ children }: { children: ReactNode }) {
 
 export function usePaneDrag(): PaneDragContextValue {
   const ctx = useContext(PaneDragContext);
+  if (ctx) return ctx;
   // Provider not mounted (e.g. unit tests) — return a no-op shape so
-  // PaneFrame still renders without crashing.
-  return ctx ?? { isDragging: false, setDragging: () => {} };
+  // PaneFrame still renders without crashing. Constant ref so the
+  // shape is stable across renders.
+  return FALLBACK;
 }
+
+const FALLBACK_REF: RefObject<boolean> = { current: false };
+const FALLBACK: PaneDragContextValue = {
+  isDragging: false,
+  draggingRef: FALLBACK_REF,
+  setDragging: () => {},
+};

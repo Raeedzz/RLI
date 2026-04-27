@@ -7,6 +7,7 @@ import { FileContextMenu } from "@/files/FileContextMenu";
 import { GitPanel } from "@/git/GitPanel";
 import { DiffView } from "@/git/DiffView";
 import { ConnectionsPanel } from "@/connections/ConnectionsPanel";
+import { TopBar } from "./TopBar";
 import { fs } from "@/lib/fs";
 import {
   useActiveProject,
@@ -211,10 +212,36 @@ export function SplitLayout() {
   };
 
   if (!project) {
-    return <PaneStub label="open a project — ⌘O" />;
+    return (
+      <div
+        style={{
+          height: "100%",
+          width: "100%",
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+        }}
+      >
+        <TopBar />
+        <PaneStub label="open a project — ⌘O" />
+      </div>
+    );
   }
   if (!session || !workspace) {
-    return <PaneStub label="no active session — press ⌘N" />;
+    return (
+      <div
+        style={{
+          height: "100%",
+          width: "100%",
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+        }}
+      >
+        <TopBar />
+        <PaneStub label="no active session — press ⌘N" />
+      </div>
+    );
   }
 
   return (
@@ -258,48 +285,59 @@ export function SplitLayout() {
           </>
         )}
 
-        {/* Dynamic workspace — splittable, draggable, swappable panes.
-            Padding here paints surface-1 in the gutters between panes
-            and around the workspace edge. Browser, terminal, and editor
-            all share this tree — so browser gets the same drag/drop,
-            split, and PaneFrame chrome as the others. */}
+        {/* Dynamic workspace column — tabs row pinned at top, then a
+            splittable / draggable / swappable pane tree below it.
+            Tabs only span this column (not the full window) so the
+            sidebar above gets to start at the chrome line. */}
         <Panel defaultSize={82} minSize={30} order={2}>
           <div
-            // Keying on session.id forces React to fully unmount the
-            // previous session's workspace tree (and its PTYs / editor
-            // state) when switching sessions — keeping each session's
-            // setup isolated.
-            key={session.id}
             style={{
-              position: "relative",
               height: "100%",
               width: "100%",
-              padding: "var(--space-2)",
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
               backgroundColor: "var(--surface-1)",
             }}
           >
-            <WorkspaceLayout node={workspace} totalLeaves={totalLeaves} />
-            <AnimatePresence>
-              {diffFile && (
-                <div
-                  // Pad inset matches the workspace gutter so the diff
-                  // overlay sits in the same well as the panes — feels
-                  // like it took over the workspace, not the whole window.
-                  style={{
-                    position: "absolute",
-                    inset: "var(--space-2)",
-                    zIndex: 5,
-                  }}
-                >
-                  <DiffView
-                    projectPath={project.path}
-                    filePath={diffFile.path}
-                    staged={diffFile.staged}
-                    onClose={() => setDiffFile(null)}
-                  />
-                </div>
-              )}
-            </AnimatePresence>
+            <TopBar />
+            <div
+              // Keying on session.id forces React to fully unmount the
+              // previous session's workspace tree (and its PTYs / editor
+              // state) when switching sessions — keeping each session's
+              // setup isolated.
+              key={session.id}
+              style={{
+                flex: 1,
+                minHeight: 0,
+                position: "relative",
+                padding: "var(--space-2)",
+                backgroundColor: "var(--surface-1)",
+              }}
+            >
+              <WorkspaceLayout node={workspace} totalLeaves={totalLeaves} />
+              <AnimatePresence>
+                {diffFile && (
+                  <div
+                    // Pad inset matches the workspace gutter so the diff
+                    // overlay sits in the same well as the panes — feels
+                    // like it took over the workspace, not the whole window.
+                    style={{
+                      position: "absolute",
+                      inset: "var(--space-2)",
+                      zIndex: 5,
+                    }}
+                  >
+                    <DiffView
+                      projectPath={project.path}
+                      filePath={diffFile.path}
+                      staged={diffFile.staged}
+                      onClose={() => setDiffFile(null)}
+                    />
+                  </div>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
         </Panel>
       </PanelGroup>

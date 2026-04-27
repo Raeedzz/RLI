@@ -3,8 +3,6 @@ import {
   ConnectionsIcon,
   FolderIcon,
   GitIcon,
-  SearchIcon,
-  SettingsIcon,
 } from "@/primitives/Icon";
 import {
   useActiveSession,
@@ -85,15 +83,6 @@ export function ActivityRail() {
       </RailButton>
 
       <RailButton
-        active={state.searchOpen}
-        label="Search"
-        chord="⌘⇧F"
-        onClick={() => dispatch({ type: "toggle-search" })}
-      >
-        <SearchIcon />
-      </RailButton>
-
-      <RailButton
         active={browserVisible}
         label="Browser"
         chord="⌘⇧B"
@@ -103,15 +92,6 @@ export function ActivityRail() {
       </RailButton>
 
       <div style={{ flex: 1 }} />
-
-      <RailButton
-        active={state.apiKeyDialogOpen}
-        label="Settings"
-        chord=""
-        onClick={() => dispatch({ type: "toggle-api-key" })}
-      >
-        <SettingsIcon />
-      </RailButton>
     </aside>
   );
 }

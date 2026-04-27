@@ -85,7 +85,7 @@ export function PaneFrame({
 }: Props) {
   const dispatch = useAppDispatch();
   const session = useActiveSession();
-  const { isDragging, setDragging } = usePaneDrag();
+  const { isDragging, draggingRef, setDragging } = usePaneDrag();
   const [chooser, setChooser] = useState<{
     anchor: { x: number; y: number };
     mode: "split" | "replace";
@@ -146,11 +146,20 @@ export function PaneFrame({
   };
 
   // We don't filter by `dataTransfer.types` here — WebKit hides custom
-  // MIME types during dragover. Instead we use the global isDragging
-  // flag (set by our own dragstart) to decide whether this is our drag.
+  // MIME types during dragover. Instead we read the synchronous
+  // `draggingRef` (set inside the `dragstart` callback before React
+  // commits its state update) to decide whether this is our drag.
+  // Reading `isDragging` from context would race the very first
+  // dragover events past their preventDefault window and silently
+  // break drop firing.
   const onDragOver = (e: DragEvent<HTMLDivElement>) => {
-    if (!isDragging) return;
+    if (!draggingRef.current) return;
     e.preventDefault();
+    // Stop bubbling so the inner shield's calculation wins; otherwise
+    // the outer wrapper would overwrite it with its larger rect (which
+    // includes the header) and the highlighted zone would no longer
+    // match what the user sees in the body.
+    e.stopPropagation();
     e.dataTransfer.dropEffect = "move";
     const rect = e.currentTarget.getBoundingClientRect();
     const zone = detectDropZone(e, rect);
@@ -175,12 +184,19 @@ export function PaneFrame({
 
   const onDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
-    const zone = dropZone;
+    // Stop here so the drop doesn't bubble up and fire a duplicate
+    // dispatch on an outer wrapper that listens for the same event.
+    e.stopPropagation();
+    // Compute the zone from the drop event itself rather than reading
+    // it from React state — `dropZone` may not have flushed yet by the
+    // time `drop` fires, leading to stale values and missed snaps.
+    const rect = e.currentTarget.getBoundingClientRect();
+    const zone = detectDropZone(e, rect);
     setDropZone(null);
     setDragging(false);
     if (!session) return;
     const sourceId = e.dataTransfer.getData(DRAG_MIME);
-    if (!sourceId || sourceId === paneId || !zone) return;
+    if (!sourceId || sourceId === paneId) return;
     const direction = zoneToDirection(zone);
     if (direction === null) {
       // Center → swap content. Useful when you just want to flip
@@ -247,7 +263,6 @@ export function PaneFrame({
       >
         <button
           type="button"
-          draggable={false}
           onClick={openReplace}
           title="Change content type"
           style={{
@@ -333,7 +348,6 @@ export function PaneFrame({
 
         <button
           type="button"
-          draggable={false}
           onClick={openSplit}
           title="Split this pane"
           aria-label="Split this pane"
@@ -362,7 +376,6 @@ export function PaneFrame({
         {!isOnly && (
           <button
             type="button"
-            draggable={false}
             onClick={() => {
               if (!session) return;
               dispatch({

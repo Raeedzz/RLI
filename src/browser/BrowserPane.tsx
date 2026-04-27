@@ -280,11 +280,18 @@ function Frame({
         key={screenshotKey}
         src={gstack.screenshotUrl()}
         alt={status.title ?? "browser preview"}
+        // Native HTML img is draggable by default — without this, the
+        // user grabs the screenshot as a "save image" drag instead of
+        // moving the pane around the workspace.
+        draggable={false}
         style={{
           maxWidth: "100%",
           maxHeight: "100%",
           objectFit: "contain",
-        }}
+          // Block native image-drag on WebKit, where the `draggable`
+          // attribute alone isn't always enough.
+          WebkitUserDrag: "none",
+        } as React.CSSProperties}
       />
     </div>
   );
