@@ -13,6 +13,7 @@ import { PromptInput, type PromptInputHandle } from "./PromptInput";
 import { PtyPassthrough, type PtyPassthroughHandle } from "./PtyPassthrough";
 import { TerminalStatusBar } from "./TerminalStatusBar";
 import { useTerminalSession } from "./useTerminalSession";
+import { getHistory, setHistory as memSetHistory } from "./sessionMemory";
 import { detectClaude } from "@/lib/claudeUsage";
 
 /** Command names that always run as an interactive TUI agent. */
@@ -75,9 +76,11 @@ export function BlockTerminal({
   const containerRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<PromptInputHandle>(null);
   const passthroughRef = useRef<PtyPassthroughHandle>(null);
-  // In-memory ring buffer of past commands (newest at index 0). Reset
-  // on session id change.
-  const [history, setHistory] = useState<string[]>([]);
+  // In-memory ring buffer of past commands (newest at index 0).
+  // Hydrated from module-scoped memory so it survives session/project
+  // switches; module memory is keyed by terminal id, not component
+  // instance.
+  const [history, setHistory] = useState<string[]>(() => getHistory(id));
   // For Claude 5h-window detection — sniff the live frame text for
   // the banner; once detected, fire the parent callback so the
   // global StatusBar's pill anchors to that timestamp. Local state
@@ -222,10 +225,14 @@ export function BlockTerminal({
       setActiveCommand(text);
       void sendLine(text);
       if (text.trim().length > 0) {
-        setHistory((prev) => [text, ...prev].slice(0, HISTORY_LIMIT));
+        setHistory((prev) => {
+          const next = [text, ...prev].slice(0, HISTORY_LIMIT);
+          memSetHistory(id, next);
+          return next;
+        });
       }
     },
-    [sendLine],
+    [sendLine, id],
   );
 
   // Track previous command_running so we only react to the

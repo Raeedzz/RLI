@@ -46,13 +46,19 @@ export function WindowChrome() {
     >
       {/* Centered relative to the WHOLE window, not relative to the
           gutter — absolute positioning + translateX(-50%) avoids the
-          settings button on the right pulling the search off-center. */}
+          settings button on the right pulling the search off-center.
+          `display: flex; alignItems: center` on the wrapper kills the
+          line-height descender that an inline-block button would otherwise
+          leave below itself, which would nudge the optical center down. */}
       <div
         style={{
           position: "absolute",
           top: "50%",
           left: "50%",
           transform: "translate(-50%, -50%)",
+          display: "flex",
+          alignItems: "center",
+          lineHeight: 0,
         }}
       >
         <SearchTrigger

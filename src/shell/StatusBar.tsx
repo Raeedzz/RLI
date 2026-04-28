@@ -1,6 +1,9 @@
-import { useActiveProject, useActiveSession } from "@/state/AppState";
+import { AnimatePresence } from "motion/react";
+import { useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useActiveProject, useActiveSession, useAppDispatch } from "@/state/AppState";
 import { tagVar } from "@/state/types";
 import { ClaudePill } from "@/terminal/ClaudePill";
+import { BranchSwitcher } from "./BranchSwitcher";
 
 /**
  * Always-on 24px context strip at the bottom.
@@ -13,7 +16,15 @@ import { ClaudePill } from "@/terminal/ClaudePill";
 export function StatusBar() {
   const session = useActiveSession();
   const project = useActiveProject();
+  const dispatch = useAppDispatch();
   const projectColor = tagVar(project?.color);
+  const [picker, setPicker] = useState<{ x: number; y: number } | null>(null);
+
+  const openPicker = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setPicker({ x: e.clientX, y: e.clientY });
+  };
 
   return (
     <footer
@@ -48,7 +59,11 @@ export function StatusBar() {
         {session ? (
           <>
             <Dot color={statusColor(session.status)} />
-            <Mono>{session.branch}</Mono>
+            <BranchButton
+              label={session.branch}
+              onClick={openPicker}
+              disabled={!project}
+            />
             <Sep />
             <span
               style={{
@@ -81,7 +96,69 @@ export function StatusBar() {
           <Mono>⌘K</Mono> commands
         </span>
       </div>
+      <AnimatePresence>
+        {picker && project && session && (
+          <BranchSwitcher
+            cwd={project.path}
+            anchor={picker}
+            onClose={() => setPicker(null)}
+            onSwitched={(branch) => {
+              dispatch({
+                type: "update-session",
+                id: session.id,
+                patch: { branch },
+              });
+            }}
+          />
+        )}
+      </AnimatePresence>
     </footer>
+  );
+}
+
+function BranchButton({
+  label,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  onClick: (e: ReactMouseEvent) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
+      title="switch branch"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        height: 18,
+        padding: "0 var(--space-1-5)",
+        backgroundColor: "transparent",
+        border: "none",
+        borderRadius: "var(--radius-xs)",
+        fontFamily: "var(--font-mono)",
+        fontSize: "var(--text-2xs)",
+        color: "var(--text-tertiary)",
+        cursor: disabled ? "default" : "pointer",
+        transition: "background-color var(--motion-instant) var(--ease-out-quart), color var(--motion-instant) var(--ease-out-quart)",
+      }}
+      onMouseEnter={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.backgroundColor = "var(--surface-2)";
+        e.currentTarget.style.color = "var(--text-primary)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.backgroundColor = "transparent";
+        e.currentTarget.style.color = "var(--text-tertiary)";
+      }}
+    >
+      {label}
+      <span aria-hidden style={{ opacity: 0.5, fontSize: 8 }}>▾</span>
+    </button>
   );
 }
 

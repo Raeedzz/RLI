@@ -257,6 +257,67 @@ pub async fn git_branch_current(cwd: String) -> Result<String, String> {
         .map(|s| s.trim().to_string())
 }
 
+/// Local branches, sorted by recency of last commit. Used to populate
+/// the BranchSwitcher popover. Each entry includes whether it's the
+/// currently checked-out branch so the UI can mark it.
+#[derive(Debug, Serialize)]
+pub struct BranchEntry {
+    pub name: String,
+    pub current: bool,
+}
+
+#[tauri::command]
+pub async fn git_branch_list(cwd: String) -> Result<Vec<BranchEntry>, String> {
+    let raw = run(
+        &cwd,
+        &[
+            "for-each-ref",
+            "--format=%(HEAD)\t%(refname:short)",
+            "--sort=-committerdate",
+            "refs/heads",
+        ],
+    )
+    .await?;
+    Ok(raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, '\t');
+            let head = parts.next()?;
+            let name = parts.next()?.trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            Some(BranchEntry {
+                name,
+                current: head.trim() == "*",
+            })
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn git_checkout(cwd: String, branch: String) -> Result<(), String> {
+    run(&cwd, &["checkout", &branch]).await.map(|_| ())
+}
+
+/// Create a new branch from the current HEAD and check it out. If
+/// `from` is provided, branches off that ref instead.
+#[tauri::command]
+pub async fn git_branch_create(
+    cwd: String,
+    name: String,
+    from: Option<String>,
+) -> Result<(), String> {
+    let mut args = vec!["checkout", "-b", name.as_str()];
+    let from_owned: String;
+    if let Some(f) = from.as_deref() {
+        from_owned = f.to_string();
+        args.push(&from_owned);
+    }
+    run(&cwd, &args).await.map(|_| ())
+}
+
 #[tauri::command]
 pub async fn git_worktree_add(
     cwd: String,

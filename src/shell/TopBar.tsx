@@ -22,6 +22,7 @@ import {
 } from "@/state/AppState";
 import { defaultWorkspaceWithEditor } from "@/state/paneTree";
 import { openProjectDialog } from "@/lib/projectDialog";
+import { forgetSession } from "@/terminal/sessionMemory";
 import {
   tagVar,
   type Project,
@@ -223,9 +224,10 @@ function SessionTabs({
               sessionId: session.id,
             })
           }
-          onClose={() =>
-            dispatch({ type: "remove-session", id: session.id })
-          }
+          onClose={() => {
+            forgetSession(session.id);
+            dispatch({ type: "remove-session", id: session.id });
+          }}
           onContextMenu={(e) => onSessionContextMenu(session.id, e)}
           onStartRename={() => setEditingId(session.id)}
           onCommitRename={(name) => {

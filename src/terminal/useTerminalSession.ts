@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getBlocks, setBlocks as memSetBlocks } from "./sessionMemory";
 import type {
   Block,
   ClosedBlock,
@@ -58,7 +59,10 @@ const encoder = new TextEncoder();
  * only off-screen rows change.
  */
 export function useTerminalSession(opts: Args): SessionApi {
-  const [blocks, setBlocks] = useState<Block[]>([]);
+  // Hydrate from module-scoped memory so switching sessions/projects
+  // doesn't wipe the visible scrollback. Memory is keyed by terminal
+  // id and survives the component's React lifecycle.
+  const [blocks, setBlocks] = useState<Block[]>(() => getBlocks(opts.id));
   const [liveFrame, setLiveFrame] = useState<RenderFrame | null>(null);
   const [altScreen, setAltScreen] = useState(false);
   const [exited, setExited] = useState(false);
@@ -112,17 +116,21 @@ export function useTerminalSession(opts: Args): SessionApi {
       // Drain one entry from the pending queue — its order is
       // guaranteed by the order in which the user pressed Enter.
       const stamped = pendingInputsRef.current.shift() ?? b.input;
-      setBlocks((prev) => [
-        ...prev,
-        {
-          id: `b_${Date.now().toString(36)}_${prev.length}`,
-          input: stamped,
-          transcript: b.transcript,
-          exit_code: b.exit_code,
-          cwd: b.cwd,
-          durationMs: b.durationMs,
-        },
-      ]);
+      setBlocks((prev) => {
+        const next = [
+          ...prev,
+          {
+            id: `b_${Date.now().toString(36)}_${prev.length}`,
+            input: stamped,
+            transcript: b.transcript,
+            exit_code: b.exit_code,
+            cwd: b.cwd,
+            durationMs: b.durationMs,
+          },
+        ];
+        memSetBlocks(opts.id, next);
+        return next;
+      });
     };
 
     const onCwd = (path: string) => {
@@ -177,17 +185,21 @@ export function useTerminalSession(opts: Args): SessionApi {
       } catch (err) {
         // Surface as a synthetic block so the user sees the error.
         if (!cancelled) {
-          setBlocks((prev) => [
-            ...prev,
-            {
-              id: `err_${Date.now().toString(36)}`,
-              input: "",
-              transcript: `error starting terminal: ${String(err)}`,
-              exit_code: 1,
-              cwd: null,
-              durationMs: null,
-            },
-          ]);
+          setBlocks((prev) => {
+            const next = [
+              ...prev,
+              {
+                id: `err_${Date.now().toString(36)}`,
+                input: "",
+                transcript: `error starting terminal: ${String(err)}`,
+                exit_code: 1,
+                cwd: null,
+                durationMs: null,
+              },
+            ];
+            memSetBlocks(opts.id, next);
+            return next;
+          });
         }
       }
     })();

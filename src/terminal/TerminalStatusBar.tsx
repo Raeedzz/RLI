@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
+import { AnimatePresence } from "motion/react";
+import { useEffect, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { git } from "@/lib/git";
+import { BranchSwitcher } from "@/shell/BranchSwitcher";
 
 interface Props {
   /** Working directory the terminal was started in. */
@@ -30,9 +32,16 @@ const POLL_MS = 4000;
  * 4s cadence — glanceable info, not sub-second.
  */
 export function TerminalStatusBar({ cwd, command }: Props) {
-  const info = useGitInfo(cwd);
+  const { info, refresh } = useGitInfo(cwd);
   const home = abbreviateHome(cwd);
   const totalChanges = info.added + info.removed + info.modified;
+  const [picker, setPicker] = useState<{ x: number; y: number } | null>(null);
+
+  const openPicker = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setPicker({ x: e.clientX, y: e.clientY });
+  };
 
   return (
     <div
@@ -102,6 +111,7 @@ export function TerminalStatusBar({ cwd, command }: Props) {
           branch={info.branch}
           ahead={info.ahead}
           behind={info.behind}
+          onClick={openPicker}
         />
       )}
 
@@ -114,6 +124,17 @@ export function TerminalStatusBar({ cwd, command }: Props) {
       )}
 
       <span style={{ flex: 1 }} />
+
+      <AnimatePresence>
+        {picker && (
+          <BranchSwitcher
+            cwd={cwd}
+            anchor={picker}
+            onClose={() => setPicker(null)}
+            onSwitched={() => void refresh()}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -168,7 +189,10 @@ function FolderGlyph() {
   );
 }
 
-function useGitInfo(cwd: string): GitInfo {
+function useGitInfo(cwd: string): {
+  info: GitInfo;
+  refresh: () => Promise<void>;
+} {
   const [info, setInfo] = useState<GitInfo>({
     branch: null,
     ahead: 0,
@@ -177,11 +201,12 @@ function useGitInfo(cwd: string): GitInfo {
     removed: 0,
     modified: 0,
   });
+  const [trigger, setTrigger] = useState(0);
 
   useEffect(() => {
     if (!cwd) return;
     let cancelled = false;
-    const refresh = async () => {
+    const pull = async () => {
       try {
         const status = await git.status(cwd);
         if (cancelled) return;
@@ -213,15 +238,20 @@ function useGitInfo(cwd: string): GitInfo {
         }
       }
     };
-    void refresh();
-    const id = window.setInterval(refresh, POLL_MS);
+    void pull();
+    const id = window.setInterval(pull, POLL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [cwd]);
+  }, [cwd, trigger]);
 
-  return info;
+  return {
+    info,
+    refresh: async () => {
+      setTrigger((t) => t + 1);
+    },
+  };
 }
 
 function abbreviateHome(p: string): string {
@@ -246,22 +276,41 @@ function Branch({
   branch,
   ahead,
   behind,
+  onClick,
 }: {
   branch: string;
   ahead: number;
   behind: number;
+  onClick?: (e: ReactMouseEvent) => void;
 }) {
   return (
-    <Pill
-      title={`branch ${branch}${
+    <button
+      type="button"
+      onClick={onClick}
+      title={`switch branch · current: ${branch}${
         ahead || behind ? `  ↑${ahead} ↓${behind}` : ""
       }`}
       style={{
-        // Don't let a 100-char branch name push the rest of the status
-        // bar off-screen. Cap the visible width and keep the full name
-        // in the title.
-        maxWidth: 240,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "var(--space-1-5)",
+        height: 22,
+        padding: "0 var(--space-2)",
+        backgroundColor: "var(--surface-1)",
+        border: "var(--border-1)",
+        borderRadius: "var(--radius-pill)",
         flexShrink: 1,
+        minWidth: 0,
+        maxWidth: 240,
+        color: "var(--text-tertiary)",
+        cursor: onClick ? "pointer" : "default",
+        transition: "background-color var(--motion-instant) var(--ease-out-quart)",
+      }}
+      onMouseEnter={(e) => {
+        if (onClick) e.currentTarget.style.backgroundColor = "var(--surface-2)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.backgroundColor = "var(--surface-1)";
       }}
     >
       <BranchGlyph />
@@ -302,7 +351,7 @@ function Branch({
           ↓{behind}
         </span>
       )}
-    </Pill>
+    </button>
   );
 }
 

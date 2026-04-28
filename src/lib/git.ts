@@ -26,6 +26,11 @@ export interface LogEntry {
   subject: string;
 }
 
+export interface BranchEntry {
+  name: string;
+  current: boolean;
+}
+
 export const git = {
   status: (cwd: string) => invoke<StatusResult>("git_status", { cwd }),
   diff: (cwd: string, path?: string, staged = false) =>
@@ -40,6 +45,12 @@ export const git = {
     invoke<string>("git_push", { cwd, remote, branch }),
   branchCurrent: (cwd: string) =>
     invoke<string>("git_branch_current", { cwd }),
+  branchList: (cwd: string) =>
+    invoke<BranchEntry[]>("git_branch_list", { cwd }),
+  checkout: (cwd: string, branch: string) =>
+    invoke<void>("git_checkout", { cwd, branch }),
+  branchCreate: (cwd: string, name: string, from?: string) =>
+    invoke<void>("git_branch_create", { cwd, name, from }),
   worktreeAdd: (cwd: string, path: string, branch: string) =>
     invoke<void>("git_worktree_add", { cwd, path, branch }),
   worktreeRemove: (cwd: string, path: string, force = false) =>

@@ -1,12 +1,14 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import {
   useActiveProject,
   useActiveSession,
   useAppDispatch,
   useAppState,
 } from "@/state/AppState";
-import { defaultWorkspaceWithEditor } from "@/state/paneTree";
+import { defaultWorkspaceWithEditor, leaves } from "@/state/paneTree";
+import type { PaneContent, SplitDirection } from "@/state/types";
 import { openProjectDialog } from "@/lib/projectDialog";
+import { forgetSession } from "@/terminal/sessionMemory";
 
 /**
  * Match a number-row digit press regardless of modifier-induced char
@@ -18,6 +20,30 @@ function digitKey(e: KeyboardEvent): number | null {
   const m = /^Digit([1-9])$/.exec(e.code);
   return m ? Number(m[1]) : null;
 }
+
+/**
+ * How long the user has, after pressing ⌘B / ⌘E / ⌘T, to follow up
+ * with an arrow before the chord expires. Long enough for a deliberate
+ * two-key sequence, short enough that a stray prefix doesn't sit around
+ * eating later keypresses.
+ */
+const CHORD_PENDING_MS = 1500;
+
+const CHORD_CONTENT: Record<string, PaneContent> = {
+  b: "browser",
+  e: "editor",
+  t: "terminal",
+};
+
+const ARROW_DIRECTION: Record<string, SplitDirection> = {
+  ArrowLeft: "left",
+  ArrowRight: "right",
+  ArrowUp: "up",
+  ArrowDown: "down",
+};
+
+type PendingChord = { kind: "split-pane"; content: PaneContent; timer: number };
+type ChordSpec = { kind: "split-pane"; content: PaneContent };
 
 /**
  * Global keyboard shortcuts (v1, fixed). Per CONTEXT.md the keymap is
@@ -33,10 +59,64 @@ export function useKeyboardShortcuts() {
   const session = useActiveSession();
   const { sessions, projects } = useAppState();
 
+  // Currently-armed chord. Set when ⌘B/⌘E/⌘T or ⌘` is pressed; cleared
+  // when the follow-up key consumes it, the timer expires, or any other
+  // key breaks the sequence. A ref (not state) so the keydown handler
+  // reads the latest value synchronously without needing to re-bind.
+  const pendingChordRef = useRef<PendingChord | null>(null);
+
   useEffect(() => {
+    const clearChord = () => {
+      const pending = pendingChordRef.current;
+      if (!pending) return;
+      window.clearTimeout(pending.timer);
+      pendingChordRef.current = null;
+    };
+
+    const armChord = (chord: ChordSpec) => {
+      clearChord();
+      const timer = window.setTimeout(() => {
+        pendingChordRef.current = null;
+      }, CHORD_PENDING_MS);
+      pendingChordRef.current = { ...chord, timer };
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
       const cmd = e.metaKey || e.ctrlKey;
       const shift = e.shiftKey;
+
+      // Resolve a pending split-pane chord first. ⌘B/⌘E/⌘T arms the
+      // chord; an arrow that follows decides direction. Holding Cmd
+      // through the arrow is fine; we accept either.
+      const pending = pendingChordRef.current;
+      if (pending) {
+        const direction = ARROW_DIRECTION[e.key];
+        if (direction) {
+          e.preventDefault();
+          const { content } = pending;
+          clearChord();
+          if (session) {
+            const allLeaves = leaves(session.workspace);
+            const target = allLeaves[allLeaves.length - 1];
+            if (target) {
+              dispatch({
+                type: "split-pane",
+                sessionId: session.id,
+                paneId: target.id,
+                direction,
+                content,
+              });
+            }
+          }
+          return;
+        }
+        // Any other keypress cancels the chord. Modifier-only events
+        // (just ⌘, ⇧, ⌃) don't count — those keep the chord armed so
+        // the user can still tap the follow-up arrow.
+        if (e.key !== "Meta" && e.key !== "Control" && e.key !== "Shift") {
+          clearChord();
+        }
+      }
 
       // Always-handled chords
       if (cmd && !shift && e.key.toLowerCase() === "k") {
@@ -44,10 +124,33 @@ export function useKeyboardShortcuts() {
         dispatch({ type: "toggle-palette" });
         return;
       }
-      if (cmd && !shift && e.key.toLowerCase() === "b") {
-        e.preventDefault();
-        dispatch({ type: "toggle-left-panel", panel: "files" });
-        return;
+
+      // ⌘B / ⌘E / ⌘T — chord prefix. Each arms a pending split for the
+      // matching content type; the arrow that follows decides direction.
+      if (cmd && !shift) {
+        const k = e.key.toLowerCase();
+        const content = CHORD_CONTENT[k];
+        if (content) {
+          e.preventDefault();
+          armChord({ kind: "split-pane", content });
+          return;
+        }
+      }
+
+      // ⌘⌥1..9 — jump directly to the nth project. Reads the physical
+      // Digit code so macOS's alt-induced char shifting (⌥1 → ¡, etc.)
+      // doesn't drop the press. Sits before the ⌘1..9 session switcher
+      // below so the alt-modified version wins.
+      if (cmd && e.altKey && !shift) {
+        const projectIdx = digitKey(e);
+        if (projectIdx !== null) {
+          e.preventDefault();
+          const target = projects[projectIdx - 1];
+          if (target) {
+            dispatch({ type: "set-active-project", id: target.id });
+          }
+          return;
+        }
       }
       // ⌃⇧G — source-control panel (matches VS Code muscle memory)
       if (e.ctrlKey && shift && e.key.toLowerCase() === "g") {
@@ -97,6 +200,7 @@ export function useKeyboardShortcuts() {
       // ⌘W — close active session
       if (cmd && !shift && e.key.toLowerCase() === "w" && session) {
         e.preventDefault();
+        forgetSession(session.id);
         dispatch({ type: "remove-session", id: session.id });
         return;
       }
@@ -160,7 +264,14 @@ export function useKeyboardShortcuts() {
     };
 
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      const pending = pendingChordRef.current;
+      if (pending) {
+        window.clearTimeout(pending.timer);
+        pendingChordRef.current = null;
+      }
+    };
   }, [dispatch, project, session, sessions, projects]);
 }
 

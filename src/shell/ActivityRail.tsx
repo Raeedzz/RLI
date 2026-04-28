@@ -52,7 +52,7 @@ export function ActivityRail() {
       <RailButton
         active={state.leftPanel === "files"}
         label="Files"
-        chord="⌘B"
+        chord=""
         onClick={() =>
           dispatch({ type: "toggle-left-panel", panel: "files" })
         }
