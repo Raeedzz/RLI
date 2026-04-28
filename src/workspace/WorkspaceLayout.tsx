@@ -120,6 +120,16 @@ function TerminalBody({ paneId }: { paneId: PaneNodeId }) {
               })
           : undefined
       }
+      onActivitySummaryChange={
+        session
+          ? (summary) =>
+              dispatch({
+                type: "update-session",
+                id: session.id,
+                patch: { subtitle: summary },
+              })
+          : undefined
+      }
       onAgentRunningChange={
         session
           ? (running) =>

@@ -6,8 +6,6 @@ import { CommandPalette } from "@/palette/CommandPalette";
 import { SearchOverlay } from "@/palette/SearchOverlay";
 import { ApiKeyDialog } from "@/onboarding/ApiKeyDialog";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
-import { useSessionSummary } from "@/hooks/useSessionSummary";
-import { useActiveSession } from "@/state/AppState";
 
 /**
  * Top-level frame:
@@ -32,8 +30,6 @@ import { useActiveSession } from "@/state/AppState";
  */
 export function AppShell() {
   useKeyboardShortcuts();
-  const session = useActiveSession();
-  useSessionSummary(session?.id ?? null);
 
   return (
     <div

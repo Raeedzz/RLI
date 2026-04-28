@@ -170,6 +170,13 @@ pub struct RenderFrame {
     /// hide the live grid when no command is running so the empty
     /// rows of the shell prompt don't ghost above the input.
     pub command_running: bool,
+    /// DECCKM (application cursor mode). True iff the running program
+    /// has issued `ESC[?1h`. Many TUIs (claude, vim insert mode,
+    /// readline-based tools) flip this — when set, arrow keys must be
+    /// sent as `ESC O A/B/C/D` instead of `ESC [ A/B/C/D`. Frontend's
+    /// keyToBytes branches on this. Without it, arrows in claude
+    /// are silently dropped.
+    pub app_cursor: bool,
     /// Sparse: only rows that changed since the last frame. Frontend
     /// keeps the rest from its previous snapshot.
     pub dirty: Vec<DirtyRow>,
@@ -782,6 +789,7 @@ pub fn term_start(
                     cursor_col: cursor.column.0 as u16,
                     alt_screen: s.term.mode().contains(TermMode::ALT_SCREEN),
                     command_running: s.last_command_running,
+                    app_cursor: s.term.mode().contains(TermMode::APP_CURSOR),
                     dirty,
                 };
                 let _ = app.emit(&format!("term://{}/frame", args.id), &frame);
@@ -908,28 +916,46 @@ pub fn term_start(
                             Ok(g) => g,
                             Err(_) => break,
                         };
-                        // Disjoint borrow: split &mut Session into the
-                        // fields we mutate so the parser + term borrows
-                        // don't conflict.
-                        {
-                            let Session { parser, term, .. } = &mut *s;
-                            parser.advance(term, bytes);
-                        }
-                        // Run the segmenter on the same byte stream
-                        // (it scans for OSC 7 + OSC 133 in parallel
-                        // with the alacritty parser).
+                        // ORDER MATTERS — see comments below.
+                        //
+                        // 1) Run the segmenter FIRST so we know whether
+                        //    this chunk contains an OSC 133 C (command
+                        //    start). Doing this before the alacritty
+                        //    parser means we can decide whether to wipe
+                        //    the grid BEFORE the chunk's output bytes
+                        //    are written into it.
                         let blocks = s.segmenter.feed(bytes);
-                        // If the segmenter just saw OSC 133 C, force
-                        // the next frame to re-emit every row by
-                        // discarding the prior diff baseline AND
-                        // clear the alacritty grid so the previous
-                        // command's TUI (e.g. claude's UI after a
-                        // Ctrl+C exit) doesn't ghost into the next
-                        // command's live view.
-                        if s.segmenter.take_command_just_started() {
+                        let just_started = s.segmenter.take_command_just_started();
+                        // 2) If C just fired, clear the grid + diff
+                        //    baseline NOW. The previous command's TUI
+                        //    (e.g. claude's UI after a Ctrl+C exit)
+                        //    must not ghost into the next command's
+                        //    live view.
+                        //
+                        //    PREVIOUSLY we ran parser.advance first and
+                        //    cleared after — which wiped the new
+                        //    command's first burst of output whenever
+                        //    it shared a PTY read with the OSC 133 C
+                        //    marker (very common for fast tools like
+                        //    vite that print their banner in the same
+                        //    tick zsh's preexec fires). The user saw
+                        //    an empty live block and no "VITE ready in
+                        //    Xms" text. Clearing first fixes that
+                        //    — the parser then writes the chunk's
+                        //    output bytes into a freshly-cleared grid.
+                        if just_started {
                             s.last_snapshot.clear();
                             let Session { parser, term, .. } = &mut *s;
                             parser.advance(term, b"\x1b[2J\x1b[H");
+                        }
+                        // 3) Now feed the actual chunk to the alacritty
+                        //    parser. The OSC 133 bytes themselves are
+                        //    no-ops to alacritty (no registered
+                        //    handler), so only the real terminal
+                        //    payload lands in the grid.
+                        {
+                            let Session { parser, term, .. } = &mut *s;
+                            parser.advance(term, bytes);
                         }
                         let cwd_change = s.segmenter.take_pending_cwd();
                         // Flush a frame if we're past the throttle window.
@@ -1053,6 +1079,7 @@ fn maybe_flush(s: &mut Session, app: &AppHandle<Wry>, id: &str) {
         cursor_col: cursor.column.0 as u16,
         alt_screen: s.term.mode().contains(TermMode::ALT_SCREEN),
         command_running: cmd_running,
+        app_cursor: s.term.mode().contains(TermMode::APP_CURSOR),
         dirty,
     };
     let _ = app.emit(&format!("term://{id}/frame"), &frame);

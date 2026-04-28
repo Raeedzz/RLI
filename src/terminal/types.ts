@@ -32,6 +32,13 @@ export interface RenderFrame {
    * ghost above the input box.
    */
   command_running: boolean;
+  /**
+   * DECCKM (application cursor mode). When true, the running program
+   * has issued `ESC[?1h` — arrows must be sent as `ESC O A/B/C/D` not
+   * `ESC [ A/B/C/D`. Claude / vim insert / readline TUIs all flip this.
+   * Without honoring it, the agent never sees the user's arrow keys.
+   */
+  app_cursor: boolean;
   dirty: DirtyRow[];
 }
 

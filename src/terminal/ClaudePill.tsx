@@ -8,6 +8,7 @@ import {
   type ClaudeUsageDerived,
   type ClaudeUsageStatus,
 } from "@/lib/claudeUsage";
+import { useAppState } from "@/state/AppState";
 
 /**
  * Compact Claude usage indicator. Sources its numbers from the real
@@ -25,7 +26,17 @@ import {
  */
 export function ClaudePill() {
   const { status, derived } = useClaudeUsage();
+  const { sessions } = useAppState();
   const [pickerOpen, setPickerOpen] = useState(false);
+
+  // Hard gate: only render when an agent (claude / codex / aider) is
+  // CURRENTLY running in some pane. The 5h window keeps ticking on
+  // Anthropic's side after the agent exits, but the pill is meant to
+  // be a status indicator for the active TUI — not a permanent decoration.
+  // BlockTerminal flips `agentRunning` via onAgentRunningChange; we
+  // just OR across all sessions here.
+  const anyAgentRunning = sessions.some((s) => s.agentRunning === true);
+  if (!anyAgentRunning) return null;
 
   if (!status || !status.active || !derived) return null;
 

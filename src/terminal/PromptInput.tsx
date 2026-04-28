@@ -318,6 +318,22 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
     // Index into history. -1 = composing a new line; 0 = most recent
     // committed entry; N-1 = oldest.
     const [historyCursor, setHistoryCursor] = useState(-1);
+    // History DROPDOWN: opened by pressing ↑ on empty input. Mirrors
+    // the cd-completion dropdown's keyboard model — ↑/↓ navigate, Enter
+    // inserts (lets the user edit before submitting), Esc dismisses.
+    const [historyOpen, setHistoryOpen] = useState(false);
+    const [historyIndex, setHistoryIndex] = useState(0);
+    // Snapshot the history list when the dropdown opens so it doesn't
+    // shift mid-navigation if a new command lands during a long peek.
+    const historyEntries = (() => {
+      if (!historyOpen) return [] as string[];
+      const out: string[] = [];
+      for (let i = 0; i < historyLength; i++) {
+        const e = historyAt(i);
+        if (e !== null) out.push(e);
+      }
+      return out;
+    })();
     // `cd` directory completion — populated whenever `value` matches
     // `cd <something>` and we can read the resolved directory.
     const [completions, setCompletions] = useState<DirEntry[]>([]);
@@ -327,6 +343,14 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
     useImperativeHandle(ref, () => ({
       focus: () => textareaRef.current?.focus(),
     }));
+
+    // Auto-focus on mount so the first keystroke after a pane opens
+    // lands in the input. Without this, Enter (and every other key)
+    // is silently dropped until the user thinks to click first —
+    // matches the auto-focus behavior in PtyPassthrough / FullGrid.
+    useEffect(() => {
+      textareaRef.current?.focus();
+    }, []);
 
     const submit = () => {
       const text = value;
@@ -418,6 +442,61 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
       if (meta && e.key.length === 1) {
         return;
       }
+      // ── History dropdown takes over arrows/enter/esc when open ──
+      if (historyOpen) {
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setHistoryIndex((idx) =>
+            Math.min(historyEntries.length - 1, idx + 1),
+          );
+          return;
+        }
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setHistoryIndex((idx) => {
+            const next = idx - 1;
+            if (next < 0) {
+              // Walked past the most-recent entry → close the dropdown.
+              setHistoryOpen(false);
+              return 0;
+            }
+            return next;
+          });
+          return;
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          // Enter = drop the selected command into the textarea and
+          // close the dropdown so the user can edit before running.
+          // (Same shape as zsh / fzf reverse-i-search behavior.)
+          e.preventDefault();
+          const picked = historyEntries[historyIndex];
+          if (picked != null) {
+            setValue(picked);
+            setHistoryCursor(historyIndex);
+            requestAnimationFrame(() => {
+              const ta = textareaRef.current;
+              if (!ta) return;
+              ta.focus();
+              ta.setSelectionRange(picked.length, picked.length);
+            });
+          }
+          setHistoryOpen(false);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setHistoryOpen(false);
+          return;
+        }
+        // Any printable / control key while the dropdown is open
+        // closes it and lets the keystroke fall through to normal
+        // editing (so typing while peeking history doesn't feel
+        // stuck).
+        if (e.key.length === 1 || e.key === "Backspace" || e.key === "Tab") {
+          setHistoryOpen(false);
+          // fall through to default handling below
+        }
+      }
       // ── Completion dropdown takes over a few keys when open ──
       if (completionsOpen) {
         if (e.key === "ArrowUp") {
@@ -470,20 +549,19 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
         submit();
         return;
       }
-      // ↑ / ↓ history recall, but only when the textarea is empty or
-      // we're already navigating history (avoids fighting cursor moves).
-      if (e.key === "ArrowUp" && (value === "" || historyCursor >= 0)) {
-        const next = Math.min(historyLength - 1, historyCursor + 1);
-        if (next >= 0 && next !== historyCursor) {
-          e.preventDefault();
-          const entry = historyAt(next);
-          if (entry !== null) {
-            setHistoryCursor(next);
-            setValue(entry);
-          }
-        }
+      // ↑ on empty input → open the history dropdown. Inline-fill is
+      // gone; the dropdown is the single source of history-recall UI
+      // (matches the cd-completion dropdown's interaction pattern).
+      if (e.key === "ArrowUp" && value === "" && historyLength > 0) {
+        e.preventDefault();
+        setHistoryOpen(true);
+        setHistoryIndex(0);
         return;
       }
+      // ↓ when not in dropdown / not in completions: clear any inline
+      // history-cursor state. Kept as a no-op safety net for legacy
+      // state — the dropdown-driven flow above never sets historyCursor
+      // > 0 anymore.
       if (e.key === "ArrowDown" && historyCursor >= 0) {
         e.preventDefault();
         const next = historyCursor - 1;
@@ -513,6 +591,107 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
           position: "relative",
         }}
       >
+        {historyOpen && historyEntries.length > 0 && (
+          <div
+            role="listbox"
+            aria-label="command history"
+            style={{
+              position: "absolute",
+              left: "var(--space-3)",
+              right: "var(--space-3)",
+              bottom: "calc(100% - var(--space-1))",
+              maxHeight: 240,
+              overflowY: "auto",
+              backgroundColor: "var(--surface-2)",
+              border: "var(--border-1)",
+              borderRadius: "var(--radius-sm)",
+              boxShadow:
+                "0 8px 24px -8px rgba(0,0,0,0.6), 0 2px 4px rgba(0,0,0,0.3)",
+              zIndex: 10,
+              fontFamily: "var(--font-mono)",
+              fontSize: 13,
+              fontVariantLigatures: "none",
+            }}
+          >
+            {historyEntries.map((entry, i) => {
+              const active = i === historyIndex;
+              return (
+                <div
+                  key={`${i}::${entry}`}
+                  role="option"
+                  aria-selected={active}
+                  onMouseEnter={() => setHistoryIndex(i)}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    setValue(entry);
+                    setHistoryOpen(false);
+                    requestAnimationFrame(() => {
+                      const ta = textareaRef.current;
+                      if (!ta) return;
+                      ta.focus();
+                      ta.setSelectionRange(entry.length, entry.length);
+                    });
+                  }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "var(--space-2)",
+                    padding: "var(--space-1) var(--space-2)",
+                    backgroundColor: active
+                      ? "var(--surface-3)"
+                      : "transparent",
+                    color: "var(--text-primary)",
+                    cursor: "pointer",
+                    userSelect: "none",
+                    minWidth: 0,
+                  }}
+                >
+                  <span
+                    aria-hidden
+                    style={{
+                      color: active
+                        ? "var(--accent-bright)"
+                        : "var(--text-disabled)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: "var(--text-2xs)",
+                      width: 14,
+                      textAlign: "right",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {i + 1}
+                  </span>
+                  <span
+                    style={{
+                      minWidth: 0,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {entry}
+                  </span>
+                </div>
+              );
+            })}
+            <div
+              style={{
+                padding: "var(--space-1) var(--space-2)",
+                borderTop: "var(--border-1)",
+                color: "var(--text-disabled)",
+                fontFamily: "var(--font-sans)",
+                fontSize: "var(--text-2xs)",
+                letterSpacing: "var(--tracking-tight)",
+                display: "flex",
+                gap: "var(--space-3)",
+              }}
+            >
+              <span>↑↓ navigate</span>
+              <span>↵ insert</span>
+              <span>esc dismiss</span>
+            </div>
+          </div>
+        )}
         {completionsOpen && (
           <div
             role="listbox"

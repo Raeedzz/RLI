@@ -49,8 +49,14 @@ export function WindowChrome() {
           settings button on the right pulling the search off-center.
           `display: flex; alignItems: center` on the wrapper kills the
           line-height descender that an inline-block button would otherwise
-          leave below itself, which would nudge the optical center down. */}
+          leave below itself, which would nudge the optical center down.
+
+          Tauri 2 reads the drag attribute off the click target only — it
+          doesn't walk up to the parent — so this absolute wrapper has to
+          opt in explicitly or its transparent margin would block dragging
+          when the user grabs near the search box. */}
       <div
+        data-tauri-drag-region
         style={{
           position: "absolute",
           top: "50%",
@@ -69,6 +75,7 @@ export function WindowChrome() {
       {/* Right-anchored settings cluster — sits at the right edge no
           matter how wide the search input is. */}
       <div
+        data-tauri-drag-region
         style={{
           position: "absolute",
           top: "50%",

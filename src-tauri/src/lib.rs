@@ -110,6 +110,7 @@ pub fn run() {
             memory::memory_graph_data,
             // Claude usage (real, from ~/.claude/projects transcripts)
             claude_usage::claude_usage_status,
+            claude_usage::claude_activity_summary,
             // Git (Task #8)
             git::git_status,
             git::git_diff,

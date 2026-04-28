@@ -6,6 +6,7 @@ import {
   useState,
   type MouseEvent,
 } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { BlockList } from "./BlockList";
 import { FullGrid } from "./FullGrid";
 import { LiveBlock } from "./LiveBlock";
@@ -54,6 +55,13 @@ interface Props {
    * remainder of the 5h window).
    */
   onAgentRunningChange?: (running: boolean) => void;
+  /**
+   * Fires whenever the live activity summary changes — i.e. what the
+   * terminal is currently doing in one line. Empty string means idle.
+   * Parent wires this into `session.subtitle` so the pane header (and
+   * the status bar) reflect the running command in real time.
+   */
+  onActivitySummaryChange?: (summary: string) => void;
 }
 
 const DEFAULT_ROWS = 32;
@@ -85,6 +93,7 @@ export function BlockTerminal({
   sessionId,
   onClaudeDetected,
   onAgentRunningChange,
+  onActivitySummaryChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<PromptInputHandle>(null);
@@ -118,6 +127,10 @@ export function BlockTerminal({
   useEffect(() => {
     onAgentRunningChangeRef.current = onAgentRunningChange;
   }, [onAgentRunningChange]);
+  const onActivitySummaryChangeRef = useRef(onActivitySummaryChange);
+  useEffect(() => {
+    onActivitySummaryChangeRef.current = onActivitySummaryChange;
+  }, [onActivitySummaryChange]);
   // For direct-launched claude sessions, fire the detected callback
   // on mount — there's no banner to sniff because we ARE the agent.
   useEffect(() => {
@@ -154,6 +167,60 @@ export function BlockTerminal({
   const [activeCommand, setActiveCommand] = useState<string>(
     directAgent ? command : "",
   );
+
+  // While an agent (claude / codex / aider) is foregrounded, "claude"
+  // tells you nothing about what's actually happening. Ask the Rust
+  // side to summarize the last 3 turns of the transcript via Gemini
+  // Flash-Lite — that lands a phrase like "wiring up the OSC 133
+  // segmenter" instead. Results are cached server-side keyed by the
+  // turn uuids, so polling here is cheap unless a new exchange has
+  // actually landed.
+  const [claudeSummary, setClaudeSummary] = useState<string | null>(null);
+  useEffect(() => {
+    if (!foregroundIsAgent) {
+      setClaudeSummary(null);
+      return;
+    }
+    if (!cwd) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const summary = await invoke<string | null>("claude_activity_summary", {
+          projectCwd: cwd,
+        });
+        if (!cancelled) setClaudeSummary(summary);
+      } catch {
+        // Transient failures (file rotation mid-read, network blip on
+        // the Gemini call) just keep the last value — better than
+        // blanking the subtitle.
+      }
+    };
+    void tick();
+    const id = window.setInterval(tick, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [foregroundIsAgent, cwd]);
+
+  // Forward the live activity summary up to the pane chrome, where it
+  // surfaces as the subtitle next to the pane header. Trimmed and
+  // collapsed-whitespace so multi-line composed commands read on one
+  // line in a 28px header strip. Prefer the agent's AI-summarized
+  // activity when available — it carries more meaning than the launch
+  // command.
+  //
+  // CRITICAL: only dispatch when we actually have a summary. Firing
+  // with `""` on idle mount erases whatever default the session had
+  // ("ready") and leaves the header chip blank — that was the bug
+  // that made it look like summaries weren't working at all. Letting
+  // the prior value persist is the right default.
+  useEffect(() => {
+    const source = claudeSummary ?? activeCommand;
+    const summary = source.replace(/\s+/g, " ").trim();
+    if (!summary) return;
+    onActivitySummaryChangeRef.current?.(summary);
+  }, [activeCommand, claudeSummary]);
 
   const {
     blocks,
@@ -505,6 +572,7 @@ export function BlockTerminal({
         <PtyPassthrough
           ref={passthroughRef}
           onSendBytes={(b) => void sendBytes(b)}
+          appCursor={liveFrame?.app_cursor ?? false}
         />
       )}
     </div>

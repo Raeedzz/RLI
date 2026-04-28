@@ -35,7 +35,9 @@ import {
 const TAB_DRAG_MIME = "application/x-rli-session-tab";
 
 /**
- * Single 36px top bar:
+ * Single 28px top bar — height matches `--pane-header-height` so the
+ * session tabs line up exactly with the left-panel header (files / git /
+ * connections) on the same horizontal grid:
  *   [● fix oauth] [rewrite docs] [+]                     [project: RLI ▾]
  *
  * Sessions on the left as compact single-line tabs.
@@ -116,7 +118,7 @@ export function TopBar() {
         // data-tauri-drag-region="false" stay clickable.
         data-tauri-drag-region
         style={{
-          minHeight: 36,
+          minHeight: "var(--pane-header-height)",
           flexShrink: 0,
           display: "flex",
           alignItems: "flex-start",
@@ -200,6 +202,12 @@ function SessionTabs({
     <div
       role="tablist"
       aria-label="Sessions"
+      // Tauri 2's drag-region check looks only at e.target — it doesn't
+      // walk up the DOM. So even though the parent <header> is a drag
+      // region, this flex:1 row would swallow clicks in the empty space
+      // after the tabs and block window dragging. Mark it explicitly so
+      // the gap right of the tabs (and right of "+") drags the window.
+      data-tauri-drag-region
       style={{
         position: "relative",
         display: "flex",
@@ -324,7 +332,7 @@ function SessionTab({
         flexShrink: 0,
         minWidth: 0,
         maxWidth: 220,
-        height: 36,
+        height: "var(--pane-header-height)",
         display: "flex",
         alignItems: "center",
         gap: "var(--space-2)",
@@ -489,7 +497,7 @@ function NewSessionButton({ projectId }: { projectId: ProjectId }) {
         alignItems: "center",
         justifyContent: "center",
         width: 32,
-        height: 36,
+        height: "var(--pane-header-height)",
         backgroundColor: "transparent",
         color: "var(--text-tertiary)",
         fontFamily: "var(--font-mono)",
@@ -548,7 +556,7 @@ function ProjectSwitcher({
         style={{
           display: "inline-flex",
           alignItems: "center",
-          height: 36,
+          height: "var(--pane-header-height)",
           gap: "var(--space-2)",
           padding: "0 var(--space-3) 0 var(--space-3)",
           backgroundColor: open ? tintedHover : tinted,

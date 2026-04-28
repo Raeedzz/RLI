@@ -12,7 +12,7 @@
 //!   - `branch_current`, `branch_create` — for session worktrees
 //!   - `worktree_add`, `worktree_remove` — session lifecycle (Task #9)
 //!   - `log` — for the merge-back UI
-//!
+//!g
 //! AI commit messages live in this module too (`git_ai_commit_message`)
 //! since they need both the staged diff and the Gemini client.
 
@@ -26,7 +26,7 @@ use tokio::process::Command;
 use crate::gemini::{self, GeminiState, GenerateArgs};
 
 /* ------------------------------------------------------------------
-   Helpers
+   Helpers - test change
    ------------------------------------------------------------------ */
 
 async fn run(cwd: &str, args: &[&str]) -> Result<String, String> {
@@ -391,78 +391,30 @@ pub async fn git_ai_commit_message(
     state: State<'_, GeminiState>,
     cwd: String,
 ) -> Result<String, String> {
-    // Get the staged diff plus a name-status header so the model has
-    // a quick map of which files moved before reading the patch body.
-    // We bump the truncation cap to 16KB now that the model produces
-    // longer (multi-paragraph) bodies — clipping too aggressively
-    // produces vague messages.
-    let name_status = run(&cwd, &["diff", "--staged", "--name-status"]).await?;
+    // Get the staged diff. Truncate to ~8KB so we don't blow Flash-Lite's
+    // context with a huge changeset.
     let diff = run(&cwd, &["diff", "--staged", "--no-color"]).await?;
     if diff.trim().is_empty() {
         return Err("no staged changes".into());
     }
-    let trimmed_diff = if diff.len() > 16_000 {
-        let mut s = diff.chars().take(16_000).collect::<String>();
-        s.push_str("\n\n[…diff truncated to 16KB; remaining hunks omitted…]");
+    let trimmed = if diff.len() > 8000 {
+        let mut s = diff.chars().take(8000).collect::<String>();
+        s.push_str("\n\n[…truncated…]");
         s
     } else {
         diff
     };
 
-    let system = "You write Conventional Commit messages for git diffs.\n\
-\n\
-Output ONLY the commit message — no preamble, no markdown fences, no quotes.\n\
-\n\
-FORMAT (strict):\n\
-  <type>(<optional scope>): <imperative subject, ≤72 chars, lowercase, no trailing period>\n\
-  <blank line>\n\
-  <body: 1–3 short paragraphs OR 2–6 bulleted lines explaining WHAT changed and WHY>\n\
-\n\
-TYPES — pick the one that best matches the dominant change:\n\
-  feat      new user-facing capability\n\
-  fix       bug fix (mention the symptom)\n\
-  refactor  internal restructure with no behavior change\n\
-  perf      measurable performance improvement\n\
-  docs      docs / comments only\n\
-  test      tests only\n\
-  chore     build, deps, tooling, config, housekeeping\n\
-  build     build system or external dependency change\n\
-  ci        CI pipeline / GitHub Actions / scripts\n\
-  style     formatting, whitespace, lint-only fixes\n\
-\n\
-SCOPE — optional. Use a short module name when the change is localized\n\
-(e.g. `feat(memory): …`, `fix(terminal): …`). Omit when the change\n\
-spans many areas.\n\
-\n\
-BODY — required for anything that isn't a one-line change. Be specific:\n\
-  - Name the user-visible behavior, the bug symptom, or the constraint\n\
-    being addressed. Avoid filler like \"improve\", \"update\", \"various\".\n\
-  - Explain WHY the change was needed when it isn't obvious from the diff.\n\
-  - Mention notable trade-offs, follow-ups, or known limitations.\n\
-  - Keep each line ≤100 chars; wrap into bullets if you have 3+ distinct\n\
-    points.\n\
-\n\
-Skip the body ONLY for genuinely trivial changes (typo fix, version\n\
-bump, single import re-order). Otherwise always include one.\n\
-\n\
-Tone: terse, imperative, technically precise. No hedging, no marketing\n\
-language, no emoji.";
-    let prompt = format!(
-        "Write a commit message for this staged change.\n\n\
-         FILES (name-status):\n{name_status}\n\n\
-         DIFF:\n{trimmed_diff}",
-    );
+    let system = "You write commit messages for git diffs. Output ONLY the commit message — no explanation, no markdown, no quotes. Format: a short imperative subject under 60 chars on the first line, then optionally a blank line and a short body explaining the WHY (not the what — the diff already shows that). Be specific. Skip the body if the change is small enough.";
+    let prompt = format!("Write a commit message for this staged diff:\n\n{trimmed}");
 
     let msg = gemini::gemini_generate(
         state,
         GenerateArgs {
             prompt,
             system: Some(system.to_string()),
-            // Bumped from 200 → 600 so multi-bullet bodies aren't cut off.
-            max_tokens: Some(600),
-            // Slightly lower temperature than before — convention adherence
-            // matters more than novelty for commit messages.
-            temperature: Some(0.25),
+            max_tokens: Some(200),
+            temperature: Some(0.4),
         },
     )
     .await?;

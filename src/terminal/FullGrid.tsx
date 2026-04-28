@@ -41,7 +41,7 @@ export function FullGrid({ frame, onSendBytes }: Props) {
     ) {
       return;
     }
-    const seq = keyToBytes(e);
+    const seq = keyToBytes(e, frame?.app_cursor ?? false);
     if (seq) {
       e.preventDefault();
       onSendBytes(seq);
@@ -107,10 +107,18 @@ export function FullGrid({ frame, onSendBytes }: Props) {
   );
 }
 
-/** Map a KeyboardEvent into the byte sequence the PTY expects. */
-function keyToBytes(e: KeyboardEvent<HTMLTextAreaElement>): Uint8Array | null {
+/** Map a KeyboardEvent into the byte sequence the PTY expects. The
+ *  `appCursor` flag selects between cursor-mode and application-mode
+ *  arrow encoding (DECCKM). */
+function keyToBytes(
+  e: KeyboardEvent<HTMLTextAreaElement>,
+  appCursor: boolean,
+): Uint8Array | null {
   const ctrl = e.ctrlKey;
   const alt = e.altKey;
+  const csi = (c: string) => encoder.encode(`\x1b[${c}`);
+  const ss3 = (c: string) => encoder.encode(`\x1bO${c}`);
+  const arrow = (c: string) => (appCursor ? ss3(c) : csi(c));
   // Special keys
   switch (e.key) {
     case "Enter":
@@ -122,23 +130,23 @@ function keyToBytes(e: KeyboardEvent<HTMLTextAreaElement>): Uint8Array | null {
     case "Escape":
       return new Uint8Array([0x1b]);
     case "ArrowUp":
-      return encoder.encode("\x1b[A");
+      return arrow("A");
     case "ArrowDown":
-      return encoder.encode("\x1b[B");
+      return arrow("B");
     case "ArrowRight":
-      return encoder.encode("\x1b[C");
+      return arrow("C");
     case "ArrowLeft":
-      return encoder.encode("\x1b[D");
+      return arrow("D");
     case "Home":
-      return encoder.encode("\x1b[H");
+      return arrow("H");
     case "End":
-      return encoder.encode("\x1b[F");
+      return arrow("F");
     case "PageUp":
-      return encoder.encode("\x1b[5~");
+      return csi("5~");
     case "PageDown":
-      return encoder.encode("\x1b[6~");
+      return csi("6~");
     case "Delete":
-      return encoder.encode("\x1b[3~");
+      return csi("3~");
   }
   // Ctrl-letter (e.g. ⌃C → 0x03, ⌃D → 0x04, ⌃Z → 0x1A)
   if (ctrl && !alt && e.key.length === 1) {

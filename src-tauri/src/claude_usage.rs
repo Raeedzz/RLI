@@ -33,10 +33,14 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use tauri::State;
+
+use crate::gemini::{generate_text, GeminiState};
 
 /// Anthropic's enforced 5-hour session length. A "session" in
 /// Claude.ai's UI = a 5h timer that starts on your first message after
@@ -234,47 +238,51 @@ pub fn claude_usage_status() -> Result<ClaudeUsageStatus, String> {
         }
     }
 
-    if rows.is_empty() {
-        return Ok(status);
-    }
-
-    // Walk chronologically and find the start of the CURRENT session.
-    // Anthropic's "session" is a 5h timer anchored on the first message
-    // after the previous session expired. So we scan forward, and each
-    // time the next message lands more than 5h after the current
-    // session anchor, we treat that message as a new anchor.
-    rows.sort_by_key(|r| r.ts_ms);
-    let mut session_start_ms = rows[0].ts_ms;
-    for r in &rows {
-        if r.ts_ms - session_start_ms > WINDOW_MS {
-            session_start_ms = r.ts_ms;
+    // Aggregate transcript rows ONLY when we have any. The cache-file
+    // path below runs unconditionally — even with zero transcript rows
+    // we still want the pill to appear if the status-line capture hook
+    // wrote real data within the freshness window. This was the bug
+    // that hid the pill the moment the user hit a quiet stretch in
+    // their JSONL (e.g. Claude was idle but the hook kept reporting).
+    if !rows.is_empty() {
+        // Walk chronologically and find the start of the CURRENT session.
+        // Anthropic's "session" is a 5h timer anchored on the first message
+        // after the previous session expired. So we scan forward, and each
+        // time the next message lands more than 5h after the current
+        // session anchor, we treat that message as a new anchor.
+        rows.sort_by_key(|r| r.ts_ms);
+        let mut session_start_ms = rows[0].ts_ms;
+        for r in &rows {
+            if r.ts_ms - session_start_ms > WINDOW_MS {
+                session_start_ms = r.ts_ms;
+            }
         }
-    }
 
-    // Aggregate ONLY rows in the current session: ts >= session_start
-    // AND ts < session_start + 5h. (Future-dated rows shouldn't exist
-    // but we guard the upper bound for safety.)
-    let session_end_ms = session_start_ms + WINDOW_MS;
-    for r in rows.iter().filter(|r| r.ts_ms >= session_start_ms && r.ts_ms < session_end_ms) {
-        status.message_count += 1;
-        status.total_input_tokens += r.input;
-        status.total_output_tokens += r.output;
-        status.total_cache_read_tokens += r.cache_read;
-        status.total_cache_creation_tokens += r.cache_creation;
-        if let Some(model) = &r.model {
-            let entry = status.by_model.entry(model.clone()).or_default();
-            entry.messages += 1;
-            entry.input_tokens += r.input;
-            entry.output_tokens += r.output;
-            entry.cache_read_tokens += r.cache_read;
-            entry.cache_creation_tokens += r.cache_creation;
+        // Aggregate ONLY rows in the current session: ts >= session_start
+        // AND ts < session_start + 5h. (Future-dated rows shouldn't exist
+        // but we guard the upper bound for safety.)
+        let session_end_ms = session_start_ms + WINDOW_MS;
+        for r in rows.iter().filter(|r| r.ts_ms >= session_start_ms && r.ts_ms < session_end_ms) {
+            status.message_count += 1;
+            status.total_input_tokens += r.input;
+            status.total_output_tokens += r.output;
+            status.total_cache_read_tokens += r.cache_read;
+            status.total_cache_creation_tokens += r.cache_creation;
+            if let Some(model) = &r.model {
+                let entry = status.by_model.entry(model.clone()).or_default();
+                entry.messages += 1;
+                entry.input_tokens += r.input;
+                entry.output_tokens += r.output;
+                entry.cache_read_tokens += r.cache_read;
+                entry.cache_creation_tokens += r.cache_creation;
+            }
         }
-    }
 
-    if status.message_count > 0 {
-        status.active = true;
-        status.window_start_ms = Some(session_start_ms);
-        status.window_ends_ms = Some(session_end_ms);
+        if status.message_count > 0 {
+            status.active = true;
+            status.window_start_ms = Some(session_start_ms);
+            status.window_ends_ms = Some(session_end_ms);
+        }
     }
 
     // Layer in the REAL rate-limit numbers when the user has installed
@@ -390,6 +398,306 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe as i64 - 719_468
 }
 
+/// One conversational turn extracted from the transcript. We keep
+/// just enough text to build a useful summary prompt — full assistant
+/// responses can be many KB; we cap each turn so the LLM call stays
+/// cheap and fast.
+#[derive(Clone, Debug)]
+struct Turn {
+    role: &'static str, // "user" or "assistant"
+    uuid: String,
+    text: String,
+}
+
+/// In-memory cache for the natural-language summary, keyed by the
+/// transcript-file path. We reuse the cached summary as long as the
+/// "fingerprint" of recent turns hasn't changed — that's the uuid of
+/// the latest user turn AND the latest assistant turn. Both being
+/// stable means no new exchange has landed since we last summarized,
+/// so there's nothing for Gemini to update. This is what lets the
+/// frontend poll on a 4s cadence without lighting up the API.
+#[derive(Clone)]
+struct CachedSummary {
+    user_uuid: String,
+    assistant_uuid: String,
+    summary: String,
+}
+
+fn summary_cache() -> &'static Mutex<HashMap<String, CachedSummary>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, CachedSummary>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Resolve `~/.claude/projects/<encoded-cwd>/` for `project_cwd`. The
+/// encoding rule is "every `/` becomes `-`" — same as Claude Code's
+/// internal one. Returns `None` for an empty cwd, missing home dir,
+/// or a transcript dir that doesn't exist yet.
+fn transcript_dir_for(project_cwd: &str) -> Option<PathBuf> {
+    if project_cwd.is_empty() {
+        return None;
+    }
+    let encoded = project_cwd.replace('/', "-");
+    let dir = dirs::home_dir()?.join(".claude").join("projects").join(&encoded);
+    if !dir.exists() {
+        return None;
+    }
+    Some(dir)
+}
+
+/// Pick the most-recently-modified .jsonl in a transcript dir. Claude
+/// appends to the active session live, so mtime is the right proxy
+/// for "which session is the user currently in".
+fn latest_transcript_in(dir: &Path) -> Option<PathBuf> {
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(mtime) = meta.modified() else { continue };
+        if best.as_ref().map_or(true, |(t, _)| mtime > *t) {
+            best = Some((mtime, path));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// Walk the transcript and pull out the last `n_user` user prompts
+/// plus all assistant turns interleaved with them.
+///
+/// We deliberately skip:
+///   - `type:"user"` rows whose `message.content` is an ARRAY (those are
+///     tool-result echoes, not what the user typed).
+///   - Slash commands and bracketed-paste system messages (start with
+///     `/` or `<`).
+///   - Assistant tool-use blocks (we keep just the `text` blocks — what
+///     the assistant actually said in chat, not which tools it called).
+fn read_recent_turns(path: &Path, n_user: usize) -> Result<Vec<Turn>, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(file);
+    let mut all: Vec<Turn> = Vec::new();
+    for line in reader.lines() {
+        let Ok(raw) = line else { continue };
+        if raw.is_empty() {
+            continue;
+        }
+        let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let line_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let uuid = parsed
+            .get("uuid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if line_type == "user" {
+            // Real prompts have content as a string; tool results are arrays.
+            let Some(s) = parsed
+                .pointer("/message/content")
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let trimmed = s.trim();
+            if trimmed.is_empty() || trimmed.starts_with('<') || trimmed.starts_with('/') {
+                continue;
+            }
+            all.push(Turn {
+                role: "user",
+                uuid,
+                text: cap_inline(trimmed, 600),
+            });
+        } else if line_type == "assistant" {
+            let Some(content) = parsed
+                .pointer("/message/content")
+                .and_then(|v| v.as_array())
+            else {
+                continue;
+            };
+            let mut texts: Vec<&str> = Vec::new();
+            for block in content {
+                if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                    if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                        let t = t.trim();
+                        if !t.is_empty() {
+                            texts.push(t);
+                        }
+                    }
+                }
+            }
+            if texts.is_empty() {
+                continue;
+            }
+            let combined = texts.join(" ");
+            all.push(Turn {
+                role: "assistant",
+                uuid,
+                text: cap_inline(&combined, 600),
+            });
+        }
+    }
+    // Trim to last `n_user` user turns + every assistant turn that
+    // sits between or after them.
+    let mut user_seen = 0;
+    let mut keep_from = all.len();
+    for (i, t) in all.iter().enumerate().rev() {
+        if t.role == "user" {
+            user_seen += 1;
+            keep_from = i;
+            if user_seen >= n_user {
+                break;
+            }
+        }
+    }
+    Ok(all.split_off(keep_from))
+}
+
+/// Collapse internal whitespace and cap to `max` chars. The transcript
+/// can contain newlines, tabs, and (rarely) control bytes — we want a
+/// single-line snippet that reads cleanly when stuffed into a prompt.
+fn cap_inline(s: &str, max: usize) -> String {
+    let normalized: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() > max {
+        let mut out: String = normalized.chars().take(max).collect();
+        out.push('…');
+        out
+    } else {
+        normalized
+    }
+}
+
+/// Strip chatty preamble and trailing punctuation from Gemini's raw
+/// reply so the result reads like a status line. Flash-Lite occasionally
+/// wraps its answer in quotes or appends a period — both look out of
+/// place in the 28px header strip.
+fn normalize_summary(raw: &str) -> String {
+    // Order matters: strip trailing period FIRST, in case it sits
+    // outside the closing quote (`"fix oauth flow".`). Then strip the
+    // quote pair. Then strip a trailing period one more time, in case
+    // it was sitting INSIDE the quotes (`"fix oauth flow."`). Either
+    // shape shows up in Flash-Lite output and we want both to land on
+    // the same result.
+    let mut s = raw.trim().trim_end_matches('.').trim().to_string();
+    if (s.starts_with('"') && s.ends_with('"'))
+        || (s.starts_with('\'') && s.ends_with('\''))
+    {
+        s = s[1..s.len() - 1].to_string();
+    }
+    let trimmed = s.trim().trim_end_matches('.').trim();
+    cap_inline(trimmed, 80)
+}
+
+/// Natural-language summary of what the user is working on inside
+/// claude / codex / aider, generated by Gemini Flash-Lite from the
+/// last 3 user prompts + the assistant's text replies between them.
+///
+/// Cached in-memory keyed by transcript path; the cache invalidates
+/// when either the latest user-turn uuid or the latest assistant-turn
+/// uuid changes (i.e. a new turn has actually been written). Polling
+/// at 4s from the frontend therefore costs ONE Gemini call per real
+/// exchange, not one per poll.
+///
+/// Falls back gracefully:
+///   - No transcript dir / no jsonl → `Ok(None)`. Frontend uses
+///     `activeCommand` ("claude") as the subtitle.
+///   - No Gemini key configured / API error → returns the most recent
+///     user prompt verbatim. Still better than just "claude".
+#[tauri::command]
+pub async fn claude_activity_summary(
+    state: State<'_, GeminiState>,
+    project_cwd: String,
+) -> Result<Option<String>, String> {
+    let Some(dir) = transcript_dir_for(&project_cwd) else {
+        return Ok(None);
+    };
+    let Some(path) = latest_transcript_in(&dir) else {
+        return Ok(None);
+    };
+
+    let turns = read_recent_turns(&path, 3)?;
+    if turns.is_empty() {
+        return Ok(None);
+    }
+
+    // Cache fingerprint = latest user uuid + latest assistant uuid. If
+    // both still match, nothing new has landed in the transcript and
+    // the cached summary is still accurate.
+    let path_key = path.to_string_lossy().to_string();
+    let latest_user_uuid = turns
+        .iter()
+        .rev()
+        .find(|t| t.role == "user")
+        .map(|t| t.uuid.clone())
+        .unwrap_or_default();
+    let latest_assistant_uuid = turns
+        .iter()
+        .rev()
+        .find(|t| t.role == "assistant")
+        .map(|t| t.uuid.clone())
+        .unwrap_or_default();
+    if let Some(cached) = summary_cache().lock().unwrap().get(&path_key).cloned() {
+        if cached.user_uuid == latest_user_uuid
+            && cached.assistant_uuid == latest_assistant_uuid
+        {
+            return Ok(Some(cached.summary));
+        }
+    }
+
+    // Fallback used when Gemini isn't reachable: the most recent real
+    // user prompt verbatim. Always populated when we have any turns,
+    // since `read_recent_turns` returns at most n_user + their replies.
+    let fallback = turns
+        .iter()
+        .rev()
+        .find(|t| t.role == "user")
+        .map(|t| cap_inline(&t.text, 80))
+        .unwrap_or_default();
+
+    let summary = match summarize_with_gemini(&state, &turns).await {
+        Ok(s) => s,
+        Err(_) => fallback.clone(),
+    };
+
+    summary_cache().lock().unwrap().insert(
+        path_key,
+        CachedSummary {
+            user_uuid: latest_user_uuid,
+            assistant_uuid: latest_assistant_uuid,
+            summary: summary.clone(),
+        },
+    );
+    Ok(Some(summary))
+}
+
+/// Build the prompt for Gemini and parse its single-line reply. Kept
+/// separate from the cache/file logic so it's easy to unit-test the
+/// shape of the prompt without standing up a Tauri app.
+async fn summarize_with_gemini(
+    state: &State<'_, GeminiState>,
+    turns: &[Turn],
+) -> Result<String, String> {
+    let mut convo = String::new();
+    for t in turns {
+        convo.push_str(&format!("[{}]\n{}\n\n", t.role.to_uppercase(), t.text));
+    }
+    let prompt = format!(
+        "Recent turns from a Claude Code session in a developer's terminal:\n\n\
+         {convo}\
+         Summarize what the developer is currently working on. One short \
+         phrase, 8 words or fewer, sentence case, no trailing period, no \
+         quotes. Use an active verb. Be specific about the task — not \
+         \"working on code\".",
+        convo = convo
+    );
+    let system = "You write concise activity summaries (max 8 words) for \
+                  a status line. Output only the summary itself — no \
+                  preamble, no explanation, no quotes, no trailing period.";
+    let raw = generate_text(state, &prompt, Some(system), Some(40), Some(0.2)).await?;
+    Ok(normalize_summary(&raw))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,5 +737,83 @@ mod tests {
         assert!(!s.active);
         assert_eq!(s.message_count, 0);
         assert_eq!(s.total_input_tokens, 0);
+    }
+
+    #[test]
+    fn cap_inline_collapses_whitespace_and_caps() {
+        let out = cap_inline("  hello\n\nworld\t  again  ", 100);
+        assert_eq!(out, "hello world again");
+    }
+
+    #[test]
+    fn cap_inline_truncates_with_ellipsis() {
+        let s = "x".repeat(120);
+        let out = cap_inline(&s, 50);
+        // Keeps `max` chars + the ellipsis sentinel — caller renders
+        // the … so they know it's truncated.
+        let chars: Vec<char> = out.chars().collect();
+        assert_eq!(chars.len(), 51);
+        assert_eq!(chars[50], '…');
+    }
+
+    #[test]
+    fn normalize_summary_strips_quotes_and_trailing_period() {
+        assert_eq!(normalize_summary("\"fix oauth flow\"."), "fix oauth flow");
+        assert_eq!(normalize_summary("'wire up oscillator'"), "wire up oscillator");
+        assert_eq!(normalize_summary("  refactor.  "), "refactor");
+    }
+
+    #[test]
+    fn read_recent_turns_filters_tool_results_and_keeps_text_blocks() {
+        // Build a fake transcript with: prompt, assistant-text+tool_use,
+        // tool-result (user/array), prompt, assistant-text. Should
+        // return the two prompts + two assistant text turns; the
+        // tool-result row is dropped.
+        let dir = std::env::temp_dir().join(format!(
+            "rli-claude-usage-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("session.jsonl");
+        let lines = [
+            r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"first prompt"}}"#,
+            r#"{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"sure thing"},{"type":"tool_use","name":"Bash"}]}}"#,
+            r#"{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#,
+            r#"{"type":"user","uuid":"u3","message":{"role":"user","content":"second prompt"}}"#,
+            r#"{"type":"assistant","uuid":"a2","message":{"content":[{"type":"text","text":"done"}]}}"#,
+        ];
+        std::fs::write(&path, lines.join("\n")).unwrap();
+
+        let turns = read_recent_turns(&path, 3).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+
+        let roles: Vec<&str> = turns.iter().map(|t| t.role).collect();
+        let texts: Vec<&str> = turns.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "user", "assistant"]);
+        assert_eq!(texts, vec!["first prompt", "sure thing", "second prompt", "done"]);
+    }
+
+    #[test]
+    fn read_recent_turns_skips_slash_commands_and_system_blocks() {
+        let dir = std::env::temp_dir().join(format!(
+            "rli-claude-usage-test-skip-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("session.jsonl");
+        let lines = [
+            r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"/help"}}"#,
+            r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"<system-reminder>nope</system-reminder>"}}"#,
+            r#"{"type":"user","uuid":"u3","message":{"role":"user","content":"the real one"}}"#,
+        ];
+        std::fs::write(&path, lines.join("\n")).unwrap();
+
+        let turns = read_recent_turns(&path, 3).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].text, "the real one");
     }
 }
