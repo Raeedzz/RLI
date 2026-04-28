@@ -128,6 +128,14 @@ fn entry(service: &str, account: &str) -> Result<Entry, String> {
 /// Save `value` under `(service, account)`. Prompts Touch ID first.
 /// Updates the session cache so subsequent reads in the same process
 /// don't re-prompt.
+///
+/// Currently unused: the Gemini key now lives in a plain 0600 file
+/// under `~/Library/Application Support/RLI/gemini-key`, so writes
+/// don't go through the keychain anymore. We keep this function around
+/// because the migration path (gemini.rs::load_key_for_use) still
+/// reads legacy keychain entries on first launch — and if some future
+/// secret needs Touch-ID-backed storage, the plumbing is here.
+#[allow(dead_code)]
 pub fn save_with_biometry(
     service: &str,
     account: &str,

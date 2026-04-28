@@ -26,6 +26,7 @@ mod term;
 use browser::BrowserState;
 use gemini::GeminiState;
 use memory::MemoryState;
+use tauri::Manager;
 use term::TerminalState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -77,6 +78,15 @@ pub fn run() {
             // anywhere on PATH. No-op if the file is already present
             // and matches the bundled version.
             install_memory_cli();
+
+            // Eagerly warm the Gemini key cache from disk. The file
+            // read never prompts (no Touch ID, no keychain ACL), so
+            // this is free — and means the user's FIRST gemini call
+            // (commit message, AskCard, session summary, anything)
+            // hits a hot cache and returns immediately. No more
+            // password/fingerprint friction at action time.
+            let gemini_state = app.state::<GeminiState>();
+            gemini::warm_cache_from_disk(&gemini_state);
             Ok(())
         });
 

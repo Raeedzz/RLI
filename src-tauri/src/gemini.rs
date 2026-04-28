@@ -6,15 +6,30 @@
 //!   - session naming + tab summaries (Task #13)
 //!   - memory layer embeddings (Task #12)
 //!
-//! API key is stored in the macOS Keychain with a `USER_PRESENCE`
-//! access control so reads route through Touch ID (passcode fallback)
-//! instead of the user's account password. See `crate::keychain`.
+//! API key storage: a plain file under
+//! `~/Library/Application Support/RLI/gemini-key` with mode 0600. The
+//! Touch-ID / Keychain path was retired because:
+//!   - dev / ad-hoc-signed builds re-trigger the keychain ACL prompt
+//!     every rebuild, surfacing as the "enter your password" dialog
+//!     even though we never ask for one;
+//!   - the in-process cache resets every app launch, so the first
+//!     Gemini call after launch always prompted Touch ID — and if
+//!     that first call was "generate commit message" the user
+//!     experienced friction on top of friction;
+//!   - the Gemini API key is a Google-issued, user-revocable token,
+//!     not a high-value secret. App-data-dir storage at 0600 is
+//!     proportional to its sensitivity.
+//! On launch we still try to migrate any existing keychain entry to
+//! the file (silently) so existing users don't have to re-enter their
+//! key — see `try_migrate_keychain_to_file`.
 //!
 //! v1 is non-streaming: one `gemini_generate` call returns full text
 //! when ready. Latency on Flash-Lite for 50–200-token outputs is
 //! sub-second; if highlight-and-ask ever feels laggy we'll add a
 //! streaming variant.
 
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -75,18 +90,79 @@ fn classify_http_error(status: reqwest::StatusCode, body: &str) -> String {
    Key management
    ------------------------------------------------------------------ */
 
+/// Resolve the on-disk path where we keep the API key. Returns None
+/// when we can't figure out a home directory (rare on macOS but the
+/// caller still needs to handle it gracefully).
+fn key_file_path() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    Some(
+        home.join("Library")
+            .join("Application Support")
+            .join("RLI")
+            .join("gemini-key"),
+    )
+}
+
+fn load_key_from_file() -> Option<String> {
+    let path = key_file_path()?;
+    let raw = fs::read_to_string(&path).ok()?;
+    let trimmed = raw.trim().to_string();
+    if trimmed.is_empty() { None } else { Some(trimmed) }
+}
+
+fn save_key_to_file(value: &str) -> Result<(), String> {
+    let path = key_file_path().ok_or("could not resolve home directory")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create app data dir: {e}"))?;
+    }
+    fs::write(&path, value.trim()).map_err(|e| format!("write key file: {e}"))?;
+    // 0600: owner-only read/write. Matches the ssh-key convention so
+    // tools that grep for sensitive files (e.g. dotfile audits) treat
+    // it appropriately.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn delete_key_file() -> Result<(), String> {
+    let Some(path) = key_file_path() else { return Ok(()) };
+    match fs::remove_file(&path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("remove key file: {e}")),
+    }
+}
+
+/// Prefer the file. On macOS, fall back to the keychain ONLY for users
+/// upgrading from the Touch-ID era — and if we successfully read it,
+/// migrate by writing it to the file so subsequent reads skip Touch ID.
 #[cfg(target_os = "macos")]
-fn load_key_from_keychain() -> Option<String> {
-    crate::keychain::load(KEYRING_SERVICE, KEYRING_USER)
-        .ok()
-        .flatten()
-        .filter(|s| !s.trim().is_empty())
+fn load_key_for_use() -> Option<String> {
+    if let Some(k) = load_key_from_file() {
+        return Some(k);
+    }
+    // Legacy keychain read. This path triggers Touch ID exactly once
+    // (during migration). After that the file path takes over.
+    let from_keychain =
+        crate::keychain::load(KEYRING_SERVICE, KEYRING_USER)
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())?;
+    let _ = save_key_to_file(&from_keychain);
+    let _ = crate::keychain::delete(KEYRING_SERVICE, KEYRING_USER);
+    Some(from_keychain)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn load_key_from_keychain() -> Option<String> {
-    // Non-macOS: no biometric backend yet. Fall back to env var so the
-    // dev workflow on Linux/Windows still works.
+fn load_key_for_use() -> Option<String> {
+    if let Some(k) = load_key_from_file() {
+        return Some(k);
+    }
+    // Linux/Windows: also honor the env var as a final fallback so the
+    // dev workflow without a settings dialog still works.
     std::env::var("GEMINI_API_KEY").ok().filter(|s| !s.trim().is_empty())
 }
 
@@ -96,22 +172,16 @@ pub fn gemini_set_key(state: State<GeminiState>, key: String) -> Result<(), Stri
     if trimmed.is_empty() {
         return Err("API key is empty".into());
     }
-    #[cfg(target_os = "macos")]
-    crate::keychain::save_with_biometry(KEYRING_SERVICE, KEYRING_USER, &trimmed)?;
-    #[cfg(not(target_os = "macos"))]
-    {
-        return Err("Setting API key requires macOS in this build".into());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-        *inner = Some(Client::new(trimmed));
-        Ok(())
-    }
+    save_key_to_file(&trimmed)?;
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    *inner = Some(Client::new(trimmed));
+    Ok(())
 }
 
 #[tauri::command]
 pub fn gemini_clear_key(state: State<GeminiState>) -> Result<(), String> {
+    delete_key_file()?;
+    // Best-effort keychain cleanup for users with legacy entries.
     #[cfg(target_os = "macos")]
     {
         let _ = crate::keychain::delete(KEYRING_SERVICE, KEYRING_USER);
@@ -131,8 +201,10 @@ pub fn gemini_key_status(state: State<GeminiState>) -> bool {
             }
         }
     }
-    // Fallback: check keychain directly (and warm up the cache while at it)
-    if let Some(key) = load_key_from_keychain() {
+    // Fallback: check storage directly (and warm up the cache while
+    // at it). The file path never prompts; the legacy keychain path
+    // triggers Touch ID once during migration.
+    if let Some(key) = load_key_for_use() {
         if let Ok(mut inner) = state.inner.lock() {
             *inner = Some(Client::new(key));
         }
@@ -142,7 +214,19 @@ pub fn gemini_key_status(state: State<GeminiState>) -> bool {
 }
 
 fn ensure_client(state: &State<GeminiState>) -> Result<Client, String> {
-    ensure_client_with_loader(&state.inner, load_key_from_keychain)
+    ensure_client_with_loader(&state.inner, load_key_for_use)
+}
+
+/// Called once during Tauri setup (lib.rs) to populate the in-memory
+/// client from the on-disk key file BEFORE the user does anything. No
+/// keychain, no Touch ID, no password — just a file read. After this,
+/// every gemini call within the app run is a cache hit.
+pub fn warm_cache_from_disk(state: &State<GeminiState>) {
+    if let Some(key) = load_key_from_file() {
+        if let Ok(mut inner) = state.inner.lock() {
+            *inner = Some(Client::new(key));
+        }
+    }
 }
 
 fn ensure_client_with_loader(

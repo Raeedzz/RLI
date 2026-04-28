@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { git, type StatusEntry, type StatusResult } from "@/lib/git";
+import { useAppDispatch } from "@/state/AppState";
 
 interface Props {
   projectPath: string;
@@ -41,6 +42,7 @@ const POLL_MS = 4000;
  * respect the user's branch tracking config.
  */
 export function GitPanel({ projectPath, selectedPath, onOpenDiff }: Props) {
+  const dispatch = useAppDispatch();
   const [status, setStatus] = useState<StatusResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyPath, setBusyPath] = useState<string | null>(null);
@@ -151,7 +153,16 @@ export function GitPanel({ projectPath, selectedPath, onOpenDiff }: Props) {
       const msg = await git.aiCommitMessage(projectPath);
       setMessage(msg);
     } catch (e) {
-      flashToast(`generate failed: ${e}`);
+      const msg = String(e).toLowerCase();
+      // First-run UX: when there's no key, jump straight into the
+      // entry dialog instead of leaving the user to hunt down the
+      // command-palette item. AskCard does the same.
+      if (msg.includes("api key") || msg.includes("not configured")) {
+        flashToast("paste your Gemini API key to enable AI commit messages");
+        dispatch({ type: "set-api-key-dialog", open: true });
+      } else {
+        flashToast(`generate failed: ${e}`);
+      }
     } finally {
       setGenerating(false);
     }
