@@ -136,34 +136,20 @@ fn delete_key_file() -> Result<(), String> {
     }
 }
 
-/// Prefer the file. On macOS, fall back to the keychain ONLY for users
-/// upgrading from the Touch-ID era — and if we successfully read it,
-/// migrate by writing it to the file so subsequent reads skip Touch ID.
-#[cfg(target_os = "macos")]
+/// Resolve the key. ONLY reads the plain file (and a `GEMINI_API_KEY`
+/// env-var fallback for headless dev workflows). No keychain, no
+/// biometry, no macOS ACL prompt — ever. If the file is missing, the
+/// frontend shows the existing API-key dialog and the user pastes
+/// their key once; from then on every Gemini call is a silent file
+/// read.
 fn load_key_for_use() -> Option<String> {
     if let Some(k) = load_key_from_file() {
         return Some(k);
     }
-    // Legacy keychain read. This path triggers Touch ID exactly once
-    // (during migration). After that the file path takes over.
-    let from_keychain =
-        crate::keychain::load(KEYRING_SERVICE, KEYRING_USER)
-            .ok()
-            .flatten()
-            .filter(|s| !s.trim().is_empty())?;
-    let _ = save_key_to_file(&from_keychain);
-    let _ = crate::keychain::delete(KEYRING_SERVICE, KEYRING_USER);
-    Some(from_keychain)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn load_key_for_use() -> Option<String> {
-    if let Some(k) = load_key_from_file() {
-        return Some(k);
-    }
-    // Linux/Windows: also honor the env var as a final fallback so the
-    // dev workflow without a settings dialog still works.
-    std::env::var("GEMINI_API_KEY").ok().filter(|s| !s.trim().is_empty())
+    std::env::var("GEMINI_API_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 #[tauri::command]
@@ -181,11 +167,11 @@ pub fn gemini_set_key(state: State<GeminiState>, key: String) -> Result<(), Stri
 #[tauri::command]
 pub fn gemini_clear_key(state: State<GeminiState>) -> Result<(), String> {
     delete_key_file()?;
-    // Best-effort keychain cleanup for users with legacy entries.
-    #[cfg(target_os = "macos")]
-    {
-        let _ = crate::keychain::delete(KEYRING_SERVICE, KEYRING_USER);
-    }
+    // Note: any legacy keychain entry from before the file-storage
+    // migration is left in place. Removing it would prompt biometry,
+    // which is exactly the friction this whole change set up to
+    // eliminate. The orphan entry is harmless — load_key_for_use no
+    // longer reads it. Users who care can prune it via Keychain Access.
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     *inner = None;
     Ok(())
