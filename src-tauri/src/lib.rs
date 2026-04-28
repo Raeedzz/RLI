@@ -8,6 +8,8 @@
 ///   - process: required for the auto-update plugin's restart hook
 ///
 /// Per-feature plumbing lives in `crate::*` modules — registered below.
+#[cfg(target_os = "macos")]
+mod browser;
 mod connections;
 mod fs;
 mod gemini;
@@ -19,13 +21,15 @@ mod search;
 mod state;
 mod term;
 
+#[cfg(target_os = "macos")]
+use browser::BrowserState;
 use gemini::GeminiState;
 use memory::MemoryState;
 use term::TerminalState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
@@ -33,7 +37,27 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(TerminalState::default())
         .manage(GeminiState::default())
-        .manage(MemoryState::default())
+        .manage(MemoryState::default());
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .manage(BrowserState::default())
+        .setup(|app| {
+            // Browser daemon: in-house replacement for gstack's
+            // localhost:4000 service. Binds the port + spawns the axum
+            // server in the background; Chrome itself is forked lazily
+            // on the first /navigate or /screenshot HTTP call.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match browser::daemon::start(handle).await {
+                    Ok(port) => eprintln!("[browser daemon] bound on 127.0.0.1:{port}"),
+                    Err(e) => eprintln!("[browser daemon] failed to start: {e}"),
+                }
+            });
+            Ok(())
+        });
+
+    builder
         .invoke_handler(tauri::generate_handler![
             // Terminal (alacritty_terminal + custom React renderer)
             term::term_start,

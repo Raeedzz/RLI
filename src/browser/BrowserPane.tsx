@@ -1,12 +1,12 @@
 import { motion } from "motion/react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { connectionsViewVariants } from "@/design/motion";
 import {
-  gstack,
-  type GstackHealth,
-  type GstackLogEntry,
-  type GstackStatus,
-} from "@/lib/gstack";
+  browser,
+  type BrowserHealth,
+  type BrowserLogEntry,
+  type BrowserStatus,
+} from "@/lib/browser";
 
 interface Props {
   onClose: () => void;
@@ -15,45 +15,73 @@ interface Props {
    * absolute-positioned overlay. Used by the workspace pane tree.
    */
   embedded?: boolean;
+  /**
+   * Initial URL to navigate to on mount. If omitted, the URL bar opens
+   * empty and waits for the user.
+   */
+  initialUrl?: string;
 }
 
 const SCREENSHOT_INTERVAL_MS = 1000;
 const STATUS_INTERVAL_MS = 1500;
+const COMMON_DEV_PORTS = [5173, 3000, 8080, 4321, 1420];
 
 /**
- * GStack browser pane (Task #14).
+ * In-house browser pane — drives the Rust-side browser daemon.
  *
- * Slides in from the right edge. Shows live screenshot of the page
- * GStack is on, the URL, and a tailing console feed.
- *
- * If the daemon isn't reachable, surfaces an empty-state with the
- * install hint instead of an error wall.
+ * URL bar at the top forwards /navigate. Clicks on the screenshot
+ * forward /click in viewport coordinates. Keystrokes (when the viewport
+ * is "focused") forward to /type or /key. The daemon's PNG screenshot
+ * is polled at 1Hz; polling pauses while the tab is hidden so background
+ * windows don't burn CPU.
  */
-export function BrowserPane({ onClose, embedded = false }: Props) {
-  const [health, setHealth] = useState<GstackHealth | null>(null);
-  const [status, setStatus] = useState<GstackStatus | null>(null);
-  const [logs, setLogs] = useState<GstackLogEntry[]>([]);
-  const [screenshotKey, setScreenshotKey] = useState(0);
+export function BrowserPane({ onClose, embedded = false, initialUrl }: Props) {
+  const [health, setHealth] = useState<BrowserHealth | null>(null);
+  const [status, setStatus] = useState<BrowserStatus | null>(null);
+  const [logs, setLogs] = useState<BrowserLogEntry[]>([]);
+  const [screenshotUrl, setScreenshotUrl] = useState<string | null>(null);
+  const [urlInput, setUrlInput] = useState(initialUrl ?? "");
+  const [focused, setFocused] = useState(false);
 
-  // Health check on mount
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const focusTrap = useRef<HTMLTextAreaElement | null>(null);
+
+  // Health check on mount, retry every 2s until daemon is up.
   useEffect(() => {
     let cancelled = false;
-    gstack.health().then((h) => {
-      if (!cancelled) setHealth(h);
-    });
+    const check = () => {
+      void browser.health().then((h) => {
+        if (!cancelled) setHealth(h);
+      });
+    };
+    check();
+    const t = window.setInterval(() => {
+      if (!cancelled && !health?.ok) check();
+    }, 2000);
     return () => {
       cancelled = true;
+      window.clearInterval(t);
     };
-  }, []);
+  }, [health?.ok]);
 
-  // Poll status + console while connected
+  // Auto-navigate to the initial URL once health flips ok.
+  useEffect(() => {
+    if (health?.ok && initialUrl && !status?.url) {
+      void browser.navigate(initialUrl);
+    }
+  }, [health?.ok, initialUrl, status?.url]);
+
+  // Poll status + console while connected. Pause when the document is
+  // hidden (background window) — no point polling a screenshot the user
+  // can't see.
   useEffect(() => {
     if (!health?.ok) return;
     let cancelled = false;
     const poll = async () => {
-      const s = await gstack.status();
+      if (document.visibilityState === "hidden") return;
+      const s = await browser.status();
       if (!cancelled) setStatus(s);
-      const c = await gstack.console();
+      const c = await browser.console();
       if (!cancelled && c) setLogs(c.entries.slice(-100));
     };
     void poll();
@@ -64,14 +92,21 @@ export function BrowserPane({ onClose, embedded = false }: Props) {
     };
   }, [health?.ok]);
 
-  // Bump screenshot key periodically to force <img> reload
+  // Refresh screenshot URL on a 1Hz tick (drives <img> reload).
   useEffect(() => {
     if (!health?.ok || !status?.ready) return;
-    const t = window.setInterval(
-      () => setScreenshotKey((k) => k + 1),
-      SCREENSHOT_INTERVAL_MS,
-    );
-    return () => window.clearInterval(t);
+    let cancelled = false;
+    const tick = async () => {
+      if (document.visibilityState === "hidden") return;
+      const u = await browser.screenshotUrl();
+      if (!cancelled) setScreenshotUrl(u);
+    };
+    void tick();
+    const t = window.setInterval(() => void tick(), SCREENSHOT_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
   }, [health?.ok, status?.ready]);
 
   // Esc to close — overlay mode only. In embedded (in-pane) mode the
@@ -80,14 +115,57 @@ export function BrowserPane({ onClose, embedded = false }: Props) {
   useEffect(() => {
     if (embedded) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      if (e.key === "Escape" && !focused) {
         e.preventDefault();
         onClose();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, embedded]);
+  }, [onClose, embedded, focused]);
+
+  const handleNavigate = useCallback(async (raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    // Bare port number → localhost:N.
+    let target = trimmed;
+    if (/^\d+$/.test(trimmed)) target = `http://localhost:${trimmed}/`;
+    else if (!/^https?:\/\//i.test(trimmed)) target = `https://${trimmed}`;
+    await browser.navigate(target);
+    setUrlInput(target);
+  }, []);
+
+  const handleClick = useCallback(async (e: React.MouseEvent<HTMLImageElement>) => {
+    const img = imgRef.current;
+    if (!img || !img.naturalWidth || !img.naturalHeight) return;
+    const rect = img.getBoundingClientRect();
+    const xRatio = img.naturalWidth / rect.width;
+    const yRatio = img.naturalHeight / rect.height;
+    const x = (e.clientX - rect.left) * xRatio;
+    const y = (e.clientY - rect.top) * yRatio;
+    setFocused(true);
+    focusTrap.current?.focus();
+    await browser.click(x, y);
+  }, []);
+
+  // Map browser keypresses inside the focus trap to /key (named keys)
+  // or /type (printable text). The hidden textarea catches the events;
+  // we preventDefault to keep its DOM contents empty.
+  const handleKey = useCallback(async (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!focused) return;
+    if (e.key === "Escape") {
+      setFocused(false);
+      focusTrap.current?.blur();
+      e.preventDefault();
+      return;
+    }
+    e.preventDefault();
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      await browser.type(e.key);
+    } else {
+      await browser.key(e.key);
+    }
+  }, [focused]);
 
   const overlayStyle = {
     position: "absolute" as const,
@@ -110,6 +188,7 @@ export function BrowserPane({ onClose, embedded = false }: Props) {
     display: "flex",
     flexDirection: "column" as const,
   };
+
   return (
     <motion.aside
       variants={embedded ? undefined : connectionsViewVariants}
@@ -118,18 +197,50 @@ export function BrowserPane({ onClose, embedded = false }: Props) {
       exit="exit"
       style={embedded ? embeddedStyle : overlayStyle}
     >
-      <Header
-        status={status}
-        health={health}
+      <UrlBar
+        urlInput={urlInput}
+        onUrlChange={setUrlInput}
+        onNavigate={handleNavigate}
+        onBack={() => void browser.back()}
+        onForward={() => void browser.forward()}
+        onReload={() => void browser.reload()}
+        onOpen={() => void browser.openInBrowser()}
         onClose={onClose}
         embedded={embedded}
+        status={status}
+        health={health}
       />
 
-      {!health && <Empty label="checking gstack daemon…" />}
+      {!health && <Empty label="starting browser daemon…" />}
       {health && !health.ok && <DaemonOffline error={health.error} />}
       {health?.ok && (
         <>
-          <Frame status={status} screenshotKey={screenshotKey} />
+          <Frame
+            status={status}
+            screenshotUrl={screenshotUrl}
+            imgRef={imgRef}
+            focused={focused}
+            onClick={handleClick}
+            onBlur={() => setFocused(false)}
+          />
+          <textarea
+            ref={focusTrap}
+            value=""
+            onChange={() => {}}
+            onKeyDown={handleKey}
+            onBlur={() => setFocused(false)}
+            tabIndex={-1}
+            aria-hidden
+            style={{
+              position: "absolute",
+              left: -9999,
+              top: -9999,
+              width: 1,
+              height: 1,
+              opacity: 0,
+              pointerEvents: "none",
+            }}
+          />
           <ConsoleTail logs={logs} />
         </>
       )}
@@ -137,133 +248,195 @@ export function BrowserPane({ onClose, embedded = false }: Props) {
   );
 }
 
-function Header({
-  status,
-  health,
+function UrlBar({
+  urlInput,
+  onUrlChange,
+  onNavigate,
+  onBack,
+  onForward,
+  onReload,
+  onOpen,
   onClose,
   embedded,
+  status,
+  health,
 }: {
-  status: GstackStatus | null;
-  health: GstackHealth | null;
+  urlInput: string;
+  onUrlChange: (v: string) => void;
+  onNavigate: (v: string) => Promise<void>;
+  onBack: () => void;
+  onForward: () => void;
+  onReload: () => void;
+  onOpen: () => void;
   onClose: () => void;
   embedded?: boolean;
+  status: BrowserStatus | null;
+  health: BrowserHealth | null;
 }) {
-  // Embedded mode: thin URL bar only (PaneFrame gives the title row).
-  // Overlay mode: full title + URL row.
-  const height = embedded ? 26 : 36;
+  const inputRef = useRef<HTMLInputElement | null>(null);
   return (
     <div
       style={{
-        height,
+        height: 32,
         flexShrink: 0,
         display: "flex",
         alignItems: "center",
-        justifyContent: "space-between",
-        padding: "0 var(--space-3)",
+        gap: "var(--space-1)",
+        padding: "0 var(--space-2)",
         borderBottom: "var(--border-1)",
         backgroundColor: "var(--surface-1)",
-        userSelect: "none",
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "var(--space-2)",
-          minWidth: 0,
-        }}
-      >
-        <Dot
-          color={
-            health?.ok
+      <NavBtn label="◀" onClick={onBack} disabled={!health?.ok} title="back" />
+      <NavBtn label="▶" onClick={onForward} disabled={!health?.ok} title="forward" />
+      <NavBtn label="↻" onClick={onReload} disabled={!status?.ready} title="reload" />
+
+      <Dot
+        color={
+          health?.ok
+            ? status?.ready
               ? "var(--state-success)"
-              : health
-                ? "var(--state-error)"
-                : "var(--text-tertiary)"
+              : "var(--text-tertiary)"
+            : "var(--state-error)"
+        }
+      />
+
+      <input
+        ref={inputRef}
+        type="text"
+        value={urlInput}
+        onChange={(e) => onUrlChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void onNavigate(urlInput);
           }
-        />
-        {!embedded && (
-          <span
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontSize: "var(--text-sm)",
-              fontWeight: "var(--weight-medium)",
-              color: "var(--text-primary)",
-              letterSpacing: "var(--tracking-tight)",
-            }}
-          >
-            browser
-          </span>
-        )}
-        <span
+        }}
+        placeholder={
+          status?.url ?? `localhost:${COMMON_DEV_PORTS[0]} or full URL`
+        }
+        spellCheck={false}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          height: 22,
+          padding: "0 var(--space-2)",
+          fontFamily: "var(--font-mono)",
+          fontSize: "var(--text-2xs)",
+          color: "var(--text-primary)",
+          backgroundColor: "var(--surface-0)",
+          border: "var(--border-1)",
+          borderRadius: "var(--radius-sm)",
+          outline: "none",
+        }}
+      />
+
+      <PortQuickList
+        ports={COMMON_DEV_PORTS}
+        onPick={(p) => {
+          const url = `http://localhost:${p}/`;
+          onUrlChange(url);
+          void onNavigate(url);
+        }}
+      />
+
+      {health?.ok && (
+        <NavBtn label="↗" onClick={onOpen} title="open in real browser" />
+      )}
+      {!embedded && (
+        <NavBtn label="×" onClick={onClose} title="close (esc)" />
+      )}
+    </div>
+  );
+}
+
+function NavBtn({
+  label,
+  onClick,
+  title,
+  disabled,
+}: {
+  label: string;
+  onClick: () => void;
+  title?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      disabled={disabled}
+      style={{
+        width: 22,
+        height: 22,
+        display: "grid",
+        placeItems: "center",
+        backgroundColor: "transparent",
+        color: disabled ? "var(--text-tertiary)" : "var(--text-secondary)",
+        fontFamily: "var(--font-mono)",
+        fontSize: "var(--text-xs)",
+        border: "none",
+        borderRadius: "var(--radius-sm)",
+        cursor: disabled ? "default" : "pointer",
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+function PortQuickList({
+  ports,
+  onPick,
+}: {
+  ports: readonly number[];
+  onPick: (p: number) => void;
+}) {
+  return (
+    <div style={{ display: "flex", gap: 2 }}>
+      {ports.slice(0, 3).map((p) => (
+        <button
+          key={p}
+          type="button"
+          onClick={() => onPick(p)}
+          title={`localhost:${p}`}
           style={{
+            height: 22,
+            padding: "0 var(--space-1)",
             fontFamily: "var(--font-mono)",
             fontSize: "var(--text-2xs)",
             color: "var(--text-tertiary)",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            minWidth: 0,
+            backgroundColor: "transparent",
+            border: "var(--border-1)",
+            borderRadius: "var(--radius-sm)",
+            cursor: "pointer",
           }}
         >
-          {status?.url ?? (health?.ok ? "no url" : "daemon offline")}
-        </span>
-      </div>
-
-      <div style={{ display: "flex", alignItems: "center", gap: "var(--space-1)" }}>
-        {health?.ok && (
-          <button
-            type="button"
-            onClick={() => void gstack.openInBrowser()}
-            title="open in real browser"
-            style={{
-              height: 20,
-              padding: "0 var(--space-2)",
-              fontFamily: "var(--font-sans)",
-              fontSize: "var(--text-2xs)",
-              color: "var(--text-secondary)",
-              backgroundColor: "transparent",
-              border: "var(--border-1)",
-              borderRadius: "var(--radius-sm)",
-              cursor: "pointer",
-            }}
-          >
-            open
-          </button>
-        )}
-        {!embedded && (
-          <button
-            type="button"
-            onClick={onClose}
-            title="close (esc)"
-            style={{
-              width: 24,
-              height: 24,
-              backgroundColor: "transparent",
-              color: "var(--text-tertiary)",
-              fontFamily: "var(--font-mono)",
-              fontSize: "var(--text-md)",
-              borderRadius: "var(--radius-sm)",
-              cursor: "pointer",
-            }}
-          >
-            ×
-          </button>
-        )}
-      </div>
+          {p}
+        </button>
+      ))}
     </div>
   );
 }
 
 function Frame({
   status,
-  screenshotKey,
+  screenshotUrl,
+  imgRef,
+  focused,
+  onClick,
+  onBlur,
 }: {
-  status: GstackStatus | null;
-  screenshotKey: number;
+  status: BrowserStatus | null;
+  screenshotUrl: string | null;
+  imgRef: React.MutableRefObject<HTMLImageElement | null>;
+  focused: boolean;
+  onClick: (e: React.MouseEvent<HTMLImageElement>) => void;
+  onBlur: () => void;
 }) {
-  if (!status?.ready) {
-    return <Empty label="daemon connected · waiting for a page" />;
+  if (!status?.ready || !screenshotUrl) {
+    return <Empty label="ready · type a URL above to load a page" />;
   }
   return (
     <div
@@ -274,22 +447,26 @@ function Frame({
         display: "grid",
         placeItems: "center",
         overflow: "hidden",
+        position: "relative",
+        outline: focused ? "2px solid var(--accent-1)" : "2px solid transparent",
+        outlineOffset: -2,
       }}
+      onClick={() => onBlur()}
     >
       <img
-        key={screenshotKey}
-        src={gstack.screenshotUrl()}
+        ref={imgRef}
+        src={screenshotUrl}
         alt={status.title ?? "browser preview"}
-        // Native HTML img is draggable by default — without this, the
-        // user grabs the screenshot as a "save image" drag instead of
-        // moving the pane around the workspace.
         draggable={false}
+        onClick={(e) => {
+          e.stopPropagation();
+          void onClick(e);
+        }}
         style={{
           maxWidth: "100%",
           maxHeight: "100%",
           objectFit: "contain",
-          // Block native image-drag on WebKit, where the `draggable`
-          // attribute alone isn't always enough.
+          cursor: "crosshair",
           WebkitUserDrag: "none",
         } as React.CSSProperties}
       />
@@ -297,7 +474,7 @@ function Frame({
   );
 }
 
-function ConsoleTail({ logs }: { logs: GstackLogEntry[] }) {
+function ConsoleTail({ logs }: { logs: BrowserLogEntry[] }) {
   return (
     <div
       style={{
@@ -337,7 +514,7 @@ function ConsoleTail({ logs }: { logs: GstackLogEntry[] }) {
   );
 }
 
-function LogRow({ entry }: { entry: GstackLogEntry }) {
+function LogRow({ entry }: { entry: BrowserLogEntry }) {
   const tone =
     entry.level === "error"
       ? "var(--state-error)"
@@ -429,7 +606,7 @@ function DaemonOffline({ error }: { error?: string }) {
             color: "var(--text-primary)",
           }}
         >
-          gstack daemon not running
+          browser daemon failed to start
         </div>
         <div
           style={{
@@ -438,18 +615,9 @@ function DaemonOffline({ error }: { error?: string }) {
             lineHeight: "var(--leading-sm)",
           }}
         >
-          The browser pane talks to gstack's persistent Chromium daemon. Start
-          it from a terminal or install it if you haven't yet.
-        </div>
-        <div
-          style={{
-            display: "grid",
-            gap: 4,
-            justifyContent: "center",
-          }}
-        >
-          <Mono>brew install gstack</Mono>
-          <Mono>gstack browser start</Mono>
+          The in-house daemon couldn't bind a local port. Check the app
+          log for details — usually means another process is using
+          ports 4000–4099.
         </div>
         {error && (
           <div
@@ -465,23 +633,5 @@ function DaemonOffline({ error }: { error?: string }) {
         )}
       </div>
     </div>
-  );
-}
-
-function Mono({ children }: { children: React.ReactNode }) {
-  return (
-    <span
-      style={{
-        fontFamily: "var(--font-mono)",
-        fontSize: "var(--text-xs)",
-        color: "var(--text-secondary)",
-        backgroundColor: "var(--surface-2)",
-        padding: "2px 8px",
-        borderRadius: "var(--radius-xs)",
-        fontVariantLigatures: "none",
-      }}
-    >
-      {children}
-    </span>
   );
 }

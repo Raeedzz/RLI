@@ -32,12 +32,8 @@ export function BlockList({ blocks }: Props) {
   return (
     <div
       style={{
-        flex: 1,
-        minHeight: 0,
         display: "flex",
         flexDirection: "column-reverse",
-        overflowY: "auto",
-        overflowX: "hidden",
         padding: "var(--space-2) 0",
       }}
     >

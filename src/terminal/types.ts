@@ -44,6 +44,10 @@ export interface ClosedBlock {
    */
   transcript: string;
   exit_code: number | null;
+  /** cwd at OSC 133 C — where the command actually ran. */
+  cwd: string | null;
+  /** Wall-clock duration in ms from OSC 133 C → D. */
+  durationMs: number | null;
 }
 
 export interface Block {
@@ -52,4 +56,6 @@ export interface Block {
   input: string;
   transcript: string;
   exit_code: number | null;
+  cwd: string | null;
+  durationMs: number | null;
 }

@@ -115,10 +115,10 @@ export function TopBar() {
         // data-tauri-drag-region="false" stay clickable.
         data-tauri-drag-region
         style={{
-          height: 36,
+          minHeight: 36,
           flexShrink: 0,
           display: "flex",
-          alignItems: "stretch",
+          alignItems: "flex-start",
           backgroundColor: "var(--surface-1)",
           borderBottom: "var(--border-1)",
           // Traffic-light cluster lives one strip up in <WindowChrome>,
@@ -166,31 +166,6 @@ function SessionTabs({
   const activeId = project ? state.activeSessionByProject[project.id] : null;
   const [editingId, setEditingId] = useState<SessionId | null>(null);
   const [dropTargetId, setDropTargetId] = useState<SessionId | null>(null);
-  // Track horizontal scroll state so we can fade the edges of the tab
-  // strip when content overflows — without this, ten-plus tabs just
-  // disappear under the project pill with no indication you can scroll.
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [overflow, setOverflow] = useState({ left: false, right: false });
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const update = () => {
-      const left = el.scrollLeft > 1;
-      const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
-      setOverflow((prev) =>
-        prev.left === left && prev.right === right ? prev : { left, right },
-      );
-    };
-    update();
-    el.addEventListener("scroll", update, { passive: true });
-    const observer = new ResizeObserver(update);
-    observer.observe(el);
-    return () => {
-      el.removeEventListener("scroll", update);
-      observer.disconnect();
-    };
-  }, [sessions.length]);
 
   if (!project) return <div />;
 
@@ -222,23 +197,16 @@ function SessionTabs({
 
   return (
     <div
-      ref={scrollRef}
       role="tablist"
       aria-label="Sessions"
       style={{
         position: "relative",
         display: "flex",
         alignItems: "stretch",
+        flexWrap: "wrap",
+        rowGap: 2,
         minWidth: 0,
         flex: 1,
-        overflowX: "auto",
-        overflowY: "hidden",
-        // Fade the edges when there's more tabs than fit. Using a mask
-        // means the gradient adapts to whatever surface is behind the
-        // header (light or dark, hover or not) without us painting our
-        // own color on top.
-        WebkitMaskImage: maskImageFor(overflow),
-        maskImage: maskImageFor(overflow),
       }}
     >
       {sessions.map((session) => (
@@ -354,6 +322,7 @@ function SessionTab({
         flexShrink: 0,
         minWidth: 0,
         maxWidth: 220,
+        height: 36,
         display: "flex",
         alignItems: "center",
         gap: "var(--space-2)",
@@ -518,6 +487,7 @@ function NewSessionButton({ projectId }: { projectId: ProjectId }) {
         alignItems: "center",
         justifyContent: "center",
         width: 32,
+        height: 36,
         backgroundColor: "transparent",
         color: "var(--text-tertiary)",
         fontFamily: "var(--font-mono)",
@@ -576,6 +546,7 @@ function ProjectSwitcher({
         style={{
           display: "inline-flex",
           alignItems: "center",
+          height: 36,
           gap: "var(--space-2)",
           padding: "0 var(--space-3) 0 var(--space-3)",
           backgroundColor: open ? tintedHover : tinted,
@@ -792,21 +763,3 @@ function abbreviatePath(p: string): string {
   return p.replace(/^\/Users\/[^/]+/, "~");
 }
 
-/**
- * Returns a CSS mask gradient that fades the start/end of the tab strip
- * when those edges are scrolled past content. Empty string means no mask
- * — the strip fits without scrolling. Pure-CSS so no extra DOM nodes.
- */
-function maskImageFor({
-  left,
-  right,
-}: {
-  left: boolean;
-  right: boolean;
-}): string {
-  if (!left && !right) return "none";
-  const FADE = "20px";
-  const start = left ? "transparent" : "black";
-  const end = right ? "transparent" : "black";
-  return `linear-gradient(to right, ${start} 0, black ${FADE}, black calc(100% - ${FADE}), ${end} 100%)`;
-}

@@ -119,6 +119,8 @@ export function useTerminalSession(opts: Args): SessionApi {
           input: stamped,
           transcript: b.transcript,
           exit_code: b.exit_code,
+          cwd: b.cwd,
+          durationMs: b.durationMs,
         },
       ]);
     };
@@ -182,6 +184,8 @@ export function useTerminalSession(opts: Args): SessionApi {
               input: "",
               transcript: `error starting terminal: ${String(err)}`,
               exit_code: 1,
+              cwd: null,
+              durationMs: null,
             },
           ]);
         }

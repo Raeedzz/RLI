@@ -211,6 +211,15 @@ pub struct ClosedBlock {
     /// to what scrolled past in the live terminal.
     pub transcript: String,
     pub exit_code: Option<i32>,
+    /// Working directory at the moment the command started running
+    /// (OSC 133 C). Populated from the most recent OSC 7 the
+    /// segmenter has seen. None if the shell never reported a cwd.
+    pub cwd: Option<String>,
+    /// Wall-clock duration from OSC 133 C → D in milliseconds. None
+    /// if D was never observed (e.g. shell ate the marker or the
+    /// command hard-killed before exiting).
+    #[serde(rename = "durationMs")]
+    pub duration_ms: Option<u64>,
 }
 
 struct BlockSegmenter {
@@ -230,6 +239,15 @@ struct BlockSegmenter {
     /// thread drains this and emits a `term://<id>/cwd` Tauri event so
     /// the chrome's folder pill follows the live terminal cwd.
     pending_cwd: Option<String>,
+    /// Most recent OSC 7 cwd. Snapshotted onto each ClosedBlock at
+    /// OSC 133 C so each rendered block shows where it ran.
+    current_cwd: Option<String>,
+    /// Snapshotted at OSC 133 C and copied onto the ClosedBlock when
+    /// it closes. Stays None until C fires.
+    current_block_cwd: Option<String>,
+    /// Wall-clock instant of the last OSC 133 C — used to compute
+    /// `duration_ms` when the matching D arrives.
+    current_block_start: Option<Instant>,
 }
 
 impl BlockSegmenter {
@@ -242,6 +260,9 @@ impl BlockSegmenter {
             current_transcript: Vec::with_capacity(4096),
             command_just_started: false,
             pending_cwd: None,
+            current_cwd: None,
+            current_block_cwd: None,
+            current_block_start: None,
         }
     }
 
@@ -329,7 +350,8 @@ impl BlockSegmenter {
         if buf.starts_with(b"7;") {
             if let Ok(s) = std::str::from_utf8(&buf[2..]) {
                 if let Some(path) = parse_file_url(s) {
-                    self.pending_cwd = Some(path);
+                    self.pending_cwd = Some(path.clone());
+                    self.current_cwd = Some(path);
                 }
             }
             return;
@@ -362,6 +384,8 @@ impl BlockSegmenter {
             Some(b'C') => {
                 self.state = SegState::InOutput;
                 self.command_just_started = true;
+                self.current_block_cwd = self.current_cwd.clone();
+                self.current_block_start = Some(Instant::now());
             }
             Some(b'D') => {
                 let exit = rest.parse::<i32>().ok();
@@ -377,10 +401,17 @@ impl BlockSegmenter {
             return;
         }
         let transcript = String::from_utf8_lossy(&self.current_transcript).into_owned();
+        let duration_ms = self
+            .current_block_start
+            .take()
+            .map(|start| start.elapsed().as_millis() as u64);
+        let cwd = self.current_block_cwd.take();
         blocks.push(ClosedBlock {
             input: std::mem::take(&mut self.current_input),
             transcript,
             exit_code,
+            cwd,
+            duration_ms,
         });
         self.current_transcript.clear();
     }
@@ -737,6 +768,13 @@ pub fn term_start(
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    // Tells `claude` / `codex` / hand-rolled shell scripts running inside
+    // this PTY where to find the in-house browser daemon. Without this,
+    // `claude` would reach for its `claude-in-chrome` MCP server (which
+    // drives the user's real Chrome — not what we want for app testing).
+    // The daemon binds 4000 by default; if it landed elsewhere it also
+    // writes the chosen port to ~/Library/Application Support/RLI/browser-port.
+    cmd.env("RLI_BROWSER_URL", "http://127.0.0.1:4000");
 
     // For zsh, install our shell integration via ZDOTDIR. The
     // generated .zshrc emits OSC 133 markers (so the BlockSegmenter

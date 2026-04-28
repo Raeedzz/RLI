@@ -323,14 +323,34 @@ export function BlockTerminal({
         transition: "box-shadow 480ms cubic-bezier(0.16, 1, 0.3, 1)",
       }}
     >
-      {altScreen ? (
-        <FullGrid frame={liveFrame} onSendBytes={sendBytes} />
-      ) : (
-        <BlockList blocks={blocks} />
+      {altScreen && <FullGrid frame={liveFrame} onSendBytes={sendBytes} />}
+
+      {/* Shell mode (no agent foregrounded): one scroll container holds
+          the closed history (BlockList) and the in-progress LiveBlock,
+          so the user scrolls a single continuous view. */}
+      {!altScreen && !foregroundIsAgent && (
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            display: "flex",
+            flexDirection: "column-reverse",
+            overflowY: "auto",
+            overflowX: "hidden",
+          }}
+        >
+          {liveFrame?.command_running && (
+            <LiveBlock command={activeCommand} frame={liveFrame} cwd={effectiveCwd} />
+          )}
+          <BlockList blocks={blocks} />
+        </div>
       )}
 
-      {!altScreen && (liveFrame?.command_running || directAgent) && (
-        <LiveBlock command={activeCommand} frame={liveFrame} />
+      {/* Agent mode (claude / codex / aider in normal screen): the agent
+          owns the pane. Hide closed-block history so prior shell output
+          doesn't ghost above the agent's UI. */}
+      {!altScreen && foregroundIsAgent && (
+        <LiveBlock command={activeCommand} frame={liveFrame} fill cwd={effectiveCwd} />
       )}
 
       {!altScreen && effectiveCwd && (
