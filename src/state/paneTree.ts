@@ -169,20 +169,25 @@ export function movePane(
   return splitLeaf(trimmed, targetId, direction, source.content);
 }
 
-/** Default workspace tree — single terminal. */
+/** Default workspace tree — single terminal. Each call gets unique
+ *  ids so two sessions sharing this default never collide on
+ *  ptyId / sessionMemory keys. */
 export function defaultWorkspace(): PaneNode {
-  return makeLeaf("terminal", "pane-default-terminal");
+  return makeLeaf("terminal", newPaneId("pane-terminal"));
 }
 
-/** Default workspace tree — terminal middle, editor right (matches the legacy layout). */
+/** Default workspace tree — terminal left, editor right. Each call
+ *  gets fresh ids; reusing hardcoded strings caused new terminal
+ *  panes to inherit state from prior PTYs that happened to share the
+ *  same id across sessions. */
 export function defaultWorkspaceWithEditor(): PaneNode {
   return {
     kind: "split",
-    id: "split-default",
+    id: newPaneId("split"),
     direction: "horizontal",
     children: [
-      makeLeaf("terminal", "pane-default-terminal"),
-      makeLeaf("editor", "pane-default-editor"),
+      makeLeaf("terminal", newPaneId("pane-terminal")),
+      makeLeaf("editor", newPaneId("pane-editor")),
     ],
   };
 }

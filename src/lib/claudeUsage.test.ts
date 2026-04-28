@@ -1,9 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
-  CLAUDE_WINDOW_MS,
-  computeClaudeUsage,
   detectClaude,
   formatDuration,
+  formatTokenCount,
 } from "./claudeUsage";
 
 describe("detectClaude", () => {
@@ -33,35 +32,29 @@ describe("detectClaude", () => {
   });
 });
 
-describe("computeClaudeUsage", () => {
-  test("at t=0 reports the full 5h window remaining", () => {
-    const t = 1_700_000_000_000;
-    const status = computeClaudeUsage(t, t);
-    expect(status.remainingMs).toBe(CLAUDE_WINDOW_MS);
-    expect(status.fractionUsed).toBe(0);
-    expect(status.remainingLabel).toBe("5h 00m");
+describe("formatTokenCount", () => {
+  test("under 1k stays as a plain integer", () => {
+    expect(formatTokenCount(0)).toBe("0");
+    expect(formatTokenCount(42)).toBe("42");
+    expect(formatTokenCount(999)).toBe("999");
   });
 
-  test("at t=3h reports 2h 00m remaining", () => {
-    const start = 0;
-    const now = 3 * 60 * 60 * 1000;
-    const status = computeClaudeUsage(start, now);
-    expect(status.remainingMs).toBe(2 * 60 * 60 * 1000);
-    expect(status.remainingLabel).toBe("2h 00m");
-    expect(status.fractionUsed).toBeCloseTo(0.6, 5);
+  test("uses one decimal place between 1k and 10k", () => {
+    expect(formatTokenCount(1000)).toBe("1.0k");
+    expect(formatTokenCount(2_500)).toBe("2.5k");
+    expect(formatTokenCount(9_900)).toBe("9.9k");
   });
 
-  test("at t > 5h saturates to 0 remaining and fraction=1", () => {
-    const status = computeClaudeUsage(0, 6 * 60 * 60 * 1000);
-    expect(status.remainingMs).toBe(0);
-    expect(status.fractionUsed).toBe(1);
-    expect(status.remainingLabel).toBe("0m");
+  test("drops the decimal between 10k and 1M", () => {
+    expect(formatTokenCount(10_000)).toBe("10k");
+    expect(formatTokenCount(123_456)).toBe("123k");
+    expect(formatTokenCount(999_999)).toBe("1000k");
   });
 
-  test("clamps elapsed to >= 0 if clock skewed backward", () => {
-    const status = computeClaudeUsage(2000, 1000);
-    expect(status.fractionUsed).toBe(0);
-    expect(status.remainingMs).toBe(CLAUDE_WINDOW_MS);
+  test("switches to M-suffix above 1M", () => {
+    expect(formatTokenCount(1_000_000)).toBe("1.0M");
+    expect(formatTokenCount(2_500_000)).toBe("2.5M");
+    expect(formatTokenCount(15_000_000)).toBe("15M");
   });
 });
 

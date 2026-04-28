@@ -3,7 +3,7 @@ export type SessionId = string;
 export type PaneNodeId = string;
 
 /** What a leaf pane displays. */
-export type PaneContent = "terminal" | "editor" | "browser";
+export type PaneContent = "terminal" | "editor" | "browser" | "graph";
 
 /** A direction the user can request when splitting an existing pane. */
 export type SplitDirection = "left" | "right" | "up" | "down";
@@ -133,6 +133,7 @@ export type AppAction =
   | { type: "toggle-search" }
   | { type: "set-search"; open: boolean }
   | { type: "toggle-browser" }
+  | { type: "toggle-graph" }
   | { type: "toggle-api-key" }
   | { type: "set-api-key-dialog"; open: boolean }
   | { type: "open-file"; sessionId: SessionId; file: OpenFile }

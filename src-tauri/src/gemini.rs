@@ -238,7 +238,27 @@ pub async fn gemini_generate(
     state: State<'_, GeminiState>,
     args: GenerateArgs,
 ) -> Result<String, String> {
-    let client = ensure_client(&state)?;
+    generate_text(
+        &state,
+        &args.prompt,
+        args.system.as_deref(),
+        args.max_tokens,
+        args.temperature,
+    )
+    .await
+}
+
+/// Reusable Flash-Lite generate. Same wire shape as `gemini_generate`
+/// but callable from non-Tauri-command Rust code (e.g. the memory
+/// daemon's `/memory/extract` route, which builds prompts internally).
+pub async fn generate_text(
+    state: &State<'_, GeminiState>,
+    prompt: &str,
+    system: Option<&str>,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+) -> Result<String, String> {
+    let client = ensure_client(state)?;
 
     let url = format!(
         "{API_BASE}/models/{FLASH_LITE_MODEL}:generateContent?key={}",
@@ -247,16 +267,16 @@ pub async fn gemini_generate(
 
     let body = GenerateRequest {
         contents: vec![RequestContent {
-            parts: vec![RequestPart { text: &args.prompt }],
+            parts: vec![RequestPart { text: prompt }],
             role: Some("user"),
         }],
-        system_instruction: args.system.as_deref().map(|s| RequestContent {
+        system_instruction: system.map(|s| RequestContent {
             parts: vec![RequestPart { text: s }],
             role: None,
         }),
         generation_config: Some(GenerationConfig {
-            temperature: args.temperature,
-            max_output_tokens: args.max_tokens,
+            temperature,
+            max_output_tokens: max_tokens,
         }),
     };
 

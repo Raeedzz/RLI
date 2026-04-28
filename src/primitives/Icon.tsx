@@ -113,6 +113,20 @@ export function FileIcon(props: IconProps) {
   );
 }
 
+export function GraphIcon(props: IconProps) {
+  // Three nodes connected by edges — reads as a memory/embedding graph.
+  return (
+    <svg {...base(props)}>
+      <circle cx="3.5" cy="11.5" r="1.5" />
+      <circle cx="12.5" cy="11.5" r="1.5" />
+      <circle cx="8" cy="3.5" r="1.5" />
+      <path d="M4.6 10.2 7 5" />
+      <path d="M11.4 10.2 9 5" />
+      <path d="M5 11.5 11 11.5" />
+    </svg>
+  );
+}
+
 export function ChevronIcon(props: IconProps & { open?: boolean }) {
   const { open, ...rest } = props;
   return (

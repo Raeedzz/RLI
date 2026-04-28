@@ -49,6 +49,16 @@ The production app lands at `src-tauri/target/release/bundle/macos/RLI.app`.
 2. Press `⌘N` to start a new session — RLI creates a worktree at `<project>/.rli/sessions/<slug>` on a fresh branch.
 3. Type your first prompt to the agent; the session name and branch get auto-slugged from it.
 
+### Per-project memory + multi-agent coordination
+
+On first launch, RLI installs `rli-memory` to `~/.local/bin/` (add it to `PATH` if needed). Inside any pane, agents and you can:
+
+- `rli-memory add "<fact>"` — persist a project fact (auto-deduped).
+- `rli-memory recall "<query>"` — search this project's memory.
+- `rli-memory extract <file>` — LLM-extract atomic facts from a transcript.
+
+Scoping is automatic: each PTY is launched with `RLI_PROJECT_ID` / `RLI_SESSION_ID` / `RLI_MEMORY_URL` in its env, so the wrapper picks up the right project without flags. The `CLAUDE.md` at the repo root tells in-pane agents how to use these — drop it into projects you want claude/codex to coordinate on. When you run multiple agents in parallel panes, `rli-memory` is how they share context without colliding (each pane is an isolated worktree + PTY).
+
 ---
 
 ## Keyboard shortcuts
@@ -70,8 +80,9 @@ The production app lands at `src-tauri/target/release/bundle/macos/RLI.app`.
 |---|---|
 | `⌘K` | Command palette |
 | `⌘⇧F` | Search (`rg` / `ast-grep`) |
-| `⌃⇧G` | Source-control panel |
-| `⌘⇧;` | Connections view (skills + MCPs) |
+| `⌘⌥F` | Files panel |
+| `⌘⌥G` | Source-control panel (commit / push / diff) |
+| `⌘⌥S` | Skills & MCP panel |
 | `⌘⇧B` | Toggle browser pane |
 
 ### Pane chords (new)

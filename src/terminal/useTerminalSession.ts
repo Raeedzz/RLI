@@ -1,7 +1,22 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getBlocks, setBlocks as memSetBlocks } from "./sessionMemory";
+import {
+  getAltScreen,
+  getBellTick,
+  getBlocks,
+  getCwd,
+  getExited,
+  getLiveFrame,
+  getRows,
+  setAltScreen as memSetAltScreen,
+  setBellTick as memSetBellTick,
+  setBlocks as memSetBlocks,
+  setCwd as memSetCwd,
+  setExited as memSetExited,
+  setLiveFrame as memSetLiveFrame,
+  setRows as memSetRows,
+} from "./sessionMemory";
 import type {
   Block,
   ClosedBlock,
@@ -19,6 +34,15 @@ interface Args {
   /** Initial size in cells. The hook re-emits term_resize on container resize. */
   rows: number;
   cols: number;
+  /**
+   * Active project id, forwarded to term_start so the PTY's env gets
+   * `RLI_PROJECT_ID` set. In-pane agents (claude, codex) and the
+   * `rli-memory` CLI use this to scope memory operations to the
+   * current project without the user passing flags. Optional.
+   */
+  projectId?: string;
+  /** Active session id. Mirrors `RLI_SESSION_ID` injection in PTY env. */
+  sessionId?: string;
 }
 
 interface SessionApi {
@@ -60,19 +84,23 @@ const encoder = new TextEncoder();
  */
 export function useTerminalSession(opts: Args): SessionApi {
   // Hydrate from module-scoped memory so switching sessions/projects
-  // doesn't wipe the visible scrollback. Memory is keyed by terminal
-  // id and survives the component's React lifecycle.
+  // doesn't wipe scrollback OR the live grid. Memory is keyed by
+  // terminal id and survives the component's React lifecycle.
   const [blocks, setBlocks] = useState<Block[]>(() => getBlocks(opts.id));
-  const [liveFrame, setLiveFrame] = useState<RenderFrame | null>(null);
-  const [altScreen, setAltScreen] = useState(false);
-  const [exited, setExited] = useState(false);
-  const [cwd, setCwd] = useState<string | null>(null);
-  const [bellTick, setBellTick] = useState(0);
-  // Snapshot of every row's spans, keyed by row index. We mutate this in
-  // place on each frame and shallow-copy into liveFrame.dirty for React.
-  const rowsRef = useRef<Span[][]>([]);
+  const [liveFrame, setLiveFrame] = useState<RenderFrame | null>(() =>
+    getLiveFrame(opts.id),
+  );
+  const [altScreen, setAltScreen] = useState<boolean>(() => getAltScreen(opts.id));
+  const [exited, setExited] = useState<boolean>(() => getExited(opts.id));
+  const [cwd, setCwd] = useState<string | null>(() => getCwd(opts.id));
+  const [bellTick, setBellTick] = useState<number>(() => getBellTick(opts.id));
+  // Snapshot of every row's spans, keyed by row index. Hydrated from
+  // memory so the visible grid is preserved across remounts. We then
+  // mutate it in place on each frame and shallow-copy into
+  // liveFrame.dirty for React. Memory holds the canonical copy.
+  const rowsRef = useRef<Span[][]>(getRows(opts.id));
   // Latest frame metadata (cursor + alt-screen flag).
-  const lastFrameRef = useRef<RenderFrame | null>(null);
+  const lastFrameRef = useRef<RenderFrame | null>(getLiveFrame(opts.id));
   // FIFO of commands the user has submitted via sendLine but whose
   // closing OSC 133 D event hasn't arrived yet. The Rust segmenter
   // doesn't capture user input (we omit the OSC 133 B marker on
@@ -84,11 +112,11 @@ export function useTerminalSession(opts: Args): SessionApi {
   useEffect(() => {
     let cancelled = false;
     const unlisten: UnlistenFn[] = [];
-    // Reset queue + row state when the session id changes. A stale
-    // pending entry from the prior session would otherwise mis-stamp
-    // the next session's first block.
+    // Reset the pending-input queue for THIS effect run. The other
+    // local state (rows, frame, blocks, etc.) is intentionally NOT
+    // wiped — the user wants to come back to whatever the terminal
+    // was showing. Hydration already happened in useState init.
     pendingInputsRef.current = [];
-    rowsRef.current = [];
 
     const onFrame = (frame: RenderFrame) => {
       if (cancelled) return;
@@ -101,14 +129,21 @@ export function useTerminalSession(opts: Args): SessionApi {
       }
       lastFrameRef.current = frame;
       setAltScreen(frame.alt_screen);
+      memSetAltScreen(opts.id, frame.alt_screen);
       // Pushing the full row snapshot every frame for now; dirty-only
       // optimization can land in a follow-up if React reconciliation
       // shows up in profiles.
       const allDirty: DirtyRow[] = rows.map((spans, i) => ({ row: i, spans }));
-      setLiveFrame({
+      const merged: RenderFrame = {
         ...frame,
         dirty: allDirty,
-      });
+      };
+      setLiveFrame(merged);
+      // Persist for cross-mount survival. Rows ref is stored by
+      // reference (we mutate it in place), so memory observes the
+      // updates without an explicit copy.
+      memSetLiveFrame(opts.id, merged);
+      memSetRows(opts.id, rows);
     };
 
     const onBlock = (b: ClosedBlock) => {
@@ -136,16 +171,22 @@ export function useTerminalSession(opts: Args): SessionApi {
     const onCwd = (path: string) => {
       if (cancelled) return;
       setCwd(path);
+      memSetCwd(opts.id, path);
     };
 
     const onBell = () => {
       if (cancelled) return;
-      setBellTick((n) => n + 1);
+      setBellTick((n) => {
+        const next = n + 1;
+        memSetBellTick(opts.id, next);
+        return next;
+      });
     };
 
     const onExit = () => {
       if (cancelled) return;
       setExited(true);
+      memSetExited(opts.id, true);
     };
 
     (async () => {
@@ -180,6 +221,8 @@ export function useTerminalSession(opts: Args): SessionApi {
             cwd: opts.cwd,
             rows: opts.rows,
             cols: opts.cols,
+            project_id: opts.projectId,
+            session_id: opts.sessionId,
           },
         });
       } catch (err) {
@@ -207,7 +250,10 @@ export function useTerminalSession(opts: Args): SessionApi {
     return () => {
       cancelled = true;
       for (const fn of unlisten) fn();
-      void invoke("term_close", { id: opts.id }).catch(() => {});
+      // We deliberately do NOT call term_close here — the PTY needs to
+      // survive a session/project switch so the user comes back to
+      // their work. PTYs are torn down only when the session is
+      // permanently deleted, via forgetSession() in sessionMemory.
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opts.id, opts.command, JSON.stringify(opts.args), opts.cwd]);

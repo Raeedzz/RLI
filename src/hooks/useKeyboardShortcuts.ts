@@ -152,6 +152,28 @@ export function useKeyboardShortcuts() {
           return;
         }
       }
+
+      // ⌘⌥F / ⌘⌥G / ⌘⌥S — toggle the left-side panels. Read e.code
+      // (KeyF/KeyG/KeyS) so the Option-induced char remap on macOS
+      // (⌥f → ƒ, ⌥g → ©, ⌥s → ß) doesn't drop the press.
+      if (cmd && e.altKey && !shift) {
+        const code = e.code;
+        if (code === "KeyF") {
+          e.preventDefault();
+          dispatch({ type: "toggle-left-panel", panel: "files" });
+          return;
+        }
+        if (code === "KeyG") {
+          e.preventDefault();
+          dispatch({ type: "toggle-left-panel", panel: "git" });
+          return;
+        }
+        if (code === "KeyS") {
+          e.preventDefault();
+          dispatch({ type: "toggle-left-panel", panel: "connections" });
+          return;
+        }
+      }
       // ⌃⇧G — source-control panel (matches VS Code muscle memory)
       if (e.ctrlKey && shift && e.key.toLowerCase() === "g") {
         e.preventDefault();

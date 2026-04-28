@@ -36,6 +36,30 @@ export interface RecallArgs {
   queryEmbedding?: number[];
 }
 
+export interface GraphNode {
+  id: string;
+  kind: MemoryKind;
+  project_id: string | null;
+  session_id: string | null;
+  content: string;
+  created_at: number;
+}
+
+export interface GraphEdge {
+  /** Lexicographically-smaller node id of the pair. */
+  a: string;
+  b: string;
+  /** Cosine similarity ∈ [0.65, 1.0]. */
+  weight: number;
+}
+
+export interface GraphPayload {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  /** Number of memories returned without an embedding (no edges). */
+  orphan_count: number;
+}
+
 export const memory = {
   store: ({ kind, projectId, sessionId, content, embedding }: StoreArgs) =>
     invoke<string>("memory_store", {
@@ -64,6 +88,20 @@ export const memory = {
       },
     }),
   delete: (id: string) => invoke<void>("memory_delete", { id }),
+
+  /**
+   * Pull the graph view (nodes + cosine-similarity edges) for an
+   * Obsidian-style visualization. Edges only exist between memories
+   * that have embeddings AND a similarity ≥ 0.65. Node count is
+   * capped at 1500 — see GRAPH_NODE_CAP in memory.rs.
+   */
+  graph: ({
+    projectId,
+    sessionId,
+  }: { projectId?: string; sessionId?: string } = {}) =>
+    invoke<GraphPayload>("memory_graph_data", {
+      args: { project_id: projectId, session_id: sessionId },
+    }),
 
   /**
    * Embed `content` via Gemini and store it. Falls back to plain

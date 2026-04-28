@@ -20,6 +20,10 @@
 //!   - `fact`: per-project facts asserted by the user or extracted
 //!     by Flash-Lite from agent output
 
+mod dedupe;
+mod extract;
+pub mod daemon;
+
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -218,6 +222,33 @@ pub(crate) fn store_in_conn(
     )
     .map_err(|e| e.to_string())?;
     Ok(id)
+}
+
+/// Mem0-style insert: if a same-project, same-kind=fact entry is
+/// already a near-match for `args.content` (Jaccard ≥ 0.6 on tokens),
+/// replace its content in place rather than inserting a duplicate row.
+/// Returns `(id, merged, merged_with_id)`:
+///   - on insert  → (new_uuid, false, None)
+///   - on merge   → (existing_uuid, true, Some(existing_uuid))
+///
+/// Only `Fact` kind is deduped; transcripts and Q&A pairs are
+/// append-only by design.
+pub(crate) fn dedupe_and_store(
+    conn: &Connection,
+    args: StoreArgs,
+) -> Result<(String, bool, Option<String>), String> {
+    if matches!(args.kind, MemoryKind::Fact) {
+        if let Some(project_id) = args.project_id.as_deref() {
+            if let Some((hit_id, _score)) =
+                dedupe::find_similar(&args.content, project_id, conn)?
+            {
+                dedupe::merge_fact(&hit_id, &args.content, conn)?;
+                return Ok((hit_id.clone(), true, Some(hit_id)));
+            }
+        }
+    }
+    let id = store_in_conn(conn, args)?;
+    Ok((id, false, None))
 }
 
 fn encode_embedding(v: &[f32]) -> Vec<u8> {
@@ -469,6 +500,145 @@ pub fn memory_delete<R: Runtime>(
     id: String,
 ) -> Result<(), String> {
     with_conn(&app, &state, move |conn| delete_in_conn(conn, &id))
+}
+
+/* ------------------------------------------------------------------
+   Graph view — Obsidian-style memory visualization
+   ------------------------------------------------------------------ */
+
+/// Minimum cosine similarity for two memories to be linked in the
+/// graph. 0.65 is loose enough that semantically related facts ("we
+/// use bun" / "build pipeline runs bun install") connect, but tight
+/// enough that random pairs ("auth tokens are 32 bytes" / "chrome
+/// runs on port 4000") stay disconnected. Tuneable.
+const GRAPH_EDGE_THRESHOLD: f32 = 0.65;
+
+/// Hard cap on nodes in a single graph payload. With N nodes we run
+/// N²/2 cosine comparisons + O(N²) edges to serialize. 1500 nodes ≈
+/// 1.1M comparisons in <500 ms on a modern CPU; beyond that the
+/// frontend force simulation also gets sluggish.
+const GRAPH_NODE_CAP: usize = 1500;
+
+#[derive(Debug, Serialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub kind: String,
+    pub project_id: Option<String>,
+    pub session_id: Option<String>,
+    pub content: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GraphEdge {
+    /// `a` is always the lexicographically smaller id so the edge set
+    /// has no duplicates / mirror entries.
+    pub a: String,
+    pub b: String,
+    /// Cosine similarity, [GRAPH_EDGE_THRESHOLD, 1.0].
+    pub weight: f32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GraphPayload {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    /// Number of memories that exist for the filter but had no
+    /// embedding — surfaced so the frontend can render an "N memories
+    /// without embeddings" hint instead of silently dropping them.
+    pub orphan_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GraphArgs {
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[tauri::command]
+pub fn memory_graph_data<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<MemoryState>,
+    args: GraphArgs,
+) -> Result<GraphPayload, String> {
+    with_conn(&app, &state, move |conn| {
+        graph_in_conn(conn, args.project_id.as_deref(), args.session_id.as_deref())
+    })
+}
+
+pub(crate) fn graph_in_conn(
+    conn: &Connection,
+    project_id: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<GraphPayload, String> {
+    let sql = "
+        SELECT id, kind, project_id, session_id, content, embedding, created_at
+        FROM memory
+        WHERE (?1 IS NULL OR project_id = ?1)
+          AND (?2 IS NULL OR session_id = ?2)
+        ORDER BY created_at DESC
+        LIMIT ?3
+    ";
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            params![project_id, session_id, GRAPH_NODE_CAP as i64],
+            |row| {
+                let blob: Option<Vec<u8>> = row.get(5)?;
+                Ok::<(GraphNode, Option<Vec<f32>>), rusqlite::Error>((
+                    GraphNode {
+                        id: row.get(0)?,
+                        kind: row.get(1)?,
+                        project_id: row.get(2)?,
+                        session_id: row.get(3)?,
+                        content: row.get(4)?,
+                        created_at: row.get(6)?,
+                    },
+                    blob.as_deref().and_then(decode_embedding),
+                ))
+            },
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut nodes: Vec<GraphNode> = Vec::new();
+    let mut embeddings: Vec<Option<Vec<f32>>> = Vec::new();
+    let mut orphan_count: usize = 0;
+    for r in rows {
+        match r {
+            Ok((n, emb)) => {
+                if emb.is_none() {
+                    orphan_count += 1;
+                }
+                nodes.push(n);
+                embeddings.push(emb);
+            }
+            Err(_) => continue,
+        }
+    }
+
+    // Pairwise cosine — O(N²) but cheap for ≤1500 nodes (Gemini text
+    // embeddings are 768 floats; 1500² × 768 ≈ 1.7B ops worst case,
+    // dominated by SIMD-friendly multiplies. In practice <500 ms).
+    let mut edges: Vec<GraphEdge> = Vec::new();
+    for i in 0..nodes.len() {
+        let Some(ei) = embeddings[i].as_deref() else { continue };
+        for j in (i + 1)..nodes.len() {
+            let Some(ej) = embeddings[j].as_deref() else { continue };
+            let s = cosine_similarity(ei, ej);
+            if s >= GRAPH_EDGE_THRESHOLD {
+                let (a, b) = if nodes[i].id < nodes[j].id {
+                    (nodes[i].id.clone(), nodes[j].id.clone())
+                } else {
+                    (nodes[j].id.clone(), nodes[i].id.clone())
+                };
+                edges.push(GraphEdge { a, b, weight: s });
+            }
+        }
+    }
+
+    Ok(GraphPayload { nodes, edges, orphan_count })
 }
 
 /* ------------------------------------------------------------------

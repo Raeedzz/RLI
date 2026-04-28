@@ -10,6 +10,7 @@
 /// Per-feature plumbing lives in `crate::*` modules — registered below.
 #[cfg(target_os = "macos")]
 mod browser;
+mod claude_usage;
 mod connections;
 mod fs;
 mod gemini;
@@ -37,7 +38,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(TerminalState::default())
         .manage(GeminiState::default())
-        .manage(MemoryState::default());
+        .manage(MemoryState::default())
+        .manage(memory::daemon::MemoryDaemonPort::default());
 
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -54,6 +56,27 @@ pub fn run() {
                     Err(e) => eprintln!("[browser daemon] failed to start: {e}"),
                 }
             });
+
+            // Memory daemon: serves /memory/{add,search,extract} on
+            // 5555..5599. Discoverable via the memory-port file or via
+            // RLI_MEMORY_URL injected into each PTY's env (term.rs).
+            // Any agent in any pane can curl the routes through the
+            // bash wrapper — that's how mem0-style "CLI-wide" reach
+            // is actually achieved.
+            let handle_mem = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match memory::daemon::start(handle_mem).await {
+                    Ok(port) => eprintln!("[memory daemon] bound on 127.0.0.1:{port}"),
+                    Err(e) => eprintln!("[memory daemon] failed to start: {e}"),
+                }
+            });
+
+            // One-time `~/.local/bin/rli-memory` install. Drops the
+            // bundled bash wrapper so users (and agents inside RLI
+            // panes) can invoke `rli-memory add/recall/extract` from
+            // anywhere on PATH. No-op if the file is already present
+            // and matches the bundled version.
+            install_memory_cli();
             Ok(())
         });
 
@@ -74,6 +97,9 @@ pub fn run() {
             memory::memory_store,
             memory::memory_recall,
             memory::memory_delete,
+            memory::memory_graph_data,
+            // Claude usage (real, from ~/.claude/projects transcripts)
+            claude_usage::claude_usage_status,
             // Git (Task #8)
             git::git_status,
             git::git_diff,
@@ -109,3 +135,61 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running RLI");
 }
+
+/// Bundled `rli-memory` CLI script. Embedded at compile-time so we
+/// don't have to ship the `scripts/` dir alongside the .app — a single
+/// `cargo build` produces a self-contained binary that knows how to
+/// install its own CLI helper.
+const RLI_MEMORY_SCRIPT: &str = include_str!("../../scripts/rli-memory");
+
+/// First-launch install of `rli-memory` to `~/.local/bin/rli-memory`.
+/// No-op if the file is already present and matches the bundled
+/// content; otherwise overwrites + chmods +x. Failures are logged to
+/// stderr only — they should never block app startup.
+#[cfg(target_os = "macos")]
+fn install_memory_cli() {
+    let Some(home) = dirs::home_dir() else {
+        eprintln!("[memory cli] couldn't resolve $HOME — skipping install");
+        return;
+    };
+    let bin = home.join(".local").join("bin");
+    if let Err(e) = std::fs::create_dir_all(&bin) {
+        eprintln!("[memory cli] could not create {}: {e}", bin.display());
+        return;
+    }
+    let dest = bin.join("rli-memory");
+    let needs_write = match std::fs::read_to_string(&dest) {
+        Ok(existing) => existing != RLI_MEMORY_SCRIPT,
+        Err(_) => true,
+    };
+    if needs_write {
+        if let Err(e) = std::fs::write(&dest, RLI_MEMORY_SCRIPT) {
+            eprintln!("[memory cli] write failed: {e}");
+            return;
+        }
+        // chmod 0755 so the user's shell can exec it directly.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                &dest,
+                std::fs::Permissions::from_mode(0o755),
+            );
+        }
+        eprintln!("[memory cli] installed → {}", dest.display());
+    }
+
+    // Friendly nudge if ~/.local/bin isn't on PATH. We don't try to
+    // mutate the user's shell rc — that's their territory.
+    let path = std::env::var("PATH").unwrap_or_default();
+    let needle = bin.to_string_lossy();
+    if !path.split(':').any(|p| p == needle) {
+        eprintln!(
+            "[memory cli] note: {} is not on $PATH. Add it (e.g. `export PATH=\"$HOME/.local/bin:$PATH\"` in your ~/.zshrc) so `rli-memory` is callable from any shell.",
+            needle
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_memory_cli() {}

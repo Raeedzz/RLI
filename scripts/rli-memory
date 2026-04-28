@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# rli-memory — local CLI wrapper for RLI's per-project memory daemon.
+#
+# Usage:
+#   rli-memory add <text>          Store a fact (deduped on insert)
+#   rli-memory recall <query>      Search facts in this project
+#   rli-memory extract <file>      LLM-extract facts from a transcript file
+#   rli-memory status              Check whether the memory daemon is up
+#   rli-memory --help
+#
+# Auto-scoping:
+#   When invoked from inside an RLI terminal pane, RLI_PROJECT_ID and
+#   RLI_SESSION_ID are injected into the env and used for project/session
+#   scoping. Outside RLI, you must pass `--project <id>` or set
+#   RLI_PROJECT_ID yourself; otherwise scope is empty (all-project search).
+#
+# Daemon discovery:
+#   RLI_MEMORY_URL (set by RLI on PTY launch) takes precedence. Otherwise
+#   we read the chosen port from `~/Library/Application Support/RLI/memory-port`.
+#   Fallback is 127.0.0.1:5555 (the daemon's first-choice port).
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------
+# Resolve daemon URL
+# ---------------------------------------------------------------------
+resolve_url() {
+    if [ -n "${RLI_MEMORY_URL:-}" ]; then
+        echo "$RLI_MEMORY_URL"
+        return
+    fi
+    local port_file="$HOME/Library/Application Support/RLI/memory-port"
+    if [ -r "$port_file" ]; then
+        local port
+        port=$(tr -d '[:space:]' < "$port_file")
+        if [ -n "$port" ]; then
+            echo "http://127.0.0.1:$port"
+            return
+        fi
+    fi
+    echo "http://127.0.0.1:5555"
+}
+
+# Retry a curl up to 3× with 100ms backoff to absorb the daemon-startup
+# race (PTYs sometimes spawn before the axum listener has bound).
+curl_retry() {
+    local out
+    local rc
+    for _ in 1 2 3; do
+        if out=$(curl -fsS "$@" 2>&1); then
+            echo "$out"
+            return 0
+        fi
+        rc=$?
+        sleep 0.1
+    done
+    echo "$out" >&2
+    return ${rc:-1}
+}
+
+# ---------------------------------------------------------------------
+# Subcommand: status
+# ---------------------------------------------------------------------
+cmd_status() {
+    local url
+    url=$(resolve_url)
+    if curl_retry "$url/health" >/dev/null; then
+        echo "ok ($url)"
+        exit 0
+    fi
+    echo "rli memory daemon unreachable at $url" >&2
+    echo "is RLI running?" >&2
+    exit 1
+}
+
+# ---------------------------------------------------------------------
+# JSON-string-escape: just enough to build a JSON body in pure bash.
+# Handles backslashes, double quotes, newlines, tabs.
+# ---------------------------------------------------------------------
+json_escape() {
+    local s="$1"
+    s=${s//\\/\\\\}      # backslash → \\
+    s=${s//\"/\\\"}      # " → \"
+    s=${s//$'\n'/\\n}    # newline → \n
+    s=${s//$'\r'/\\r}    # CR → \r
+    s=${s//$'\t'/\\t}    # tab → \t
+    printf '%s' "$s"
+}
+
+# ---------------------------------------------------------------------
+# Subcommand: add
+# ---------------------------------------------------------------------
+cmd_add() {
+    if [ $# -lt 1 ]; then
+        echo "usage: rli-memory add <text>" >&2
+        exit 2
+    fi
+    local content="$*"
+    local project_id="${RLI_PROJECT_ID:-}"
+    local session_id="${RLI_SESSION_ID:-}"
+
+    local body
+    body=$(printf '{"content":"%s","kind":"fact","project_id":"%s","session_id":"%s"}' \
+        "$(json_escape "$content")" \
+        "$(json_escape "$project_id")" \
+        "$(json_escape "$session_id")")
+
+    local url
+    url=$(resolve_url)
+    curl_retry -X POST -H "Content-Type: application/json" \
+        --data-binary "$body" "$url/memory/add"
+    echo
+}
+
+# ---------------------------------------------------------------------
+# Subcommand: recall
+# ---------------------------------------------------------------------
+cmd_recall() {
+    if [ $# -lt 1 ]; then
+        echo "usage: rli-memory recall <query>" >&2
+        exit 2
+    fi
+    local query="$*"
+    local project_id="${RLI_PROJECT_ID:-}"
+    local url
+    url=$(resolve_url)
+
+    # URL-encode the query via curl's --data-urlencode trick.
+    local response
+    response=$(curl_retry -G \
+        --data-urlencode "q=$query" \
+        --data-urlencode "project_id=$project_id" \
+        --data-urlencode "limit=10" \
+        "$url/memory/search")
+
+    # Pretty-print one fact per line if jq is available; otherwise dump
+    # the raw JSON so the user (or claude) can parse it themselves.
+    if command -v jq >/dev/null 2>&1; then
+        echo "$response" | jq -r '.results[]?.content // empty'
+    else
+        echo "$response"
+    fi
+}
+
+# ---------------------------------------------------------------------
+# Subcommand: extract
+# ---------------------------------------------------------------------
+cmd_extract() {
+    if [ $# -lt 1 ]; then
+        echo "usage: rli-memory extract <file>" >&2
+        exit 2
+    fi
+    local file="$1"
+    if [ ! -r "$file" ]; then
+        echo "rli-memory: cannot read $file" >&2
+        exit 2
+    fi
+    local transcript
+    transcript=$(cat "$file")
+    local project_id="${RLI_PROJECT_ID:-}"
+    local body
+    body=$(printf '{"transcript":"%s","project_id":"%s"}' \
+        "$(json_escape "$transcript")" \
+        "$(json_escape "$project_id")")
+
+    local url
+    url=$(resolve_url)
+    curl_retry -X POST -H "Content-Type: application/json" \
+        --data-binary "$body" "$url/memory/extract"
+    echo
+}
+
+# ---------------------------------------------------------------------
+# Subcommand: --help
+# ---------------------------------------------------------------------
+cmd_help() {
+    cat <<'HELP'
+rli-memory — per-project persistent memory for CLI agents.
+
+Usage:
+  rli-memory add <text>          Store a fact (deduped on insert)
+  rli-memory recall <query>      Search this project's facts
+  rli-memory extract <file>      LLM-extract facts from a transcript
+  rli-memory status              Check that the memory daemon is up
+  rli-memory --help              This message
+
+Auto-scoping:
+  Inside an RLI terminal pane, RLI_PROJECT_ID and RLI_SESSION_ID are
+  set automatically and scope your add/recall/extract calls to the
+  active project. Outside RLI, set them yourself or expect empty scope.
+
+Daemon discovery:
+  RLI_MEMORY_URL > ~/Library/Application Support/RLI/memory-port > :5555
+HELP
+}
+
+# ---------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------
+if [ $# -eq 0 ]; then
+    cmd_help
+    exit 0
+fi
+
+cmd="$1"
+shift
+case "$cmd" in
+    add)        cmd_add "$@" ;;
+    recall)     cmd_recall "$@" ;;
+    extract)    cmd_extract "$@" ;;
+    status)     cmd_status ;;
+    --help|-h|help) cmd_help ;;
+    *)
+        echo "rli-memory: unknown subcommand '$cmd'" >&2
+        echo "try: rli-memory --help" >&2
+        exit 2
+        ;;
+esac

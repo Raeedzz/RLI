@@ -734,6 +734,17 @@ pub struct StartArgs {
     pub cwd: Option<String>,
     pub rows: u16,
     pub cols: u16,
+    /// Active project id (e.g. `p_rli_l2k4j`). Injected into the PTY's
+    /// env as `RLI_PROJECT_ID` so in-pane agents and the `rli-memory`
+    /// CLI can scope memory operations correctly. Optional only because
+    /// older callers may not pass it; pass `None` and memory writes
+    /// default to unscoped.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Active session id. Injected as `RLI_SESSION_ID`. Same intent as
+    /// `project_id` but scoped one level finer.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[tauri::command]
@@ -742,12 +753,40 @@ pub fn term_start(
     state: State<TerminalState>,
     args: StartArgs,
 ) -> Result<(), String> {
+    // Idempotent path: if a PTY with this id is already alive, reuse
+    // it and re-emit the full grid as a single "all rows dirty" frame
+    // so the freshly-mounted React component can hydrate without ever
+    // having seen the original startup events. This is what makes
+    // session/project switches stop wiping the terminal — the React
+    // component can unmount and remount freely; the PTY stays alive
+    // and resyncs on each remount.
     {
-        let mut sessions = state.sessions.lock().map_err(|e| e.to_string())?;
-        if let Some(existing) = sessions.remove(&args.id) {
-            if let Ok(mut s) = existing.lock() {
-                let _ = s.killer.kill();
+        let sessions = state.sessions.lock().map_err(|e| e.to_string())?;
+        if let Some(existing) = sessions.get(&args.id).cloned() {
+            drop(sessions);
+            if let Ok(s) = existing.lock() {
+                let snapshot = snapshot_grid(&s.term);
+                let cursor = s.term.grid().cursor.point;
+                let dirty: Vec<DirtyRow> = snapshot
+                    .iter()
+                    .enumerate()
+                    .map(|(row, snap)| DirtyRow {
+                        row: row as u16,
+                        spans: snap.spans.clone(),
+                    })
+                    .collect();
+                let frame = RenderFrame {
+                    cols: s.cols,
+                    rows: s.rows,
+                    cursor_row: cursor.line.0,
+                    cursor_col: cursor.column.0 as u16,
+                    alt_screen: s.term.mode().contains(TermMode::ALT_SCREEN),
+                    command_running: s.last_command_running,
+                    dirty,
+                };
+                let _ = app.emit(&format!("term://{}/frame", args.id), &frame);
             }
+            return Ok(());
         }
     }
 
@@ -775,6 +814,25 @@ pub fn term_start(
     // The daemon binds 4000 by default; if it landed elsewhere it also
     // writes the chosen port to ~/Library/Application Support/RLI/browser-port.
     cmd.env("RLI_BROWSER_URL", "http://127.0.0.1:4000");
+
+    // Memory daemon discovery: the daemon picks a port at startup
+    // (5555..5599) and writes it to `~/Library/.../memory-port`. We
+    // also inject the URL directly so agents in this PTY can hit
+    // /memory/{add,recall,extract} without parsing the port file.
+    if let Some(port_state) = app.try_state::<crate::memory::daemon::MemoryDaemonPort>() {
+        if let Some(port) = port_state.get() {
+            cmd.env("RLI_MEMORY_URL", format!("http://127.0.0.1:{port}"));
+        }
+    }
+    // Per-pane scoping: in-pane agents (claude, codex) and the
+    // rli-memory CLI read these to scope add/recall to the right
+    // project + session without the user passing flags by hand.
+    if let Some(pid) = args.project_id.as_deref() {
+        cmd.env("RLI_PROJECT_ID", pid);
+    }
+    if let Some(sid) = args.session_id.as_deref() {
+        cmd.env("RLI_SESSION_ID", sid);
+    }
 
     // For zsh, install our shell integration via ZDOTDIR. The
     // generated .zshrc emits OSC 133 markers (so the BlockSegmenter

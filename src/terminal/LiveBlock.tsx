@@ -157,7 +157,11 @@ export function LiveBlock({ command, frame, fill = false, cwd }: Props) {
           }}
         >
           {visibleRows.map((row) => (
-            <CellRow key={row.row} spans={row.spans} />
+            // Shell-mode in-progress block (`fill=false`) wraps so long
+            // command output reads cleanly in narrow panes. Agent-mode
+            // (`fill=true`) is a fixed-grid TUI surface — wrapping there
+            // would race the ResizeObserver and jitter.
+            <CellRow key={row.row} spans={row.spans} wrap={!fill} />
           ))}
         </div>
       )}

@@ -96,7 +96,7 @@ export function Block({ block }: Props) {
       {hasBody && (
         <div style={{ color: "var(--text-secondary)" }}>
           {bodyLines.map((spans, i) => (
-            <CellRow key={i} spans={spans} />
+            <CellRow key={i} spans={spans} wrap />
           ))}
         </div>
       )}

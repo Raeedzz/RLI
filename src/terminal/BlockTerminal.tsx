@@ -30,6 +30,17 @@ interface Props {
   args?: string[];
   cwd?: string;
   /**
+   * Active project id. Forwarded to term_start so the PTY's env has
+   * `RLI_PROJECT_ID` set — that's how the `rli-memory` CLI (and any
+   * agent inside the PTY) knows which project to scope its memory
+   * operations to. Optional only because legacy callers may not pass
+   * it; null/undefined means no auto-scoping (memory writes are
+   * unscoped, recall searches all projects).
+   */
+  projectId?: string;
+  /** Active session id, mirrors `RLI_SESSION_ID` in PTY env. */
+  sessionId?: string;
+  /**
    * Fires once when Claude is first detected in this pane's PTY
    * stream (or immediately on mount when `command` is itself an
    * agent). Wired by the parent into a `update-session` dispatch
@@ -70,12 +81,24 @@ export function BlockTerminal({
   command,
   args,
   cwd,
+  projectId,
+  sessionId,
   onClaudeDetected,
   onAgentRunningChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<PromptInputHandle>(null);
   const passthroughRef = useRef<PtyPassthroughHandle>(null);
+  // Generation counter — bumped when the user clicks "restart" on the
+  // session-ended banner. Suffixed onto the session id so the underlying
+  // useTerminalSession effect tears down the dead PTY and spawns a fresh
+  // one. Incrementing alone wouldn't be enough — useTerminalSession
+  // keys its lifecycle on `opts.id`, so the id has to actually change.
+  // The separator MUST stay inside Tauri's allowed event-name alphabet
+  // (alphanumeric, `-`, `/`, `:`, `_`) — the hook builds event names like
+  // `term://${id}/frame`. `-r<n>` works and reads cleanly in logs.
+  const [generation, setGeneration] = useState(0);
+  const ptyId = generation === 0 ? id : `${id}-r${generation}`;
   // In-memory ring buffer of past commands (newest at index 0).
   // Hydrated from module-scoped memory so it survives session/project
   // switches; module memory is keyed by terminal id, not component
@@ -136,24 +159,40 @@ export function BlockTerminal({
     blocks,
     liveFrame,
     altScreen,
+    exited,
     cwd: liveCwd,
     bellTick,
     sendLine,
     sendBytes,
     resize,
   } = useTerminalSession({
-    id,
+    id: ptyId,
     command,
     args,
     cwd,
     rows: DEFAULT_ROWS,
     cols: DEFAULT_COLS,
+    projectId,
+    sessionId,
   });
+
+  // PTY died (process crashed, backend restarted on a Rust hot-reload,
+  // user `exit`-ed the shell, etc.). Drop out of agent mode so the
+  // user isn't staring at a blank pane that used to be claude. The
+  // UI below renders an "[ session ended — press Enter to restart ]"
+  // affordance so they can re-spawn the shell without nuking the pane.
+  useEffect(() => {
+    if (!exited) return;
+    if (foregroundIsAgent) setForegroundIsAgent(false);
+    sniffBufferRef.current = "";
+  }, [exited, foregroundIsAgent]);
 
   // `altScreen` covers vim/htop; `foregroundIsAgent` covers
   // claude/codex/etc. that render in the normal screen. Both hide
   // PromptInput + status bar so the agent's own UI owns the surface.
-  const agentMode = altScreen || foregroundIsAgent;
+  // After the PTY exits, downshift back to shell-mode chrome regardless
+  // of what the last frame's flags were — those readings are stale.
+  const agentMode = !exited && (altScreen || foregroundIsAgent);
 
   // Bell visualization — a brief, soft pulse on the input zone every
   // time the shell emits BEL. We just track "is currently flashing"
@@ -180,7 +219,12 @@ export function BlockTerminal({
       const reserved = agentMode ? 8 : 80;
       const usableHeight = Math.max(120, rect.height - reserved);
       const cellHeight = 13 * 1.35;
-      const cellWidth = 13 * 0.55; // close enough for monospace
+      // JetBrains Mono at 13px advances ~7.8px per glyph. Be slightly
+      // conservative (0.62) so we ask the PTY for fewer columns than the
+      // container can technically fit — better to leave a 1–2px gutter
+      // on the right than to have claude paint a column that gets
+      // clipped, which reads as "broken / cut off".
+      const cellWidth = 13 * 0.62;
       const rows = Math.max(8, Math.floor(usableHeight / cellHeight));
       const cols = Math.max(20, Math.floor((rect.width - 24) / cellWidth));
       void resize(rows, cols).catch(() => {});
@@ -254,21 +298,62 @@ export function BlockTerminal({
     }
   }, [liveFrame?.command_running, activeCommand, directAgent]);
 
-  // Belt-and-suspenders: any time the live frame says no command is
-  // running yet `foregroundIsAgent` is somehow still true (e.g. the
-  // running flag flipped before the activeCommand transition could
-  // catch it, or a stale state survived a session swap), force-exit
-  // agent mode. Direct agents stay pinned for the lifetime of the
-  // session.
+  // Once an agent foregrounds, we DO NOT release agent mode on a
+  // single-frame `command_running=false` reading. OSC 133 D and C
+  // markers can fire transiently during a TUI's lifetime (claude
+  // redraws, scroll regions, etc.), and an immediate flip-back would
+  // ping-pong against the banner-detect effect above — toggling the
+  // PromptInput in/out, shifting the pane layout, and causing a
+  // visible jitter that's hard to describe but very loud to look at.
+  //
+  // Instead: schedule the flip-back behind a debounce. If
+  // `command_running` flips back to true before the timer fires (the
+  // common case during a live agent session), we cancel and stay in
+  // agent mode. Only a *sustained* idle period — long enough that the
+  // agent has truly exited and dumped us back to the parent shell —
+  // releases the takeover.
+  const EXIT_DEBOUNCE_MS = 1500;
+  const exitDebounceRef = useRef<number | null>(null);
   useEffect(() => {
     if (directAgent) return;
     if (!liveFrame) return;
-    if (!liveFrame.command_running && foregroundIsAgent) {
-      setForegroundIsAgent(false);
-      sniffBufferRef.current = "";
-      setTimeout(() => promptRef.current?.focus(), 0);
+    if (!foregroundIsAgent) {
+      if (exitDebounceRef.current !== null) {
+        window.clearTimeout(exitDebounceRef.current);
+        exitDebounceRef.current = null;
+      }
+      return;
+    }
+    if (liveFrame.command_running) {
+      // Agent is alive — cancel any pending flip-back.
+      if (exitDebounceRef.current !== null) {
+        window.clearTimeout(exitDebounceRef.current);
+        exitDebounceRef.current = null;
+      }
+      return;
+    }
+    // command_running is false AND we're in agent mode. Arm the timer
+    // unless one is already counting down.
+    if (exitDebounceRef.current === null) {
+      exitDebounceRef.current = window.setTimeout(() => {
+        exitDebounceRef.current = null;
+        setForegroundIsAgent(false);
+        sniffBufferRef.current = "";
+        setTimeout(() => promptRef.current?.focus(), 0);
+      }, EXIT_DEBOUNCE_MS);
     }
   }, [liveFrame?.command_running, foregroundIsAgent, directAgent]);
+
+  // Tear down any pending exit-debounce when the component unmounts —
+  // a fired timeout calling setState on a dead component would no-op
+  // but it's still cleaner to cancel it.
+  useEffect(() => {
+    return () => {
+      if (exitDebounceRef.current !== null) {
+        window.clearTimeout(exitDebounceRef.current);
+      }
+    };
+  }, []);
 
   // Bracketed-paste passthrough. zsh + most modern shells set DECSET
   // 2004 by default (their line editor strips the markers and treats
@@ -330,7 +415,48 @@ export function BlockTerminal({
         transition: "box-shadow 480ms cubic-bezier(0.16, 1, 0.3, 1)",
       }}
     >
-      {altScreen && <FullGrid frame={liveFrame} onSendBytes={sendBytes} />}
+      {exited && (
+        <div
+          role="status"
+          style={{
+            flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            gap: "var(--space-2)",
+            padding: "var(--space-2) var(--space-3)",
+            backgroundColor: "var(--surface-error-soft)",
+            color: "var(--state-error-bright)",
+            fontFamily: "var(--font-mono)",
+            fontSize: "var(--text-xs)",
+            borderBottom: "var(--border-1)",
+          }}
+        >
+          <span>session ended</span>
+          <span style={{ flex: 1 }} />
+          <button
+            type="button"
+            onClick={() => setGeneration((g) => g + 1)}
+            style={{
+              height: 22,
+              padding: "0 var(--space-3)",
+              backgroundColor: "var(--surface-2)",
+              color: "var(--text-primary)",
+              border: "var(--border-1)",
+              borderRadius: "var(--radius-sm)",
+              fontFamily: "var(--font-sans)",
+              fontSize: "var(--text-xs)",
+              fontWeight: "var(--weight-medium)",
+              cursor: "default",
+            }}
+          >
+            restart
+          </button>
+        </div>
+      )}
+
+      {!exited && altScreen && (
+        <FullGrid frame={liveFrame} onSendBytes={sendBytes} />
+      )}
 
       {/* Shell mode (no agent foregrounded): one scroll container holds
           the closed history (BlockList) and the in-progress LiveBlock,
@@ -355,12 +481,13 @@ export function BlockTerminal({
 
       {/* Agent mode (claude / codex / aider in normal screen): the agent
           owns the pane. Hide closed-block history so prior shell output
-          doesn't ghost above the agent's UI. */}
-      {!altScreen && foregroundIsAgent && (
+          doesn't ghost above the agent's UI. Skipped after PTY exit —
+          the agent that owned the surface is gone. */}
+      {!exited && !altScreen && foregroundIsAgent && (
         <LiveBlock command={activeCommand} frame={liveFrame} fill cwd={effectiveCwd} />
       )}
 
-      {!altScreen && effectiveCwd && (
+      {!agentMode && effectiveCwd && (
         <TerminalStatusBar cwd={effectiveCwd} command={command} />
       )}
       {!agentMode && (

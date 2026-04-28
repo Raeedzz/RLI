@@ -68,6 +68,7 @@ const CONTENT_LABEL: Record<PaneContent, string> = {
   terminal: "terminal",
   editor: "editor",
   browser: "browser",
+  graph: "memory graph",
 };
 
 /**
@@ -489,6 +490,7 @@ function DropZoneOverlay({ zone }: { zone: DropZone }) {
 function contentDot(content: PaneContent): string {
   if (content === "terminal") return "var(--state-success)";
   if (content === "editor") return "var(--accent-bright)";
+  if (content === "graph") return "var(--state-info, #6db3ff)";
   return "var(--state-warning)";
 }
 

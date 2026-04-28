@@ -129,7 +129,10 @@ export function Editor({ path, content, onChange }: Props) {
           },
         },
       ]),
-      EditorView.lineWrapping,
+      // No line wrapping — long lines overflow horizontally and the
+      // editor's own scroller scrolls the view. Code (especially logs,
+      // long URLs, or wide source files) reads better unwrapped, and
+      // the user can decide to soft-wrap by widening the pane instead.
       EditorView.updateListener.of((u) => {
         if (u.docChanged && onChange) {
           onChange(u.state.doc.toString());

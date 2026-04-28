@@ -3,6 +3,19 @@ import type { Span } from "./types";
 
 interface Props {
   spans: Span[];
+  /**
+   * When true, soft-wrap long rows at whitespace and force-break
+   * unbreakable runs. Used by closed blocks and the in-progress
+   * LiveBlock so historical command output stays readable when the
+   * pane is narrower than the PTY's column count.
+   *
+   * MUST stay false for alt-screen TUI grids (FullGrid for vim /
+   * htop / claude) — those assume one visual line per grid row, and
+   * any wrapping makes the rendered row count drift away from the
+   * PTY's row count, which kicks the ResizeObserver into a feedback
+   * loop and produces a visible jitter.
+   */
+  wrap?: boolean;
 }
 
 /**
@@ -15,11 +28,12 @@ interface Props {
  * render of all currently-dirty rows still benefits when only the
  * cursor row inside that set actually changed contents).
  */
-export const CellRow = memo(function CellRow({ spans }: Props) {
+export const CellRow = memo(function CellRow({ spans, wrap = false }: Props) {
   return (
     <div
       style={{
-        whiteSpace: "pre",
+        whiteSpace: wrap ? "pre-wrap" : "pre",
+        overflowWrap: wrap ? "anywhere" : "normal",
         fontVariantLigatures: "none",
         lineHeight: "var(--cell-line-height, 1.35)",
       }}

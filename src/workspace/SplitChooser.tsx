@@ -19,6 +19,7 @@ const CONTENT_OPTIONS: { id: PaneContent; label: string; hint: string }[] = [
   { id: "terminal", label: "Terminal", hint: "shell or claude" },
   { id: "editor", label: "Code editor", hint: "open file" },
   { id: "browser", label: "Browser", hint: "GStack preview" },
+  { id: "graph", label: "Memory graph", hint: "embedding map" },
 ];
 
 const DIRECTION_OPTIONS: {

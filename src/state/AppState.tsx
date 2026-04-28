@@ -159,6 +159,35 @@ export function reducer(state: AppState, action: AppAction): AppState {
       };
     }
 
+    case "toggle-graph": {
+      // Same shape as toggle-browser. Splits a graph pane onto the
+      // right edge of the workspace tree (or closes it if open). The
+      // graph view itself fetches data via memory_graph_data and
+      // runs a force simulation in SVG.
+      const projectId = state.activeProjectId;
+      if (!projectId) return state;
+      const sessionId = state.activeSessionByProject[projectId];
+      if (!sessionId) return state;
+      const session = state.sessions.find((s) => s.id === sessionId);
+      if (!session) return state;
+      const allLeaves = leaves(session.workspace);
+      const graphLeaf = allLeaves.find((l) => l.content === "graph");
+      const nextWorkspace = graphLeaf
+        ? closeLeaf(session.workspace, graphLeaf.id)
+        : splitLeaf(
+            session.workspace,
+            allLeaves[allLeaves.length - 1].id,
+            "right",
+            "graph",
+          );
+      return {
+        ...state,
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId ? { ...s, workspace: nextWorkspace } : s,
+        ),
+      };
+    }
+
     case "toggle-api-key":
       return { ...state, apiKeyDialogOpen: !state.apiKeyDialogOpen };
 

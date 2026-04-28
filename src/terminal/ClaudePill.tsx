@@ -1,49 +1,57 @@
-import { useEffect, useState } from "react";
-import { computeClaudeUsage } from "@/lib/claudeUsage";
-
-interface Props {
-  /** Wall-clock millis when Claude was first detected in this session. */
-  startedAt: number;
-}
+import { useState } from "react";
+import {
+  CLAUDE_PLAN_BUDGETS,
+  formatTokenCount,
+  useClaudeUsage,
+  writeClaudePlan,
+  type ClaudePlanTier,
+  type ClaudeUsageDerived,
+  type ClaudeUsageStatus,
+} from "@/lib/claudeUsage";
 
 /**
- * Compact Claude-session indicator. Lives inside TerminalStatusBar
- * alongside the cwd/branch/diff pills — same height, same chrome —
- * so the 5-hour usage info doesn't claim a whole row of vertical
- * space. Shows just the asterisk mark + time remaining, color-toned
- * by how full the window is. Full-text breakdown lives in the
- * tooltip.
+ * Compact Claude usage indicator. Sources its numbers from the real
+ * Claude Code transcript files via the `useClaudeUsage` hook. The
+ * window is the CURRENT 5h Claude session (anchored on the first
+ * message after the previous session expired) — same scope as
+ * Claude.ai's "Current session" indicator.
+ *
+ *   ┌────────────────────────────────────────┐
+ *   │ ✻ 13% · 3h 36m · 296M tok             │
+ *   └────────────────────────────────────────┘
+ *
+ * Click the pill to switch plan tier (Pro / Max 5x / Max 20x). The
+ * choice persists in localStorage and adjusts the % denominator.
  */
-export function ClaudePill({ startedAt }: Props) {
-  const [now, setNow] = useState(() => Date.now());
+export function ClaudePill() {
+  const { status, derived } = useClaudeUsage();
+  const [pickerOpen, setPickerOpen] = useState(false);
 
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, []);
+  if (!status || !status.active || !derived) return null;
 
-  const { remainingMs, fractionUsed, remainingLabel } = computeClaudeUsage(
-    startedAt,
-    now,
-  );
-
+  // Tone tracks TOKEN spend now that we have a real denominator.
+  // <50% green, <80% amber, ≥80% red. Mirrors Claude.ai's own
+  // visual language for the session bar.
   const tone =
-    remainingMs <= 30 * 60 * 1000
+    derived.fractionUsed >= 0.8
       ? "var(--state-error)"
-      : fractionUsed >= 0.7
+      : derived.fractionUsed >= 0.5
         ? "var(--state-warning)"
         : "var(--state-success)";
-
-  // Percent USED of the 5h window. Floor instead of round so a fresh
-  // session reads "0%" instead of jumping to "1%" within the first
-  // few minutes.
-  const percentUsed = Math.min(99, Math.floor(fractionUsed * 100));
 
   return (
     <span
       role="status"
-      title={`Claude session — ${percentUsed}% used · ${remainingLabel} until reset`}
+      title={buildTooltip(status, derived)}
+      onClick={(e) => {
+        // No point opening the plan picker when the real source is in
+        // play — the % comes from Anthropic, plan choice is irrelevant.
+        if (derived.realSource) return;
+        e.stopPropagation();
+        setPickerOpen((v) => !v);
+      }}
       style={{
+        position: "relative",
         display: "inline-flex",
         alignItems: "center",
         gap: "var(--space-1-5)",
@@ -54,6 +62,7 @@ export function ClaudePill({ startedAt }: Props) {
         fontSize: "var(--text-2xs)",
         color: "var(--text-tertiary)",
         letterSpacing: "var(--tracking-tight)",
+        cursor: derived.realSource ? "default" : "pointer",
       }}
     >
       <ClaudeMark color="var(--state-warning)" />
@@ -66,17 +75,9 @@ export function ClaudePill({ startedAt }: Props) {
           fontWeight: "var(--weight-medium)",
         }}
       >
-        {percentUsed}%
+        {derived.percentUsedLabel}
       </span>
-      <span
-        aria-hidden
-        style={{
-          color: "var(--text-disabled)",
-          fontFamily: "var(--font-mono)",
-        }}
-      >
-        ·
-      </span>
+      <Sep />
       <span
         style={{
           fontFamily: "var(--font-mono)",
@@ -85,8 +86,190 @@ export function ClaudePill({ startedAt }: Props) {
           color: "var(--text-tertiary)",
         }}
       >
-        {remainingLabel}
+        {derived.remainingLabel}
       </span>
+      <Sep />
+      <span
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontVariantLigatures: "none",
+          fontVariantNumeric: "tabular-nums",
+          color: "var(--text-tertiary)",
+        }}
+      >
+        {derived.totalTokensLabel} tok
+      </span>
+      {pickerOpen && (
+        <PlanPicker
+          current={derived.plan}
+          onPick={(tier) => {
+            writeClaudePlan(tier);
+            setPickerOpen(false);
+          }}
+          onClose={() => setPickerOpen(false)}
+        />
+      )}
+    </span>
+  );
+}
+
+function PlanPicker({
+  current,
+  onPick,
+  onClose,
+}: {
+  current: ClaudePlanTier;
+  onPick: (tier: ClaudePlanTier) => void;
+  onClose: () => void;
+}) {
+  const items: Array<{ id: ClaudePlanTier; label: string }> = [
+    { id: "pro", label: "Pro" },
+    { id: "max5", label: "Max 5x" },
+    { id: "max20", label: "Max 20x" },
+  ];
+  return (
+    <>
+      <div
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 99,
+        }}
+      />
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          position: "absolute",
+          right: 0,
+          bottom: 22,
+          zIndex: 100,
+          minWidth: 160,
+          padding: "var(--space-1)",
+          backgroundColor: "var(--surface-2)",
+          border: "var(--border-1)",
+          borderRadius: "var(--radius-sm)",
+          boxShadow: "var(--shadow-lg)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 1,
+        }}
+      >
+        <div
+          style={{
+            padding: "var(--space-1) var(--space-2)",
+            fontSize: "var(--text-2xs)",
+            color: "var(--text-tertiary)",
+            letterSpacing: "var(--tracking-wide)",
+            textTransform: "uppercase",
+          }}
+        >
+          Plan
+        </div>
+        {items.map((it) => (
+          <button
+            key={it.id}
+            type="button"
+            onClick={() => onPick(it.id)}
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              padding: "var(--space-1-5) var(--space-2)",
+              backgroundColor:
+                current === it.id ? "var(--surface-3)" : "transparent",
+              border: "none",
+              borderRadius: "var(--radius-xs)",
+              fontFamily: "var(--font-sans)",
+              fontSize: "var(--text-2xs)",
+              color: "var(--text-primary)",
+              textAlign: "left",
+              cursor: "pointer",
+            }}
+            onMouseEnter={(e) => {
+              if (current !== it.id) {
+                e.currentTarget.style.backgroundColor = "var(--surface-3)";
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (current !== it.id) {
+                e.currentTarget.style.backgroundColor = "transparent";
+              }
+            }}
+          >
+            <span>{it.label}</span>
+            <span
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "var(--text-2xs)",
+                color: "var(--text-tertiary)",
+              }}
+            >
+              {formatTokenCount(CLAUDE_PLAN_BUDGETS[it.id])}
+            </span>
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function buildTooltip(s: ClaudeUsageStatus, d: ClaudeUsageDerived): string {
+  const lines: string[] = [];
+  if (d.realSource) {
+    lines.push(
+      `Claude · ${d.percentUsedLabel} used (5h) · resets in ${d.remainingLabel}`,
+    );
+    if (d.sevenDayPercent != null) {
+      lines.push(`weekly: ${Math.round(d.sevenDayPercent)}% used`);
+    }
+    lines.push(`source: Anthropic (status-line hook)`);
+  } else {
+    lines.push(
+      `Claude ${planLabel(d.plan)} · ${d.percentUsedLabel} used · resets in ${d.remainingLabel}`,
+    );
+    lines.push(
+      `source: estimate (install ~/.claude/hooks/rli-usage-capture.sh for exact %)`,
+    );
+  }
+  lines.push(
+    `${s.message_count} messages · ${formatTokenCount(s.total_input_tokens)} in / ${formatTokenCount(s.total_output_tokens)} out`,
+  );
+  if (s.total_cache_read_tokens > 0 || s.total_cache_creation_tokens > 0) {
+    lines.push(
+      `cache: ${formatTokenCount(s.total_cache_read_tokens)} read · ${formatTokenCount(s.total_cache_creation_tokens)} created`,
+    );
+  }
+  const models = Object.entries(s.by_model).sort(
+    (a, b) => b[1].messages - a[1].messages,
+  );
+  if (models.length > 0) {
+    for (const [model, b] of models) {
+      lines.push(
+        `  ${model}: ${b.messages} msgs · ${formatTokenCount(b.output_tokens)} out`,
+      );
+    }
+  }
+  if (!d.realSource) lines.push("(click to switch plan)");
+  return lines.join("\n");
+}
+
+function planLabel(p: ClaudePlanTier): string {
+  if (p === "pro") return "Pro";
+  if (p === "max5") return "Max 5x";
+  return "Max 20x";
+}
+
+function Sep() {
+  return (
+    <span
+      aria-hidden
+      style={{ color: "var(--text-disabled)", fontFamily: "var(--font-mono)" }}
+    >
+      ·
     </span>
   );
 }

@@ -1,14 +1,10 @@
 import {
-  BrowserIcon,
   ConnectionsIcon,
   FolderIcon,
   GitIcon,
+  GraphIcon,
 } from "@/primitives/Icon";
-import {
-  useActiveSession,
-  useAppDispatch,
-  useAppState,
-} from "@/state/AppState";
+import { useActiveSession, useAppDispatch, useAppState } from "@/state/AppState";
 import { leaves } from "@/state/paneTree";
 import type { ReactNode } from "react";
 
@@ -25,11 +21,10 @@ export function ActivityRail() {
   const state = useAppState();
   const session = useActiveSession();
   const dispatch = useAppDispatch();
-  // Derive browser visibility from the workspace tree so it stays in
-  // sync whether the browser was opened via this button, dragged into
-  // place, or closed via the pane × button.
-  const browserVisible = session
-    ? leaves(session.workspace).some((l) => l.content === "browser")
+  // Derive graph-pane visibility from the workspace tree so the icon
+  // stays in sync regardless of how the pane was added/closed.
+  const graphVisible = session
+    ? leaves(session.workspace).some((l) => l.content === "graph")
     : false;
 
   return (
@@ -52,7 +47,7 @@ export function ActivityRail() {
       <RailButton
         active={state.leftPanel === "files"}
         label="Files"
-        chord=""
+        chord="⌘⌥F"
         onClick={() =>
           dispatch({ type: "toggle-left-panel", panel: "files" })
         }
@@ -63,7 +58,7 @@ export function ActivityRail() {
       <RailButton
         active={state.leftPanel === "git"}
         label="Source control"
-        chord="⌃⇧G"
+        chord="⌘⌥G"
         onClick={() =>
           dispatch({ type: "toggle-left-panel", panel: "git" })
         }
@@ -74,7 +69,7 @@ export function ActivityRail() {
       <RailButton
         active={state.leftPanel === "connections"}
         label="Skills & MCP"
-        chord="⌘⇧;"
+        chord="⌘⌥S"
         onClick={() =>
           dispatch({ type: "toggle-left-panel", panel: "connections" })
         }
@@ -83,12 +78,12 @@ export function ActivityRail() {
       </RailButton>
 
       <RailButton
-        active={browserVisible}
-        label="Browser"
-        chord="⌘⇧B"
-        onClick={() => dispatch({ type: "toggle-browser" })}
+        active={graphVisible}
+        label="Memory graph"
+        chord=""
+        onClick={() => dispatch({ type: "toggle-graph" })}
       >
-        <BrowserIcon />
+        <GraphIcon />
       </RailButton>
 
       <div style={{ flex: 1 }} />

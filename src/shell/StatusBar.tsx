@@ -89,9 +89,10 @@ export function StatusBar() {
           flexShrink: 0,
         }}
       >
-        {session?.agentRunning && session?.claudeStartedAt != null && (
-          <ClaudePill startedAt={session.claudeStartedAt} />
-        )}
+        {/* The pill is global (account-wide 5h window). It self-hides
+            when no recent claude activity exists in `~/.claude/projects`,
+            so we render it unconditionally and let the hook decide. */}
+        <ClaudePill />
         <span>
           <Mono>⌘K</Mono> commands
         </span>

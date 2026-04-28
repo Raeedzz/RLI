@@ -2,6 +2,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { BlockTerminal } from "@/terminal/BlockTerminal";
 import { Editor } from "@/editor/Editor";
 import { BrowserPane } from "@/browser/BrowserPane";
+import { GraphView } from "@/graph/GraphView";
 import { useActiveProject, useActiveSession, useAppDispatch } from "@/state/AppState";
 import type { PaneContent, PaneNode, PaneNodeId, SessionId } from "@/state/types";
 import { PaneFrame } from "./PaneFrame";
@@ -87,6 +88,7 @@ function PaneBody({
 }) {
   if (content === "terminal") return <TerminalBody paneId={paneId} />;
   if (content === "editor") return <EditorBody />;
+  if (content === "graph") return <GraphView />;
   return <BrowserBody />;
 }
 
@@ -106,6 +108,8 @@ function TerminalBody({ paneId }: { paneId: PaneNodeId }) {
       command="zsh"
       args={["-l"]}
       cwd={project.path}
+      projectId={project.id}
+      sessionId={session?.id}
       onClaudeDetected={
         session
           ? (timestamp) =>
