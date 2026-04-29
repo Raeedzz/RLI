@@ -395,6 +395,7 @@ function SessionTab({
       <StatusDot
         status={session.status}
         color={session.color ? tagColor : undefined}
+        running={session.agentRunning === true}
       />
 
       {editing ? (
