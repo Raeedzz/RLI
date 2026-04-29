@@ -44,17 +44,12 @@ export function WindowChrome() {
           "padding-left var(--motion-fast) var(--ease-out-quart)",
       }}
     >
-      {/* Centered relative to the WHOLE window, not relative to the
-          gutter — absolute positioning + translateX(-50%) avoids the
-          settings button on the right pulling the search off-center.
-          `display: flex; alignItems: center` on the wrapper kills the
-          line-height descender that an inline-block button would otherwise
-          leave below itself, which would nudge the optical center down.
-
-          Tauri 2 reads the drag attribute off the click target only — it
-          doesn't walk up to the parent — so this absolute wrapper has to
-          opt in explicitly or its transparent margin would block dragging
-          when the user grabs near the search box. */}
+      {/* Search input — centered horizontally AND vertically in the
+          chrome strip. Absolute positioning + translate(-50%, -50%) keeps
+          the trigger optically dead-center regardless of the right-side
+          settings cluster's width. The wrapper is itself a drag region
+          so its transparent margin doesn't block window dragging (Tauri
+          reads the attribute off the click target, not its ancestors). */}
       <div
         data-tauri-drag-region
         style={{
@@ -72,8 +67,7 @@ export function WindowChrome() {
         />
       </div>
 
-      {/* Right-anchored settings cluster — sits at the right edge no
-          matter how wide the search input is. */}
+      {/* Right-anchored settings cog stays out of the search's way. */}
       <div
         data-tauri-drag-region
         style={{
@@ -99,11 +93,11 @@ function SearchTrigger({ onOpen }: { onOpen: () => void }) {
       type="button"
       onClick={onOpen}
       data-tauri-drag-region={false}
-      title="Search  ⌘⇧F"
+      title="Search  ⌘K"
       aria-label="Search"
       style={{
-        width: 420,
-        maxWidth: "60vw",
+        width: 360,
+        maxWidth: "50vw",
         height: 22,
         display: "inline-flex",
         alignItems: "center",
@@ -157,7 +151,7 @@ function SearchTrigger({ onOpen }: { onOpen: () => void }) {
           flexShrink: 0,
         }}
       >
-        ⌘⇧F
+        ⌘K
       </span>
     </button>
   );

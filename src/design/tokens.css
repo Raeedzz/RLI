@@ -260,10 +260,13 @@ button {
   cursor: default;
 }
 
-/* Focus rings — keyboard only */
+/* Focus rings — keyboard only. Tab/arrow keyboard navigation lights
+   up the focused element with the same blue used for accents elsewhere.
+   `accent-bright` (not `accent`) so it pops against the surface tints
+   used on most focusable controls. */
 :focus { outline: none; }
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--accent-bright);
   outline-offset: 1px;
   border-radius: var(--radius-sm);
 }

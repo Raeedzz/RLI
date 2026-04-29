@@ -14,6 +14,7 @@ import {
   projectStripSpring,
   tabIndicatorSpring,
 } from "@/design/motion";
+import { useArrowFocus } from "@/hooks/useArrowFocus";
 import {
   useActiveProject,
   useAppDispatch,
@@ -124,8 +125,9 @@ export function TopBar() {
           alignItems: "flex-start",
           backgroundColor: "var(--surface-1)",
           borderBottom: "var(--border-1)",
-          // Traffic-light cluster lives one strip up in <WindowChrome>,
-          // so the tabs row sits flush against the window's left edge.
+          // Tabs sit flush against both column edges — the workspace
+          // below has zero gutter, so any top-bar padding would
+          // misalign tabs with the pane below them.
           paddingLeft: 0,
           paddingRight: 0,
           userSelect: "none",
@@ -169,6 +171,7 @@ function SessionTabs({
   const activeId = project ? state.activeSessionByProject[project.id] : null;
   const [editingId, setEditingId] = useState<SessionId | null>(null);
   const [dropTargetId, setDropTargetId] = useState<SessionId | null>(null);
+  const onArrowKey = useArrowFocus("horizontal");
 
   if (!project) return <div />;
 
@@ -202,12 +205,14 @@ function SessionTabs({
     <div
       role="tablist"
       aria-label="Sessions"
+      aria-orientation="horizontal"
       // Tauri 2's drag-region check looks only at e.target — it doesn't
       // walk up the DOM. So even though the parent <header> is a drag
       // region, this flex:1 row would swallow clicks in the empty space
       // after the tabs and block window dragging. Mark it explicitly so
       // the gap right of the tabs (and right of "+") drags the window.
       data-tauri-drag-region
+      onKeyDown={onArrowKey}
       style={{
         position: "relative",
         display: "flex",
@@ -313,6 +318,11 @@ function SessionTab({
     <div
       role="tab"
       aria-selected={active}
+      // Roving tabindex: only the active tab is in the document tab
+      // order, so Tab moves out of the tablist (into the next widget)
+      // instead of cycling through every session. ←/→ via the
+      // useArrowFocus hook on the parent moves focus between tabs.
+      tabIndex={editing ? -1 : active ? 0 : -1}
       data-tauri-drag-region={false}
       draggable={!editing}
       onDragStart={onDragStart}
@@ -320,6 +330,13 @@ function SessionTab({
       onDragLeave={onDragLeave}
       onDrop={onDrop}
       onClick={editing ? undefined : onSelect}
+      onKeyDown={(e) => {
+        if (editing) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
       onDoubleClick={(e) => {
         e.preventDefault();
         e.stopPropagation();

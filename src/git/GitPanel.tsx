@@ -143,6 +143,47 @@ export function GitPanel({ projectPath, selectedPath, onOpenDiff }: Props) {
     }
   };
 
+  const confirmDiscard = (count: number, label: string): boolean => {
+    return window.confirm(
+      count === 1
+        ? `Discard changes to ${label}? This cannot be undone.`
+        : `Discard changes to ${count} files? This cannot be undone.`,
+    );
+  };
+
+  const onDiscard = async (path: string) => {
+    if (!confirmDiscard(1, path.split("/").pop() || path)) return;
+    setBusyPath(path);
+    try {
+      await git.discard(projectPath, [path]);
+      await refresh();
+    } catch (e) {
+      flashToast(`discard failed: ${e}`);
+    } finally {
+      setBusyPath(null);
+    }
+  };
+
+  const onDiscardAll = async (which: "staged" | "unstaged") => {
+    const list = which === "staged" ? staged : unstaged;
+    if (list.length === 0) return;
+    if (!confirmDiscard(list.length, "")) return;
+    const busyKey =
+      which === "staged" ? "__discard_staged__" : "__discard_unstaged__";
+    setBusyPath(busyKey);
+    try {
+      await git.discard(
+        projectPath,
+        list.map((e) => e.path),
+      );
+      await refresh();
+    } catch (e) {
+      flashToast(`discard all failed: ${e}`);
+    } finally {
+      setBusyPath(null);
+    }
+  };
+
   const onGenerate = async () => {
     if (staged.length === 0) {
       flashToast("stage something first");
@@ -261,6 +302,7 @@ export function GitPanel({ projectPath, selectedPath, onOpenDiff }: Props) {
             actionLabel="−"
             actionTitle="unstage"
             onAction={onUnstage}
+            onDiscard={onDiscard}
             onRowClick={(p) => onOpenDiff?.(p, true)}
             selectedPath={selectedPath}
             busyPath={busyPath}
@@ -273,6 +315,11 @@ export function GitPanel({ projectPath, selectedPath, onOpenDiff }: Props) {
                   }
                 : undefined
             }
+            discardAllAction={{
+              title: "discard all staged changes",
+              onClick: () => void onDiscardAll("staged"),
+              disabled: busyPath === "__discard_staged__",
+            }}
           />
         )}
         {unstaged.length > 0 && (
@@ -285,6 +332,7 @@ export function GitPanel({ projectPath, selectedPath, onOpenDiff }: Props) {
             actionLabel="+"
             actionTitle="stage"
             onAction={onStage}
+            onDiscard={onDiscard}
             onRowClick={(p) => onOpenDiff?.(p, false)}
             selectedPath={selectedPath}
             busyPath={busyPath}
@@ -297,6 +345,11 @@ export function GitPanel({ projectPath, selectedPath, onOpenDiff }: Props) {
                   }
                 : undefined
             }
+            discardAllAction={{
+              title: "discard all changes",
+              onClick: () => void onDiscardAll("unstaged"),
+              disabled: busyPath === "__discard_unstaged__",
+            }}
           />
         )}
         {staged.length === 0 && unstaged.length === 0 && !error && (
@@ -620,10 +673,12 @@ function Section({
   actionLabel,
   actionTitle,
   onAction,
+  onDiscard,
   onRowClick,
   selectedPath,
   busyPath,
   secondaryAction,
+  discardAllAction,
 }: {
   label: string;
   count: number;
@@ -633,11 +688,17 @@ function Section({
   actionLabel: string;
   actionTitle: string;
   onAction: (path: string) => void;
+  onDiscard: (path: string) => void;
   onRowClick: (path: string) => void;
   selectedPath?: string | null;
   busyPath: string | null;
   secondaryAction?: {
     label: string;
+    onClick: () => void;
+    disabled?: boolean;
+  };
+  discardAllAction?: {
+    title: string;
     onClick: () => void;
     disabled?: boolean;
   };
@@ -684,6 +745,42 @@ function Section({
             gap: "var(--space-2)",
           }}
         >
+          {discardAllAction && open && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                discardAllAction.onClick();
+              }}
+              disabled={discardAllAction.disabled}
+              title={discardAllAction.title}
+              aria-label={discardAllAction.title}
+              style={{
+                width: 22,
+                height: 22,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "var(--text-tertiary)",
+                backgroundColor: "transparent",
+                borderRadius: "var(--radius-xs)",
+                cursor: discardAllAction.disabled ? "default" : "pointer",
+                opacity: discardAllAction.disabled ? 0.5 : 1,
+              }}
+              onMouseEnter={(e) => {
+                if (!discardAllAction.disabled) {
+                  e.currentTarget.style.backgroundColor = "var(--surface-error-soft)";
+                  e.currentTarget.style.color = "var(--state-error-bright)";
+                }
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = "transparent";
+                e.currentTarget.style.color = "var(--text-tertiary)";
+              }}
+            >
+              <DiscardGlyph />
+            </button>
+          )}
           {secondaryAction && open && (
             <button
               type="button"
@@ -733,6 +830,7 @@ function Section({
             entry={e}
             actionLabel={actionLabel}
             actionTitle={actionTitle}
+            onDiscard={() => onDiscard(e.path)}
             busy={
               busyPath === e.path ||
               busyPath === "__all__" ||
@@ -753,6 +851,7 @@ function Row({
   actionTitle,
   busy,
   onAction,
+  onDiscard,
   onRowClick,
   selected,
 }: {
@@ -761,6 +860,7 @@ function Row({
   actionTitle: string;
   busy: boolean;
   onAction: () => void;
+  onDiscard: () => void;
   onRowClick: () => void;
   selected: boolean;
 }) {
@@ -838,6 +938,41 @@ function Row({
         type="button"
         onClick={(e) => {
           e.stopPropagation();
+          onDiscard();
+        }}
+        disabled={busy}
+        title="discard changes"
+        aria-label="discard changes"
+        style={{
+          width: 20,
+          height: 20,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--text-tertiary)",
+          backgroundColor: "transparent",
+          borderRadius: "var(--radius-xs)",
+          cursor: busy ? "default" : "pointer",
+          opacity: busy ? 0.5 : 1,
+          flexShrink: 0,
+        }}
+        onMouseEnter={(e) => {
+          if (!busy) {
+            e.currentTarget.style.backgroundColor = "var(--surface-error-soft)";
+            e.currentTarget.style.color = "var(--state-error-bright)";
+          }
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.backgroundColor = "transparent";
+          e.currentTarget.style.color = "var(--text-tertiary)";
+        }}
+      >
+        <DiscardGlyph />
+      </button>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
           onAction();
         }}
         disabled={busy}
@@ -901,6 +1036,31 @@ function KindGlyph({ kind }: { kind: string }) {
     >
       {entry.glyph}
     </span>
+  );
+}
+
+/**
+ * Curved counter-clockwise arrow — the conventional "revert / discard
+ * changes" glyph used by VS Code and most other git UIs. Renders at the
+ * size of the surrounding action buttons (20×20 wrapper, 14×14 glyph).
+ */
+function DiscardGlyph() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {/* counter-clockwise 270° arc starting from the top */}
+      <path d="M11 7a4 4 0 1 0-1.17 2.83" />
+      {/* arrowhead at the open end of the arc */}
+      <path d="M11 4.2 V7 H8.2" />
+    </svg>
   );
 }
 

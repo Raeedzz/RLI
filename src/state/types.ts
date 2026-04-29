@@ -119,6 +119,12 @@ export interface AppState {
   leftPanel: LeftPanel;
   searchOpen: boolean;
   apiKeyDialogOpen: boolean;
+  /**
+   * Markdown editor view: "rich" renders an editable WYSIWYG (TipTap)
+   * and "source" drops to the plain CodeMirror view. Persisted across
+   * file switches so the user's preference sticks.
+   */
+  markdownView: "rich" | "source";
 }
 
 export type AppAction =
@@ -132,6 +138,7 @@ export type AppAction =
   | { type: "toggle-left-panel"; panel: Exclude<LeftPanel, null> }
   | { type: "toggle-search" }
   | { type: "set-search"; open: boolean }
+  | { type: "set-markdown-view"; view: "rich" | "source" }
   | { type: "toggle-browser" }
   | { type: "toggle-graph" }
   | { type: "toggle-api-key" }

@@ -85,13 +85,15 @@
    Active drag: instant width swap + accent color, no transition.
    ------------------------------------------------------------------ */
 
+/* Resize handles. The visible line is a stable 1px — no width
+   transitions, so neighbouring panes never shift sideways on hover or
+   drag (that's what produced the jitter). Color shifts on hover/active
+   indicate state. The clickable hit zone is widened separately via the
+   `hitAreaMargins` prop on each <PanelResizeHandle/>. */
+
 [data-panel-resize-handle-enabled="true"] {
   background: var(--border-hairline);
-  transition:
-    background-color var(--motion-instant) var(--ease-out-quart),
-    width  var(--motion-instant) var(--ease-out-quart),
-    height var(--motion-instant) var(--ease-out-quart);
-  will-change: width, height, background-color;
+  transition: background-color var(--motion-instant) var(--ease-out-quart);
 }
 
 [data-panel-resize-handle-enabled="true"]:hover {
@@ -104,30 +106,20 @@
   transition: none !important;     /* follow mouse 1:1 */
 }
 
-/* Vertical divider (between horizontal splits) */
+/* Vertical divider (between horizontal splits). 0.5px is a true
+   hairline on retina (which is what RLI ships on); on a 1x display
+   the browser rounds up to the device pixel so it never disappears. */
 [data-panel-group-direction="horizontal"]
   [data-panel-resize-handle-enabled="true"] {
-  width: 1px;
+  width: 0.5px;
   cursor: col-resize;
-}
-[data-panel-group-direction="horizontal"]
-  [data-panel-resize-handle-enabled="true"]:hover,
-[data-panel-group-direction="horizontal"]
-  [data-panel-resize-handle-active="pointer"] {
-  width: 3px;
 }
 
 /* Horizontal divider (between vertical splits) */
 [data-panel-group-direction="vertical"]
   [data-panel-resize-handle-enabled="true"] {
-  height: 1px;
+  height: 0.5px;
   cursor: row-resize;
-}
-[data-panel-group-direction="vertical"]
-  [data-panel-resize-handle-enabled="true"]:hover,
-[data-panel-group-direction="vertical"]
-  [data-panel-resize-handle-active="pointer"] {
-  height: 3px;
 }
 
 /* ------------------------------------------------------------------

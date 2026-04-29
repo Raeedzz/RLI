@@ -39,6 +39,8 @@ export const git = {
     invoke<void>("git_stage", { cwd, paths }),
   unstage: (cwd: string, paths: string[]) =>
     invoke<void>("git_unstage", { cwd, paths }),
+  discard: (cwd: string, paths: string[]) =>
+    invoke<void>("git_discard", { cwd, paths }),
   commit: (cwd: string, message: string) =>
     invoke<string>("git_commit", { cwd, message }),
   push: (cwd: string, remote?: string, branch?: string) =>

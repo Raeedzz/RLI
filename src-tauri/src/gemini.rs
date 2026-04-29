@@ -40,9 +40,6 @@ const FLASH_LITE_MODEL: &str = "gemini-3.1-flash-lite-preview";
 const EMBED_MODEL: &str = "text-embedding-004";
 const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 
-const KEYRING_SERVICE: &str = "dev.raeedz.rli";
-const KEYRING_USER: &str = "gemini-api-key";
-
 // Without a timeout, a stalled connection (Wi-Fi handoff, captive portal,
 // API outage) blocks the call indefinitely — the highlight-and-ask card,
 // the AI commit-message button, and the embeddings layer all sit on this

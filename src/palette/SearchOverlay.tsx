@@ -2,7 +2,14 @@ import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { backdropVariants, paletteVariants } from "@/design/motion";
 import { search, type SearchHit } from "@/lib/search";
-import { useActiveProject, useAppDispatch, useAppState } from "@/state/AppState";
+import { fs } from "@/lib/fs";
+import {
+  useActiveProject,
+  useActiveSession,
+  useAppDispatch,
+  useAppState,
+} from "@/state/AppState";
+import { leaves } from "@/state/paneTree";
 
 type Mode = "text" | "regex" | "structural";
 
@@ -75,6 +82,8 @@ export function SearchOverlay() {
 
 function SearchInner({ onClose }: { onClose: () => void }) {
   const project = useActiveProject();
+  const session = useActiveSession();
+  const dispatch = useAppDispatch();
   const inputRef = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState<Mode>("text");
   const [query, setQuery] = useState("");
@@ -86,6 +95,46 @@ function SearchInner({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
+
+  /**
+   * Open the file behind a result hit in the editor pane and close
+   * the search popup. Mirrors the file-tree's open-file flow: split
+   * the rightmost pane to add an editor leaf if none exists yet, then
+   * dispatch open-file with the disk content.
+   */
+  const openHit = async (hit: SearchHit) => {
+    if (!session) {
+      onClose();
+      return;
+    }
+    const allLeaves = leaves(session.workspace);
+    const hasEditor = allLeaves.some((l) => l.content === "editor");
+    if (!hasEditor && allLeaves.length > 0) {
+      dispatch({
+        type: "split-pane",
+        sessionId: session.id,
+        paneId: allLeaves[allLeaves.length - 1].id,
+        direction: "right",
+        content: "editor",
+      });
+    }
+    try {
+      const content = await fs.readTextFile(hit.path);
+      dispatch({
+        type: "open-file",
+        sessionId: session.id,
+        file: { path: hit.path, content },
+      });
+    } catch (err) {
+      const synthetic = `// could not read file: ${String(err)}`;
+      dispatch({
+        type: "open-file",
+        sessionId: session.id,
+        file: { path: hit.path, content: synthetic },
+      });
+    }
+    onClose();
+  };
 
   // Debounced search
   useEffect(() => {
@@ -126,12 +175,7 @@ function SearchInner({ onClose }: { onClose: () => void }) {
     } else if (e.key === "Enter") {
       e.preventDefault();
       const hit = results[cursor];
-      if (hit) {
-        // TODO: open hit.path:hit.line in editor pane.
-        // For now we close — the editor wiring lives in Task #9 which
-        // adds the "open file" command on session creation.
-        onClose();
-      }
+      if (hit) void openHit(hit);
     } else if (e.key === "Escape") {
       e.preventDefault();
       onClose();
@@ -205,7 +249,7 @@ function SearchInner({ onClose }: { onClose: () => void }) {
             key={`${hit.path}:${hit.line}:${hit.column}:${i}`}
             hit={hit}
             active={i === cursor}
-            onClick={() => onClose()}
+            onClick={() => void openHit(hit)}
             onMouseEnter={() => setCursor(i)}
           />
         ))}
@@ -348,8 +392,21 @@ function Footer({ mode, count }: { mode: Mode; count: number }) {
         <Mono>↑↓</Mono> navigate · <Mono>Tab</Mono> cycle mode ·{" "}
         <Mono>Enter</Mono> open · <Mono>Esc</Mono> close
       </span>
-      <span className="tabular">
-        {count} {count === 1 ? "match" : "matches"} · {MODE_LABELS[mode]}
+      <span style={{ display: "inline-flex", alignItems: "center", gap: "var(--space-2)" }}>
+        <span className="tabular">
+          {count} {count === 1 ? "match" : "matches"} · {MODE_LABELS[mode]}
+        </span>
+        <span
+          style={{
+            color: "var(--text-disabled)",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+          }}
+        >
+          <Mono>⌘K</Mono>
+          <span>search</span>
+        </span>
       </span>
     </div>
   );

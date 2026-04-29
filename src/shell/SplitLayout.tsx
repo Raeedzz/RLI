@@ -9,6 +9,7 @@ import { DiffView } from "@/git/DiffView";
 import { ConnectionsPanel } from "@/connections/ConnectionsPanel";
 import { TopBar } from "./TopBar";
 import { fs } from "@/lib/fs";
+import { fileKind, isBinaryPath } from "@/lib/fileKind";
 import {
   useActiveProject,
   useActiveSession,
@@ -51,25 +52,10 @@ const AUTOSAVE_DEBOUNCE_MS = 500;
  */
 const AUTOSAVE_ENABLED = !import.meta.env.DEV;
 
-/**
- * Extensions we will NEVER autosave. Binary files would corrupt with
- * UTF-8 round-tripping; auto-formats / lock-files we leave to their
- * own toolchains. Belt-and-suspenders against the editor surfacing a
- * synthetic "// could not read file…" stub on a binary and then
- * writing that stub back when the user hits a key.
- */
-const NO_AUTOSAVE_EXT = new Set([
-  "png", "jpg", "jpeg", "gif", "webp", "ico", "icns", "bmp", "tiff",
-  "pdf", "mp4", "mov", "mp3", "wav", "ogg",
-  "zip", "gz", "tar", "tgz", "bz2", "xz", "7z",
-  "exe", "dll", "dylib", "so", "bin", "wasm",
-  "sqlite", "db", "lock",
-]);
-
-function isBinaryPath(path: string): boolean {
-  const ext = path.split(".").pop()?.toLowerCase();
-  return ext != null && NO_AUTOSAVE_EXT.has(ext);
-}
+// Binary files (images, archives, audio…) never autosave — round-tripping
+// bytes through CodeMirror as UTF-8 would corrupt them. We piggy-back on
+// the same kind classifier the editor pane uses to pick its viewer
+// (`@/lib/fileKind`) so the two stay in sync.
 
 export function SplitLayout() {
   const project = useActiveProject();
@@ -179,6 +165,21 @@ export function SplitLayout() {
         content: "editor",
       });
     }
+    // Binaries (images, archives, audio, etc.) — don't try to round-trip
+    // bytes through readTextFile. The editor pane decides how to render
+    // each kind based on the path extension. We still dispatch the
+    // open-file action so the editor knows which file to show; the
+    // content is just an empty string for non-text files.
+    const kind = fileKind(path);
+    if (kind !== "text") {
+      lastSavedRef.current = { path, content: "" };
+      dispatch({
+        type: "open-file",
+        sessionId: session.id,
+        file: { path, content: "" },
+      });
+      return;
+    }
     try {
       const content = await fs.readTextFile(path);
       lastSavedRef.current = { path, content };
@@ -246,14 +247,19 @@ export function SplitLayout() {
 
   return (
     <>
-      {/* Bump autoSaveId after a panel-order change so the persisted
-          left/right sizes don't get resurrected with the wrong slot. */}
-      <PanelGroup direction="horizontal" autoSaveId="rli-workspace-v6">
+      {/* Bump autoSaveId whenever the panel order or default sizes
+          change so the persisted left/right sizes don't get resurrected
+          with the wrong slot or an obsolete width. */}
+      <PanelGroup direction="horizontal" autoSaveId="rli-workspace-v9">
         {leftPanel !== null && (
           <>
             <Panel
-              defaultSize={18}
-              minSize={12}
+              // 20% lands the divider in a sweet spot: enough room for
+              // typical file names without pushing the workspace
+              // column too far right. Wider was visibly cramped on the
+              // workspace side; narrower clipped file names.
+              defaultSize={20}
+              minSize={14}
               maxSize={32}
               order={1}
               collapsible
@@ -281,7 +287,13 @@ export function SplitLayout() {
                 )}
               </Pane>
             </Panel>
-            <PanelResizeHandle />
+            <PanelResizeHandle
+              tabIndex={-1}
+              // Visible line stays a hairline; only the hit zone is
+              // expanded a touch so the user can still grab the divider
+              // precisely without the line jittering or visibly widening.
+              hitAreaMargins={{ coarse: 6, fine: 4 }}
+            />
           </>
         )}
 
@@ -311,7 +323,12 @@ export function SplitLayout() {
                 flex: 1,
                 minHeight: 0,
                 position: "relative",
-                padding: "var(--space-2)",
+                // Panes go edge-to-edge — no inner gutter. Pane bodies
+                // abut the resize handles directly so the dividers are
+                // continuous 1px lines from top to bottom of the column,
+                // not segments separated by gaps. Cleaner and lines up
+                // exactly with the file panel divider on the left.
+                padding: 0,
                 backgroundColor: "var(--surface-1)",
               }}
             >
@@ -319,12 +336,9 @@ export function SplitLayout() {
               <AnimatePresence>
                 {diffFile && (
                   <div
-                    // Pad inset matches the workspace gutter so the diff
-                    // overlay sits in the same well as the panes — feels
-                    // like it took over the workspace, not the whole window.
                     style={{
                       position: "absolute",
-                      inset: "var(--space-2)",
+                      inset: 0,
                       zIndex: 5,
                     }}
                   >
@@ -385,7 +399,7 @@ function FileTreePane({
           height: "var(--pane-header-height)",
           display: "flex",
           alignItems: "center",
-          padding: "0 var(--space-3)",
+          padding: "0 var(--space-2)",
           borderBottom: "var(--border-1)",
           fontFamily: "var(--font-sans)",
           fontSize: "var(--text-2xs)",

@@ -68,6 +68,7 @@ export const INITIAL_STATE: AppState = {
   leftPanel: "files",
   searchOpen: false,
   apiKeyDialogOpen: false,
+  markdownView: "rich",
 };
 
 /* ------------------------------------------------------------------
@@ -130,6 +131,9 @@ export function reducer(state: AppState, action: AppAction): AppState {
 
     case "set-search":
       return { ...state, searchOpen: action.open };
+
+    case "set-markdown-view":
+      return { ...state, markdownView: action.view };
 
     case "toggle-browser": {
       // Browser is just another pane — toggle = add or remove a browser

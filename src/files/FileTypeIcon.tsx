@@ -29,6 +29,11 @@ const COLOR = {
   rose:    "var(--tag-rose)",     // .html, .vue
   neutral: "var(--text-tertiary)",
   accent:  "var(--accent)",
+  // Bright Docker brand blue. The workshop palette doesn't have a
+  // matching pigment, so we anchor it to the app's --accent-bright
+  // (steel sky-blue at hue 240) — the closest visual match to
+  // Docker's #0DB7ED while staying inside the design system.
+  docker:  "var(--accent-bright)",
 };
 
 interface TypeSpec {
@@ -87,7 +92,8 @@ const TYPES: Record<string, TypeSpec> = {
   gitignore:   { glyph: "Gi", color: COLOR.neutral },
   gitattributes:{ glyph: "Ga", color: COLOR.neutral },
   env:         { glyph: "Ev", color: COLOR.amber },
-  dockerfile:  { glyph: "Dk", color: COLOR.slate },
+  dockerfile:  { glyph: "Dk", color: COLOR.docker },
+  dockerignore:{ glyph: "Dk", color: COLOR.docker },
   makefile:    { glyph: "Mk", color: COLOR.amber },
 
   // images / media
@@ -115,7 +121,12 @@ const FILENAMES: Record<string, TypeSpec> = {
   ".gitattributes":  { glyph: "Ga", color: COLOR.neutral },
   ".env":            { glyph: "Ev", color: COLOR.amber },
   ".env.local":      { glyph: "Ev", color: COLOR.amber },
-  "Dockerfile":      { glyph: "Dk", color: COLOR.slate },
+  ".dockerignore":   { glyph: "Dk", color: COLOR.docker },
+  "Dockerfile":      { glyph: "Dk", color: COLOR.docker },
+  "docker-compose.yml":  { glyph: "Dk", color: COLOR.docker },
+  "docker-compose.yaml": { glyph: "Dk", color: COLOR.docker },
+  "compose.yml":         { glyph: "Dk", color: COLOR.docker },
+  "compose.yaml":        { glyph: "Dk", color: COLOR.docker },
   "Makefile":        { glyph: "Mk", color: COLOR.amber },
   "Cargo.toml":      { glyph: "Cg", color: COLOR.rust },
   "Cargo.lock":      { glyph: "Cg", color: COLOR.rust },
@@ -128,8 +139,16 @@ const FILENAMES: Record<string, TypeSpec> = {
   "LICENSE":         { glyph: "Lc", color: COLOR.neutral },
 };
 
+const DOCKER_PREFIX_RE = /^Dockerfile(\.|$)/;
+
 export function fileTypeFor(name: string): TypeSpec {
   if (FILENAMES[name]) return FILENAMES[name];
+  // Variants like Dockerfile.dev, Dockerfile.prod, Dockerfile.web all
+  // count as Docker files — match the prefix once we've ruled out the
+  // exact filename hits above.
+  if (DOCKER_PREFIX_RE.test(name)) {
+    return { glyph: "Dk", color: COLOR.docker };
+  }
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   return TYPES[ext] ?? { glyph: "·", color: COLOR.neutral };
 }

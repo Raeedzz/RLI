@@ -6,6 +6,7 @@ import {
 } from "@/primitives/Icon";
 import { useActiveSession, useAppDispatch, useAppState } from "@/state/AppState";
 import { leaves } from "@/state/paneTree";
+import { useArrowFocus } from "@/hooks/useArrowFocus";
 import type { ReactNode } from "react";
 
 /**
@@ -26,6 +27,7 @@ export function ActivityRail() {
   const graphVisible = session
     ? leaves(session.workspace).some((l) => l.content === "graph")
     : false;
+  const onKeyDown = useArrowFocus("vertical");
 
   return (
     <aside
@@ -43,6 +45,8 @@ export function ActivityRail() {
       }}
       role="toolbar"
       aria-label="Workspace tools"
+      aria-orientation="vertical"
+      onKeyDown={onKeyDown}
     >
       <RailButton
         active={state.leftPanel === "files"}
@@ -80,7 +84,7 @@ export function ActivityRail() {
       <RailButton
         active={graphVisible}
         label="Memory graph"
-        chord=""
+        chord="⌘⌥M"
         onClick={() => dispatch({ type: "toggle-graph" })}
       >
         <GraphIcon />

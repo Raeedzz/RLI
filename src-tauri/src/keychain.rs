@@ -44,6 +44,10 @@ fn session_cache() -> &'static RwLock<HashMap<(String, String), String>> {
     CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+// All three helpers are dead today — the Gemini key has migrated to a
+// plain file. They stay because `save_with_biometry` / `load` / `delete`
+// keep the Touch-ID-backed plumbing for future secrets.
+#[allow(dead_code)]
 fn cache_get(service: &str, account: &str) -> Option<String> {
     session_cache()
         .read()
@@ -58,6 +62,7 @@ fn cache_put(service: &str, account: &str, value: String) {
     }
 }
 
+#[allow(dead_code)]
 fn cache_drop(service: &str, account: &str) {
     if let Ok(mut guard) = session_cache().write() {
         guard.remove(&(service.to_string(), account.to_string()));
@@ -156,6 +161,9 @@ pub fn save_with_biometry(
 /// session cache so we never re-prompt for the same entry. The first
 /// call after launch goes through Touch ID; everything after is a
 /// memory read. Quitting the app drops the cache.
+///
+/// Currently unused: see `save_with_biometry` for context.
+#[allow(dead_code)]
 pub fn load(service: &str, account: &str) -> Result<Option<String>, String> {
     // Fast path: same process already authenticated for this entry.
     // Skips the keychain ACL prompt AND the biometry prompt entirely.
@@ -189,6 +197,9 @@ pub fn load(service: &str, account: &str) -> Result<Option<String>, String> {
 /// Delete the entry under `(service, account)`. Idempotent — a missing
 /// entry is treated as success. Prompts Touch ID first. Drops the
 /// session cache for this entry so a subsequent `load` re-prompts.
+///
+/// Currently unused: see `save_with_biometry` for context.
+#[allow(dead_code)]
 pub fn delete(service: &str, account: &str) -> Result<(), String> {
     prompt_biometry("remove your Gemini API key")?;
     cache_drop(service, account);

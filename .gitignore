@@ -14,6 +14,9 @@ dist-ssr
 # Tauri
 src-tauri/target
 src-tauri/gen
+# Bundled sidecar binaries (downloaded by scripts/download-rg.sh on
+# first build) — kept out of git so the repo stays small.
+src-tauri/binaries
 
 # Editor / OS
 .DS_Store

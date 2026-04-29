@@ -1,6 +1,10 @@
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { BlockTerminal } from "@/terminal/BlockTerminal";
 import { Editor } from "@/editor/Editor";
+import { BinaryView } from "@/editor/BinaryView";
+import { MarkdownView } from "@/editor/MarkdownView";
+import { MarkdownToggle } from "@/editor/MarkdownToggle";
+import { fileKind } from "@/lib/fileKind";
 import { BrowserPane } from "@/browser/BrowserPane";
 import { GraphView } from "@/graph/GraphView";
 import { useActiveProject, useActiveSession, useAppDispatch } from "@/state/AppState";
@@ -36,6 +40,14 @@ function PaneNodeRenderer({ node, totalLeaves }: Props) {
   const openFile = session?.openFile ?? null;
 
   if (node.kind === "leaf") {
+    // Render the Rich/Source toggle inline in the pane header — but
+    // ONLY when this pane is the editor AND it's looking at a .md
+    // file. For everything else (terminal, browser, .ts/.py/.rs in
+    // the editor) the slot is left empty.
+    const headerActions =
+      node.content === "editor" && openFile && isMarkdown(openFile.path) ? (
+        <MarkdownToggle />
+      ) : undefined;
     return (
       <PaneFrame
         paneId={node.id}
@@ -45,6 +57,7 @@ function PaneNodeRenderer({ node, totalLeaves }: Props) {
           sessionSubtitle: session?.subtitle,
           openFilePath: openFile?.path ?? null,
         })}
+        headerActions={headerActions}
       >
         <PaneBody paneId={node.id} content={node.content} />
       </PaneFrame>
@@ -58,7 +71,10 @@ function PaneNodeRenderer({ node, totalLeaves }: Props) {
       <Panel defaultSize={50} minSize={15}>
         <PaneNodeRenderer node={node.children[0]} totalLeaves={totalLeaves} />
       </Panel>
-      <PanelResizeHandle />
+      <PanelResizeHandle
+        tabIndex={-1}
+        hitAreaMargins={{ coarse: 6, fine: 4 }}
+      />
       <Panel defaultSize={50} minSize={15}>
         <PaneNodeRenderer node={node.children[1]} totalLeaves={totalLeaves} />
       </Panel>
@@ -151,6 +167,39 @@ function EditorBody() {
   if (!openFile || !session) {
     return <Empty label="click a file in the tree to open it" />;
   }
+  // Images and other binaries render in a dedicated viewer instead of
+  // CodeMirror — opening a 4 MB PNG as text was the original "garbage
+  // bytes corrupted the icon" bug. The text content is empty for these
+  // kinds (the open-file flow never read the file as a string), so the
+  // viewer reads from disk via the asset:// protocol.
+  if (fileKind(openFile.path) !== "text") {
+    return (
+      <BinaryView
+        key={`${session.id}-${openFile.path}`}
+        path={openFile.path}
+      />
+    );
+  }
+  // Markdown gets a rich-preview view that defaults to rendered HTML
+  // and exposes a Preview / Source toggle in the header. The Source
+  // tab drops back to the same CodeMirror editor every other text
+  // file uses.
+  if (isMarkdown(openFile.path)) {
+    return (
+      <MarkdownView
+        key={`${session.id}-${openFile.path}`}
+        path={openFile.path}
+        content={openFile.content}
+        onChange={(content) =>
+          dispatch({
+            type: "open-file",
+            sessionId: session.id,
+            file: { path: openFile.path, content },
+          })
+        }
+      />
+    );
+  }
   return (
     <Editor
       key={`${session.id}-${openFile.path}`}
@@ -165,6 +214,11 @@ function EditorBody() {
       }
     />
   );
+}
+
+function isMarkdown(path: string): boolean {
+  const ext = path.split(".").pop()?.toLowerCase();
+  return ext === "md" || ext === "markdown" || ext === "mdx";
 }
 
 function BrowserBody() {

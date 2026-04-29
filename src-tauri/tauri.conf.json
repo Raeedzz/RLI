@@ -30,7 +30,11 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob: asset: http://asset.localhost http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* https://generativelanguage.googleapis.com"
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob: asset: http://asset.localhost http://127.0.0.1:*; media-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* https://generativelanguage.googleapis.com",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
     },
     "macOSPrivateApi": true
   },
@@ -38,6 +42,7 @@
     "active": true,
     "targets": ["dmg", "app"],
     "icon": ["icons/icon.icns", "icons/icon.png"],
+    "externalBin": ["binaries/rg"],
     "macOS": {
       "minimumSystemVersion": "12.0",
       "frameworks": [],

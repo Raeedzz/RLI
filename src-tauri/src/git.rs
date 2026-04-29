@@ -218,6 +218,59 @@ pub async fn git_unstage(cwd: String, paths: Vec<String>) -> Result<(), String> 
     run(&cwd, &args).await.map(|_| ())
 }
 
+/// Discard local changes for the given paths — both staged AND worktree
+/// modifications go back to HEAD. Untracked files are deleted from disk.
+///
+/// Tracked path → `git restore --source=HEAD --staged --worktree -- <path>`
+/// Untracked file → `std::fs::remove_file`
+/// Untracked directory → `std::fs::remove_dir_all`
+///
+/// This is destructive — there is no undo from git's perspective for
+/// untracked files. The frontend gates it behind a confirm.
+#[tauri::command]
+pub async fn git_discard(cwd: String, paths: Vec<String>) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let status = git_status(cwd.clone()).await?;
+    let mut tracked: Vec<String> = Vec::new();
+    let mut untracked: Vec<String> = Vec::new();
+    for p in &paths {
+        let is_untracked = status
+            .entries
+            .iter()
+            .any(|e| &e.path == p && e.kind == "untracked");
+        if is_untracked {
+            untracked.push(p.clone());
+        } else {
+            tracked.push(p.clone());
+        }
+    }
+    if !tracked.is_empty() {
+        let mut args: Vec<&str> = vec![
+            "restore",
+            "--source=HEAD",
+            "--staged",
+            "--worktree",
+            "--",
+        ];
+        for p in &tracked {
+            args.push(p);
+        }
+        run(&cwd, &args).await?;
+    }
+    for p in &untracked {
+        let full = Path::new(&cwd).join(p);
+        let result = if full.is_dir() {
+            std::fs::remove_dir_all(&full)
+        } else {
+            std::fs::remove_file(&full)
+        };
+        result.map_err(|e| format!("delete {p}: {e}"))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn git_commit(cwd: String, message: String) -> Result<String, String> {
     if message.trim().is_empty() {

@@ -2,10 +2,11 @@ import { WindowChrome } from "./WindowChrome";
 import { SplitLayout } from "./SplitLayout";
 import { StatusBar } from "./StatusBar";
 import { ActivityRail } from "./ActivityRail";
-import { CommandPalette } from "@/palette/CommandPalette";
 import { SearchOverlay } from "@/palette/SearchOverlay";
 import { ApiKeyDialog } from "@/onboarding/ApiKeyDialog";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { useSpatialNavigation } from "@/hooks/useSpatialNavigation";
+import { useOpenUrlInBrowser } from "@/hooks/useOpenUrlInBrowser";
 
 /**
  * Top-level frame:
@@ -30,6 +31,8 @@ import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
  */
 export function AppShell() {
   useKeyboardShortcuts();
+  useSpatialNavigation();
+  useOpenUrlInBrowser();
 
   return (
     <div
@@ -61,7 +64,6 @@ export function AppShell() {
 
       <StatusBar />
 
-      <CommandPalette />
       <SearchOverlay />
       <ApiKeyDialog />
     </div>

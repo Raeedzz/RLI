@@ -58,10 +58,16 @@ interface Props {
    * "what's happening" summary); for editors, the open file's basename.
    */
   subtitle?: string;
+  /**
+   * Inline header actions — renders to the LEFT of the split / close
+   * buttons. Used by the editor pane to slot the .md Rich/Source toggle
+   * directly into the pane's tab line, only when relevant. Stays
+   * undefined for terminals / browsers / etc.
+   */
+  headerActions?: ReactNode;
   children: ReactNode;
 }
 
-const HEADER_HEIGHT = 28;
 const DRAG_MIME = "application/x-rli-pane";
 
 const CONTENT_LABEL: Record<PaneContent, string> = {
@@ -82,6 +88,7 @@ export function PaneFrame({
   content,
   isOnly,
   subtitle,
+  headerActions,
   children,
 }: Props) {
   const dispatch = useAppDispatch();
@@ -232,12 +239,11 @@ export function PaneFrame({
         flexDirection: "column",
         backgroundColor: "var(--surface-0)",
         overflow: "hidden",
-        // Each pane reads as its own card. The workspace wrapper paints
-        // surface-1 in the gaps so panes "float". Outline-only highlight
-        // on drag-over so it never displaces layout.
-        borderRadius: "var(--radius-md)",
-        outline: dropZone ? "2px solid var(--accent-bright)" : "none",
-        outlineOffset: -2,
+        // Edge-to-edge rectangular panes — no border radius, no inset
+        // outline. The 1px resize handles are the only visible
+        // separation between panes. Cleaner, more like VS Code.
+        outline: dropZone ? "1px solid var(--accent-bright)" : "none",
+        outlineOffset: -1,
         transition:
           "outline-color var(--motion-instant) var(--ease-out-quart)",
       }}
@@ -247,7 +253,7 @@ export function PaneFrame({
         onDragStart={onDragStart}
         onDragEnd={onDragEnd}
         style={{
-          height: HEADER_HEIGHT,
+          height: "var(--pane-header-height)",
           flexShrink: 0,
           display: "flex",
           alignItems: "center",
@@ -255,8 +261,6 @@ export function PaneFrame({
           paddingRight: "var(--space-1)",
           backgroundColor: "var(--surface-1)",
           borderBottom: "var(--border-1)",
-          borderTopLeftRadius: "var(--radius-md)",
-          borderTopRightRadius: "var(--radius-md)",
           cursor: "grab",
           gap: "var(--space-2)",
           minWidth: 0,
@@ -269,9 +273,17 @@ export function PaneFrame({
           style={{
             display: "inline-flex",
             alignItems: "center",
-            gap: "var(--space-1-5)",
+            // Match the session tab's gap above (`var(--space-2)`)
+            // so the dot → label spacing reads identical between the
+            // tab and the pane header below it.
+            gap: "var(--space-2)",
             height: 22,
-            padding: "0 var(--space-2)",
+            // No left padding: the dot sits directly at the button's
+            // left edge, which is the pane header's content edge
+            // (padding-left: var(--space-3)). That makes the dot's x
+            // match the session tab's dot above (tab padding-left =
+            // var(--space-3) too) for a clean vertical column.
+            padding: "0 var(--space-2) 0 0",
             borderRadius: "var(--radius-sm)",
             backgroundColor: "transparent",
             color: "var(--text-secondary)",
@@ -346,6 +358,8 @@ export function PaneFrame({
         {(!subtitle || subtitle.trim() === "") && (
           <span style={{ flex: 1 }} />
         )}
+
+        {headerActions}
 
         <button
           type="button"

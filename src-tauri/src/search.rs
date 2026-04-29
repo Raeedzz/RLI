@@ -9,9 +9,10 @@
 //! error so the frontend can surface a helpful "brew install ripgrep"
 //! hint instead of a stack trace.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 use tokio::process::Command;
 
 #[derive(Debug, Serialize)]
@@ -29,12 +30,54 @@ fn ensure_cwd(cwd: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Find the bundled ripgrep sidecar binary. In a packaged macOS app it
+/// lives at Contents/MacOS/rg-<target-triple>; in dev it's under
+/// `target/<profile>/rg-<target-triple>`. We let Tauri's path resolver
+/// hand us the directory containing the main executable, then look for
+/// the binary there. Returns None when the binary isn't present so the
+/// caller can fall back to the system PATH copy of `rg`.
+fn resolve_rg_binary(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let exe_dir = app.path().resolve("", tauri::path::BaseDirectory::Resource).ok()
+        .or_else(|| std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf())))?;
+    let target_triple = current_target_triple();
+    let candidate = exe_dir.join(format!("rg-{target_triple}"));
+    if candidate.is_file() {
+        return Some(candidate);
+    }
+    // Dev mode fallback: the binary lives in src-tauri/binaries before
+    // it's been bundled into the resource dir.
+    let dev = std::env::current_exe().ok()?;
+    let dev_root = dev.ancestors().nth(3)?; // target/<profile>/<exe> → project root
+    let dev_candidate = dev_root.join("binaries").join(format!("rg-{target_triple}"));
+    if dev_candidate.is_file() {
+        return Some(dev_candidate);
+    }
+    None
+}
+
+fn current_target_triple() -> &'static str {
+    // Built into the binary at compile time. Match Cargo's target triples
+    // for the platforms RLI ships on.
+    if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_arch = "x86_64", target_os = "macos")) {
+        "x86_64-apple-darwin"
+    } else if cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+        "x86_64-unknown-linux-gnu"
+    } else if cfg!(all(target_arch = "aarch64", target_os = "linux")) {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        "unknown"
+    }
+}
+
 /* ------------------------------------------------------------------
    ripgrep
    ------------------------------------------------------------------ */
 
 #[tauri::command]
 pub async fn search_rg(
+    app: tauri::AppHandle,
     cwd: String,
     query: String,
     regex: bool,
@@ -44,7 +87,13 @@ pub async fn search_rg(
         return Ok(Vec::new());
     }
 
-    let mut cmd = Command::new("rg");
+    // Resolve the bundled sidecar binary first (placed next to the
+    // app executable in prod, under target/<profile>/ in dev). Fall
+    // back to whatever `rg` is on PATH if the sidecar can't be found —
+    // useful in dev before `scripts/download-rg.sh` has been run.
+    let program: PathBuf = resolve_rg_binary(&app).unwrap_or_else(|| PathBuf::from("rg"));
+
+    let mut cmd = Command::new(&program);
     cmd.arg("--json")
         .arg("--max-count=200")
         .arg("--smart-case");
@@ -56,7 +105,7 @@ pub async fn search_rg(
     let out = cmd
         .output()
         .await
-        .map_err(|e| format!("spawn rg (is ripgrep installed? `brew install ripgrep`): {e}"))?;
+        .map_err(|e| format!("spawn rg ({}): {e}", program.display()))?;
 
     // rg exits 1 on no matches, 0 on matches. Either way stdout has results.
     if !out.status.success() && out.status.code() != Some(1) {

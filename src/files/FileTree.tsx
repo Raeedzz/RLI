@@ -29,6 +29,10 @@ interface Node {
 
 const INDENT = 12;
 const ROW_HEIGHT = 22;
+// Matches the panel header's `padding: 0 var(--space-2)`. Both the
+// "FILES" caption and the row content sit on the same vertical axis
+// at 8px from the panel's left edge.
+const ROW_PADDING_LEFT_BASE = 8;
 
 /**
  * Lazy file tree. Reads entries via the Rust `fs_read_dir` command,
@@ -241,7 +245,7 @@ function Row({
         height: ROW_HEIGHT,
         display: "flex",
         alignItems: "center",
-        paddingLeft: depth * INDENT + 8,
+        paddingLeft: depth * INDENT + ROW_PADDING_LEFT_BASE,
         paddingRight: 8,
         gap: 6,
         fontFamily: "var(--font-sans)",

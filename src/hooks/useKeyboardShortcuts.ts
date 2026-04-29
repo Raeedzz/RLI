@@ -118,10 +118,12 @@ export function useKeyboardShortcuts() {
         }
       }
 
-      // Always-handled chords
-      if (cmd && !shift && e.key.toLowerCase() === "k") {
+      // ⌘K and ⌘F (without shift) both open the unified top search.
+      // ⌘⇧F kept below for muscle memory. The old centered command
+      // palette is gone — the same input handles commands + ripgrep.
+      if (cmd && !shift && (e.key.toLowerCase() === "k" || e.key.toLowerCase() === "f")) {
         e.preventDefault();
-        dispatch({ type: "toggle-palette" });
+        dispatch({ type: "set-search", open: true });
         return;
       }
 
@@ -153,9 +155,10 @@ export function useKeyboardShortcuts() {
         }
       }
 
-      // ⌘⌥F / ⌘⌥G / ⌘⌥S — toggle the left-side panels. Read e.code
-      // (KeyF/KeyG/KeyS) so the Option-induced char remap on macOS
-      // (⌥f → ƒ, ⌥g → ©, ⌥s → ß) doesn't drop the press.
+      // ⌘⌥F / ⌘⌥G / ⌘⌥S / ⌘⌥M — toggle the left-side panels and the
+      // memory-graph workspace pane. Read e.code (KeyF/KeyG/KeyS/KeyM)
+      // so the Option-induced char remap on macOS (⌥f → ƒ, ⌥g → ©,
+      // ⌥s → ß, ⌥m → µ) doesn't drop the press.
       if (cmd && e.altKey && !shift) {
         const code = e.code;
         if (code === "KeyF") {
@@ -171,6 +174,11 @@ export function useKeyboardShortcuts() {
         if (code === "KeyS") {
           e.preventDefault();
           dispatch({ type: "toggle-left-panel", panel: "connections" });
+          return;
+        }
+        if (code === "KeyM") {
+          e.preventDefault();
+          dispatch({ type: "toggle-graph" });
           return;
         }
       }

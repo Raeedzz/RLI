@@ -19,6 +19,22 @@ describe("fileTypeFor", () => {
     expect(fileTypeFor("README.md").glyph).toBe("Rd");
   });
 
+  test("recognizes the docker file family with the docker accent", () => {
+    const docker = fileTypeFor("Dockerfile");
+    expect(docker.glyph).toBe("Dk");
+    expect(docker.color).toBe("var(--accent-bright)");
+    // .dockerignore is exact-name matched
+    expect(fileTypeFor(".dockerignore").glyph).toBe("Dk");
+    // Variants like Dockerfile.dev / Dockerfile.prod fall through the
+    // prefix branch
+    expect(fileTypeFor("Dockerfile.dev").glyph).toBe("Dk");
+    expect(fileTypeFor("Dockerfile.prod").color).toBe("var(--accent-bright)");
+    // docker-compose.yml is whole-name-matched, so it doesn't get
+    // tagged as a generic .yml file
+    expect(fileTypeFor("docker-compose.yml").glyph).toBe("Dk");
+    expect(fileTypeFor("compose.yaml").color).toBe("var(--accent-bright)");
+  });
+
   test("falls back to a neutral dot for unknown extensions", () => {
     expect(fileTypeFor("strange.xyz123").glyph).toBe("·");
     expect(fileTypeFor("noext").glyph).toBe("·");
