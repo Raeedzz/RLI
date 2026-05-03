@@ -33,6 +33,54 @@ export default defineConfig({
     target: "esnext",
     minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_DEBUG,
+    // Split the biggest sub-systems into their own chunks so the
+    // initial paint doesn't drag every editor / animation framework
+    // into the parser. Each `manualChunks` group becomes its own
+    // file the webview can fetch in parallel.
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          codemirror: [
+            "@codemirror/state",
+            "@codemirror/view",
+            "@codemirror/commands",
+            "@codemirror/language",
+            "@codemirror/search",
+            "@codemirror/lang-javascript",
+            "@codemirror/lang-rust",
+            "@codemirror/lang-json",
+            "@codemirror/lang-markdown",
+            "@codemirror/lang-html",
+            "@codemirror/lang-css",
+            "@codemirror/lang-python",
+            "@codemirror/lang-yaml",
+            "@lezer/highlight",
+          ],
+          // `@tiptap/pm` is a meta-package without a root entry — it
+          // only ships sub-paths like `@tiptap/pm/state`. Listing it
+          // here would break the build, so we let Vite group those
+          // sub-paths automatically into the same chunk.
+          tiptap: [
+            "@tiptap/react",
+            "@tiptap/starter-kit",
+            "tiptap-markdown",
+            "marked",
+          ],
+          motion: ["motion"],
+          tauri: [
+            "@tauri-apps/api",
+            "@tauri-apps/plugin-dialog",
+            "@tauri-apps/plugin-fs",
+            "@tauri-apps/plugin-os",
+            "@tauri-apps/plugin-process",
+            "@tauri-apps/plugin-shell",
+          ],
+        },
+      },
+    },
+    // Bumped from Vite's 500 KiB default — CodeMirror + TipTap make
+    // legitimately large chunks that we don't want screaming in CI.
+    chunkSizeWarningLimit: 1500,
   },
 
   envPrefix: ["VITE_", "TAURI_"],

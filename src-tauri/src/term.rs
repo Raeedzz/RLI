@@ -69,6 +69,11 @@ struct Session {
     /// Ctrl+C kill (zsh's empty PROMPT doesn't repaint anything).
     last_command_running: bool,
     segmenter: BlockSegmenter,
+    /// Monotonic frame counter. Increments on every emit (regardless
+    /// of whether the frame had dirty rows). Frontend uses this to
+    /// dedupe rAF flushes (skip if seq unchanged) and detect dropped
+    /// frames for backpressure.
+    next_frame_seq: u64,
 }
 
 /* ------------------------------------------------------------------
@@ -160,6 +165,16 @@ pub struct RowSnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RenderFrame {
+    /// Monotonic frame sequence id. Frontend uses it to dedupe rAF
+    /// flushes (skip if unchanged) and detect dropped frames in
+    /// burst windows.
+    pub seq: u64,
+    /// Stable id of the block this frame belongs to (the in-progress
+    /// block, between OSC 133 A and the next D). 0 means no block is
+    /// active — happens before the first prompt and briefly between
+    /// blocks. Renderers can identify which block a frame's content
+    /// belongs to without reading the transcript.
+    pub block_id: u64,
     pub cols: u16,
     pub rows: u16,
     pub cursor_row: i32,
@@ -177,6 +192,14 @@ pub struct RenderFrame {
     /// keyToBytes branches on this. Without it, arrows in claude
     /// are silently dropped.
     pub app_cursor: bool,
+    /// DECSET 2004 (bracketed paste). True iff the running program has
+    /// issued `ESC[?2004h`. Claude, codex, and most readline-based
+    /// TUIs flip this so they can distinguish a paste from typed
+    /// input. When set, the frontend must wrap pasted bytes in
+    /// `ESC[200~ ... ESC[201~` so the agent renders the whole paste
+    /// atomically — without it, multi-line pastes trickle in line by
+    /// line and the bottom of a big prompt appears to "load slowly."
+    pub bracketed_paste: bool,
     /// Sparse: only rows that changed since the last frame. Frontend
     /// keeps the rest from its previous snapshot.
     pub dirty: Vec<DirtyRow>,
@@ -206,6 +229,11 @@ enum SegState {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClosedBlock {
+    /// Stable monotonic id minted at OSC 133 A. Renderers use this to
+    /// identify a block across reflow / resize / scroll without having
+    /// to compare transcript bytes. 0 means "id was never minted"
+    /// (shouldn't happen in practice for closed blocks).
+    pub block_id: u64,
     /// User's typed command. Populated by the frontend's pending-input
     /// queue (`useTerminalSession`) — Rust always emits this empty
     /// because we deliberately skip OSC 133 B.
@@ -255,6 +283,14 @@ struct BlockSegmenter {
     /// Wall-clock instant of the last OSC 133 C — used to compute
     /// `duration_ms` when the matching D arrives.
     current_block_start: Option<Instant>,
+    /// Monotonic counter for block ids. Incremented at every OSC 133 A
+    /// that mints a new block; the previous block's id is captured in
+    /// `current_block_id` until the block closes.
+    next_block_id: u64,
+    /// Id of the block currently being constructed. 0 when no block
+    /// is in progress (i.e. before the first prompt or between D and
+    /// the next A).
+    current_block_id: u64,
 }
 
 impl BlockSegmenter {
@@ -270,7 +306,13 @@ impl BlockSegmenter {
             current_cwd: None,
             current_block_cwd: None,
             current_block_start: None,
+            next_block_id: 1,
+            current_block_id: 0,
         }
+    }
+
+    fn current_block_id(&self) -> u64 {
+        self.current_block_id
     }
 
     fn command_running(&self) -> bool {
@@ -383,6 +425,11 @@ impl BlockSegmenter {
                 }
                 self.state = SegState::InPromptDrawing;
                 self.current_transcript.clear();
+                // Mint a stable id for the new block. Renderers can
+                // identify blocks across reflow/resize/scroll without
+                // having to compare transcript bytes.
+                self.current_block_id = self.next_block_id;
+                self.next_block_id = self.next_block_id.saturating_add(1);
             }
             Some(b'B') => {
                 self.state = SegState::AwaitingCommand;
@@ -413,7 +460,10 @@ impl BlockSegmenter {
             .take()
             .map(|start| start.elapsed().as_millis() as u64);
         let cwd = self.current_block_cwd.take();
+        let block_id = self.current_block_id;
+        self.current_block_id = 0;
         blocks.push(ClosedBlock {
+            block_id,
             input: std::mem::take(&mut self.current_input),
             transcript,
             exit_code,
@@ -771,7 +821,7 @@ pub fn term_start(
         let sessions = state.sessions.lock().map_err(|e| e.to_string())?;
         if let Some(existing) = sessions.get(&args.id).cloned() {
             drop(sessions);
-            if let Ok(s) = existing.lock() {
+            if let Ok(mut s) = existing.lock() {
                 let snapshot = snapshot_grid(&s.term);
                 let cursor = s.term.grid().cursor.point;
                 let dirty: Vec<DirtyRow> = snapshot
@@ -782,7 +832,11 @@ pub fn term_start(
                         spans: snap.spans.clone(),
                     })
                     .collect();
+                let seq = s.next_frame_seq;
+                s.next_frame_seq = s.next_frame_seq.saturating_add(1);
                 let frame = RenderFrame {
+                    seq,
+                    block_id: s.segmenter.current_block_id(),
                     cols: s.cols,
                     rows: s.rows,
                     cursor_row: cursor.line.0,
@@ -790,6 +844,7 @@ pub fn term_start(
                     alt_screen: s.term.mode().contains(TermMode::ALT_SCREEN),
                     command_running: s.last_command_running,
                     app_cursor: s.term.mode().contains(TermMode::APP_CURSOR),
+                    bracketed_paste: s.term.mode().contains(TermMode::BRACKETED_PASTE),
                     dirty,
                 };
                 let _ = app.emit(&format!("term://{}/frame", args.id), &frame);
@@ -893,6 +948,7 @@ pub fn term_start(
         last_flush: Instant::now() - FRAME_THROTTLE,
         last_command_running: false,
         segmenter: BlockSegmenter::new(),
+        next_frame_seq: 0,
     }));
 
     {
@@ -905,7 +961,13 @@ pub fn term_start(
     let app_for_reader = app.clone();
     let session_for_reader = session.clone();
     thread::spawn(move || {
-        let mut buf = [0u8; 8192];
+        // 64 KB read buffer — sized for big agent replies and large
+        // pastes. Each read holds the session mutex to feed the
+        // segmenter + parser, so larger reads = fewer mutex
+        // acquisitions during a burst. Sized to one PTY-typical page
+        // chunk; the kernel won't usually fill it, and that's fine —
+        // we reuse the stack buffer every iteration.
+        let mut buf = [0u8; 65536];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
@@ -1072,7 +1134,11 @@ fn maybe_flush(s: &mut Session, app: &AppHandle<Wry>, id: &str) {
         return;
     }
     let cursor = s.term.grid().cursor.point;
+    let seq = s.next_frame_seq;
+    s.next_frame_seq = s.next_frame_seq.saturating_add(1);
     let frame = RenderFrame {
+        seq,
+        block_id: s.segmenter.current_block_id(),
         cols: s.cols,
         rows: s.rows,
         cursor_row: cursor.line.0,
@@ -1080,6 +1146,7 @@ fn maybe_flush(s: &mut Session, app: &AppHandle<Wry>, id: &str) {
         alt_screen: s.term.mode().contains(TermMode::ALT_SCREEN),
         command_running: cmd_running,
         app_cursor: s.term.mode().contains(TermMode::APP_CURSOR),
+        bracketed_paste: s.term.mode().contains(TermMode::BRACKETED_PASTE),
         dirty,
     };
     let _ = app.emit(&format!("term://{id}/frame"), &frame);

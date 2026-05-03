@@ -108,6 +108,14 @@ export function useTerminalSession(opts: Args): SessionApi {
   // B and C unreliable), so the frontend stamps block.input from
   // this queue when each block closes.
   const pendingInputsRef = useRef<string[]>([]);
+  // rAF coalescing for frame events. Rust emits frames at ~60 Hz
+  // baseline but burst output (agent streaming, big paste, `cat
+  // large.log`) can arrive in tighter clusters across separate
+  // event-loop ticks. Without coalescing, every event triggers a
+  // setState and a React commit. With it, all events landed before
+  // the next paint collapse to a single commit.
+  const rafIdRef = useRef<number | null>(null);
+  const pendingFrameRef = useRef<RenderFrame | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -118,32 +126,49 @@ export function useTerminalSession(opts: Args): SessionApi {
     // was showing. Hydration already happened in useState init.
     pendingInputsRef.current = [];
 
+    const flushFrame = () => {
+      rafIdRef.current = null;
+      if (cancelled) return;
+      const frame = pendingFrameRef.current;
+      if (!frame) return;
+      pendingFrameRef.current = null;
+      const rows = rowsRef.current;
+      // FullGrid still expects `dirty` to contain every row it should
+      // paint (legacy semantic — a true sparse path lands with the
+      // canvas renderer). Build it once per rAF, not once per event.
+      const allDirty: DirtyRow[] = new Array(rows.length);
+      for (let i = 0; i < rows.length; i++) {
+        allDirty[i] = { row: i, spans: rows[i] };
+      }
+      const merged: RenderFrame = { ...frame, dirty: allDirty };
+      lastFrameRef.current = merged;
+      setAltScreen(frame.alt_screen);
+      memSetAltScreen(opts.id, frame.alt_screen);
+      setLiveFrame(merged);
+      memSetLiveFrame(opts.id, merged);
+      memSetRows(opts.id, rows);
+    };
+
     const onFrame = (frame: RenderFrame) => {
       if (cancelled) return;
-      // Splice dirty rows into the row map.
+      // Apply the dirty rows to the canonical row map immediately —
+      // this is cheap (in-place writes) and keeps rowsRef coherent
+      // for any synchronous reader. The expensive part — the React
+      // commit — is what we defer.
       const rows = rowsRef.current;
       while (rows.length < frame.rows) rows.push([]);
       while (rows.length > frame.rows) rows.pop();
       for (const dr of frame.dirty as DirtyRow[]) {
         rows[dr.row] = dr.spans;
       }
-      lastFrameRef.current = frame;
-      setAltScreen(frame.alt_screen);
-      memSetAltScreen(opts.id, frame.alt_screen);
-      // Pushing the full row snapshot every frame for now; dirty-only
-      // optimization can land in a follow-up if React reconciliation
-      // shows up in profiles.
-      const allDirty: DirtyRow[] = rows.map((spans, i) => ({ row: i, spans }));
-      const merged: RenderFrame = {
-        ...frame,
-        dirty: allDirty,
-      };
-      setLiveFrame(merged);
-      // Persist for cross-mount survival. Rows ref is stored by
-      // reference (we mutate it in place), so memory observes the
-      // updates without an explicit copy.
-      memSetLiveFrame(opts.id, merged);
-      memSetRows(opts.id, rows);
+      // Latest frame wins. If multiple events arrive before the next
+      // paint, the rAF flush sees only the most recent metadata
+      // (cursor, alt-screen, command_running) — exactly what the
+      // user would see anyway.
+      pendingFrameRef.current = frame;
+      if (rafIdRef.current === null) {
+        rafIdRef.current = requestAnimationFrame(flushFrame);
+      }
     };
 
     const onBlock = (b: ClosedBlock) => {
@@ -156,6 +181,7 @@ export function useTerminalSession(opts: Args): SessionApi {
           ...prev,
           {
             id: `b_${Date.now().toString(36)}_${prev.length}`,
+            block_id: b.block_id,
             input: stamped,
             transcript: b.transcript,
             exit_code: b.exit_code,
@@ -229,10 +255,11 @@ export function useTerminalSession(opts: Args): SessionApi {
         // Surface as a synthetic block so the user sees the error.
         if (!cancelled) {
           setBlocks((prev) => {
-            const next = [
+            const next: Block[] = [
               ...prev,
               {
                 id: `err_${Date.now().toString(36)}`,
+                block_id: 0,
                 input: "",
                 transcript: `error starting terminal: ${String(err)}`,
                 exit_code: 1,
@@ -249,6 +276,11 @@ export function useTerminalSession(opts: Args): SessionApi {
 
     return () => {
       cancelled = true;
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+      pendingFrameRef.current = null;
       for (const fn of unlisten) fn();
       // We deliberately do NOT call term_close here — the PTY needs to
       // survive a session/project switch so the user comes back to

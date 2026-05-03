@@ -3,8 +3,10 @@ import {
   useEffect,
   useImperativeHandle,
   useRef,
+  type ClipboardEvent,
   type KeyboardEvent,
 } from "react";
+import { isGlobalChord, keyToBytes } from "./keyEncoding";
 
 export interface PtyPassthroughHandle {
   focus: () => void;
@@ -21,9 +23,21 @@ interface Props {
    * never sees the user's arrow keys.
    */
   appCursor: boolean;
+  /**
+   * DECSET 2004 (bracketed paste). When the running program has
+   * issued `ESC[?2004h`, paste events are wrapped in
+   * `ESC[200~ ... ESC[201~` so the agent reads the whole paste
+   * atomically. Without this, multi-line pastes trickle in line
+   * by line — the agent processes each newline as a discrete
+   * input event and redraws its prompt area between each, which
+   * looks like the bottom of a big prompt "loading slowly."
+   */
+  bracketedPaste: boolean;
 }
 
 const encoder = new TextEncoder();
+const PASTE_START = encoder.encode("\x1b[200~");
+const PASTE_END = encoder.encode("\x1b[201~");
 
 /**
  * Invisible focus-trap that forwards every keystroke straight to the
@@ -39,8 +53,13 @@ const encoder = new TextEncoder();
  * so the textarea is invisible but focusable.
  */
 export const PtyPassthrough = forwardRef<PtyPassthroughHandle, Props>(
-  function PtyPassthrough({ onSendBytes, appCursor }, ref) {
+  function PtyPassthrough({ onSendBytes, appCursor, bracketedPaste }, ref) {
     const inputRef = useRef<HTMLTextAreaElement>(null);
+    // Set on paste; cleared on the next onChange. Lets the input
+    // handler wrap the value in OSC 200/201 markers without re-reading
+    // clipboard data (which the browser only exposes on the paste
+    // event itself).
+    const pendingPasteRef = useRef<string | null>(null);
 
     useImperativeHandle(ref, () => ({
       focus: () => inputRef.current?.focus(),
@@ -51,14 +70,7 @@ export const PtyPassthrough = forwardRef<PtyPassthroughHandle, Props>(
     }, []);
 
     const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-      // Don't intercept global app chords.
-      if (
-        (e.metaKey || e.ctrlKey) &&
-        ["k", "b", "n", "w", "o"].includes(e.key.toLowerCase()) &&
-        !e.altKey
-      ) {
-        return;
-      }
+      if (isGlobalChord(e)) return;
       const seq = keyToBytes(e, appCursor);
       if (seq) {
         e.preventDefault();
@@ -66,12 +78,41 @@ export const PtyPassthrough = forwardRef<PtyPassthroughHandle, Props>(
       }
     };
 
+    const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+      // Stash the clipboard text so the upcoming onChange knows this
+      // value came from a paste. We can't dispatch the bytes here
+      // directly because IME / browser autocorrect can still mutate
+      // the value before the textarea commits it.
+      const text = e.clipboardData?.getData("text/plain") ?? "";
+      if (text.length === 0) return;
+      pendingPasteRef.current = text;
+    };
+
     const onInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const value = e.target.value;
-      if (value.length > 0) {
+      if (value.length === 0) return;
+      const pasted = pendingPasteRef.current;
+      pendingPasteRef.current = null;
+      // Only wrap when (a) the agent has bracketed-paste enabled, and
+      // (b) this onChange was actually triggered by a paste event
+      // (string identity match rules out ordinary typing that
+      // happens to contain the same characters). Wrapping a plain
+      // keystroke would inject literal "\x1b[200~" into the agent's
+      // input buffer, which is far worse than the perf hit we're
+      // avoiding.
+      if (bracketedPaste && pasted !== null && value === pasted) {
+        const payload = encoder.encode(value);
+        const out = new Uint8Array(
+          PASTE_START.length + payload.length + PASTE_END.length,
+        );
+        out.set(PASTE_START, 0);
+        out.set(payload, PASTE_START.length);
+        out.set(PASTE_END, PASTE_START.length + payload.length);
+        onSendBytes(out);
+      } else {
         onSendBytes(encoder.encode(value));
-        e.target.value = "";
       }
+      e.target.value = "";
     };
 
     return (
@@ -79,6 +120,7 @@ export const PtyPassthrough = forwardRef<PtyPassthroughHandle, Props>(
         ref={inputRef}
         onKeyDown={onKeyDown}
         onChange={onInput}
+        onPaste={onPaste}
         spellCheck={false}
         autoComplete="off"
         autoCorrect="off"
@@ -98,55 +140,3 @@ export const PtyPassthrough = forwardRef<PtyPassthroughHandle, Props>(
   },
 );
 
-/** Map a KeyboardEvent into the byte sequence the PTY expects. The
- *  `appCursor` flag selects between cursor-mode and application-mode
- *  arrow encoding (DECCKM). */
-function keyToBytes(
-  e: KeyboardEvent<HTMLTextAreaElement>,
-  appCursor: boolean,
-): Uint8Array | null {
-  const ctrl = e.ctrlKey;
-  const alt = e.altKey;
-  // Application cursor mode: arrows are SS3-prefixed, not CSI.
-  // Home / End follow the same convention. Without this branch claude
-  // (and vim insert, and any readline-based TUI) silently drops arrows.
-  const csi = (c: string) => encoder.encode(`\x1b[${c}`);
-  const ss3 = (c: string) => encoder.encode(`\x1bO${c}`);
-  const arrow = (c: string) => (appCursor ? ss3(c) : csi(c));
-  switch (e.key) {
-    case "Enter":
-      return encoder.encode("\r");
-    case "Backspace":
-      return new Uint8Array([0x7f]);
-    case "Tab":
-      return encoder.encode("\t");
-    case "Escape":
-      return new Uint8Array([0x1b]);
-    case "ArrowUp":
-      return arrow("A");
-    case "ArrowDown":
-      return arrow("B");
-    case "ArrowRight":
-      return arrow("C");
-    case "ArrowLeft":
-      return arrow("D");
-    case "Home":
-      return arrow("H");
-    case "End":
-      return arrow("F");
-    case "PageUp":
-      return csi("5~");
-    case "PageDown":
-      return csi("6~");
-    case "Delete":
-      return csi("3~");
-  }
-  if (ctrl && !alt && e.key.length === 1) {
-    const c = e.key.toLowerCase().charCodeAt(0);
-    if (c >= 97 && c <= 122) {
-      return new Uint8Array([c - 96]);
-    }
-  }
-  // Printable chars handled in onInput (preserves IME composition).
-  return null;
-}

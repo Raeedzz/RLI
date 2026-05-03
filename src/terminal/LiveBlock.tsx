@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { CanvasGrid, isCanvasRendererEnabled } from "./CanvasGrid";
 import { CellRow } from "./CellRow";
 import { formatCwd, formatDuration } from "./formatBlockMeta";
 import type { DirtyRow, RenderFrame } from "./types";
@@ -15,6 +16,15 @@ interface Props {
   fill?: boolean;
   /** cwd at command start, for the small dim header. */
   cwd?: string;
+  /**
+   * When true, render rows as a fixed-grid TUI surface — no wrap, no
+   * width-driven reflow. Used when the running command is an
+   * interactive agent (claude / codex / aider) whose UI assumes one
+   * visual line per grid row. Independent of `fill` so the block can
+   * sit inline in the conversation scroll without breaking the
+   * agent's layout.
+   */
+  preserveGrid?: boolean;
 }
 
 /**
@@ -62,7 +72,13 @@ function trimEchoAndBlanks(rows: DirtyRow[], command: string): DirtyRow[] {
  * synthetic ❯ + command header makes the user's input look like a
  * "user message" in a chat (Warp-style) instead of a floating echo.
  */
-export function LiveBlock({ command, frame, fill = false, cwd }: Props) {
+export function LiveBlock({
+  command,
+  frame,
+  fill = false,
+  cwd,
+  preserveGrid = false,
+}: Props) {
   const visibleRows = useMemo(() => {
     if (!frame) return [];
     return trimEchoAndBlanks(frame.dirty, command);
@@ -147,7 +163,7 @@ export function LiveBlock({ command, frame, fill = false, cwd }: Props) {
       >
         {command}
       </div>
-      {hasBody && (
+      {hasBody ? (
         <div
           style={{
             color: "var(--text-secondary)",
@@ -156,14 +172,50 @@ export function LiveBlock({ command, frame, fill = false, cwd }: Props) {
             overflow: fill ? "auto" : undefined,
           }}
         >
-          {visibleRows.map((row) => (
-            // Shell-mode in-progress block (`fill=false`) wraps so long
-            // command output reads cleanly in narrow panes. Agent-mode
-            // (`fill=true`) is a fixed-grid TUI surface — wrapping there
-            // would race the ResizeObserver and jitter.
-            <CellRow key={row.row} spans={row.spans} wrap={!fill} />
-          ))}
+          {/* Phase 3 canvas path: when the flag is on AND this block
+              is rendering an agent's TUI (preserveGrid), swap the DOM
+              CellRow stack for a content-sized CanvasGrid. Shell
+              command output stays on the DOM path because canvas
+              doesn't soft-wrap yet — Phase 4. */}
+          {preserveGrid && isCanvasRendererEnabled() && frame ? (
+            <CanvasGrid frame={frame} rows={visibleRows} mode="auto" />
+          ) : (
+            visibleRows.map((row) => (
+              // Shell command output wraps so it reads cleanly in narrow
+              // panes. Agent TUIs (`preserveGrid=true`) keep one visual
+              // line per grid row — wrapping their UI would scramble
+              // claude's box-drawing and shift columns mid-frame.
+              <CellRow
+                key={row.row}
+                spans={row.spans}
+                wrap={!preserveGrid && !fill}
+              />
+            ))
+          )}
         </div>
+      ) : (
+        // Empty-body state. In agent mode (fill=true) this is the gap
+        // between OSC 133 C clearing the grid and the agent painting
+        // its first frame — without a placeholder the pane flashes
+        // pure surface-0 (looks black) for ~50–200 ms while claude
+        // initializes its TUI. A subtle "starting…" matches the
+        // header's monospace and makes the gap feel intentional.
+        fill && (
+          <div
+            style={{
+              flex: "1 1 0",
+              minHeight: 0,
+              display: "grid",
+              placeItems: "center",
+              color: "var(--text-tertiary)",
+              fontSize: "var(--text-xs)",
+              fontFamily: "var(--font-mono)",
+              userSelect: "none",
+            }}
+          >
+            starting {command}…
+          </div>
+        )
       )}
     </div>
   );

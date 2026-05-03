@@ -36,6 +36,18 @@ interface Props {
  * cursor row inside that set actually changed contents).
  */
 export const CellRow = memo(function CellRow({ spans, wrap = false }: Props) {
+  // In grid mode (wrap=false, used by preserveGrid agent inline and
+  // alt-screen TUIs), every row must take exactly one cell of vertical
+  // space — even blank ones — so the agent's grid layout survives DOM
+  // rendering. We can't enforce that with `min-height: 1.35em` because
+  // the line-box height the browser computes for actual text content
+  // tends to round 1px lower than `em`-derived min-height, leaving a
+  // 1px gap below text rows that reads as a horizontal hairline
+  // between every line. Instead, when the row has no visible content,
+  // render a non-breaking space so the line-box gives us its natural
+  // height — that's pixel-identical to neighboring text rows.
+  const isBlank =
+    !wrap && spans.every((s) => s.text.length === 0 || s.text.trim() === "");
   return (
     <div
       style={{
@@ -45,7 +57,8 @@ export const CellRow = memo(function CellRow({ spans, wrap = false }: Props) {
         lineHeight: "var(--cell-line-height, 1.35)",
       }}
     >
-      {spans.map((span, i) => {
+      {isBlank && <span>{" "}</span>}
+      {!isBlank && spans.map((span, i) => {
         const baseStyle: CSSProperties = {
           color: span.inverse ? span.bg : span.fg,
           backgroundColor: span.inverse ? span.fg : "transparent",

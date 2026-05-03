@@ -12,7 +12,6 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
 use tokio::process::Command;
 
 #[derive(Debug, Serialize)]
@@ -30,27 +29,38 @@ fn ensure_cwd(cwd: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Find the bundled ripgrep sidecar binary. In a packaged macOS app it
-/// lives at Contents/MacOS/rg-<target-triple>; in dev it's under
-/// `target/<profile>/rg-<target-triple>`. We let Tauri's path resolver
-/// hand us the directory containing the main executable, then look for
-/// the binary there. Returns None when the binary isn't present so the
-/// caller can fall back to the system PATH copy of `rg`.
-fn resolve_rg_binary(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let exe_dir = app.path().resolve("", tauri::path::BaseDirectory::Resource).ok()
-        .or_else(|| std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf())))?;
-    let target_triple = current_target_triple();
-    let candidate = exe_dir.join(format!("rg-{target_triple}"));
-    if candidate.is_file() {
-        return Some(candidate);
+/// Find the bundled ripgrep sidecar binary.
+///
+/// **Bundled (.app)**: Tauri strips the target-triple suffix when
+///   placing externalBins, so the binary ends up at
+///   `Contents/MacOS/rg` next to the main `rli` executable.
+/// **Dev (`tauri dev` / `cargo run`)**: not bundled — the file
+///   downloaded by `scripts/download-rg.sh` lives at
+///   `src-tauri/binaries/rg-<target-triple>`.
+///
+/// Returns `None` when neither exists, in which case the caller falls
+/// back to whatever `rg` is on `PATH`.
+fn resolve_rg_binary(_app: &tauri::AppHandle) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+
+    // Production: `Contents/MacOS/rg` (the suffix is stripped by the
+    // bundler). Same name on Windows / Linux too — Tauri normalizes.
+    let bundled = exe_dir.join(if cfg!(windows) { "rg.exe" } else { "rg" });
+    if bundled.is_file() {
+        return Some(bundled);
     }
-    // Dev mode fallback: the binary lives in src-tauri/binaries before
-    // it's been bundled into the resource dir.
-    let dev = std::env::current_exe().ok()?;
-    let dev_root = dev.ancestors().nth(3)?; // target/<profile>/<exe> → project root
-    let dev_candidate = dev_root.join("binaries").join(format!("rg-{target_triple}"));
-    if dev_candidate.is_file() {
-        return Some(dev_candidate);
+
+    // Dev: target/<profile>/<exe> → walk up to the cargo project root,
+    // then into `binaries/rg-<target>`.
+    let target_triple = current_target_triple();
+    if let Some(dev_root) = exe.ancestors().nth(3) {
+        let dev_candidate = dev_root
+            .join("binaries")
+            .join(format!("rg-{target_triple}"));
+        if dev_candidate.is_file() {
+            return Some(dev_candidate);
+        }
     }
     None
 }

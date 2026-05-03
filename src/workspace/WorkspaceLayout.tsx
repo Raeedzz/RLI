@@ -4,6 +4,7 @@ import { Editor } from "@/editor/Editor";
 import { BinaryView } from "@/editor/BinaryView";
 import { MarkdownView } from "@/editor/MarkdownView";
 import { MarkdownToggle } from "@/editor/MarkdownToggle";
+import { ErrorBoundary } from "@/shell/ErrorBoundary";
 import { fileKind } from "@/lib/fileKind";
 import { BrowserPane } from "@/browser/BrowserPane";
 import { GraphView } from "@/graph/GraphView";
@@ -102,10 +103,17 @@ function PaneBody({
   paneId: PaneNodeId;
   content: PaneContent;
 }) {
-  if (content === "terminal") return <TerminalBody paneId={paneId} />;
-  if (content === "editor") return <EditorBody />;
-  if (content === "graph") return <GraphView />;
-  return <BrowserBody />;
+  // Per-pane boundary keeps a render crash in one pane scoped to that
+  // pane — the rest of the workspace + tabs + chrome stay alive, and
+  // the user can hit "Try again" to remount just this child.
+  return (
+    <ErrorBoundary fullscreen={false} scope={`the ${content}`}>
+      {content === "terminal" && <TerminalBody paneId={paneId} />}
+      {content === "editor" && <EditorBody />}
+      {content === "graph" && <GraphView />}
+      {content === "browser" && <BrowserBody />}
+    </ErrorBoundary>
+  );
 }
 
 function TerminalBody({ paneId }: { paneId: PaneNodeId }) {

@@ -8,6 +8,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { BlockList } from "./BlockList";
+import { CanvasGrid, isCanvasRendererEnabled } from "./CanvasGrid";
 import { FullGrid } from "./FullGrid";
 import { LiveBlock } from "./LiveBlock";
 import { PromptInput, type PromptInputHandle } from "./PromptInput";
@@ -21,6 +22,26 @@ import { detectClaude } from "@/lib/claudeUsage";
 function isAgentCommand(command: string): boolean {
   const c = command.toLowerCase();
   return c === "claude" || c.includes("codex") || c.includes("aider");
+}
+
+/**
+ * True when a full command line the user typed (e.g. "claude --resume",
+ * "ANTHROPIC_API_KEY=foo claude", "/usr/local/bin/codex chat") invokes
+ * one of our known TUI agents. Strips leading env-var assignments and
+ * resolves the basename so wrapper paths still match.
+ */
+function commandLineIsAgent(line: string): boolean {
+  const tokens = line.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  for (const t of tokens) {
+    if (/^[a-z_][a-z0-9_]*=/i.test(t)) continue;
+    const prog = t.split("/").pop() ?? t;
+    return (
+      prog === "claude" ||
+      prog.startsWith("codex") ||
+      prog.startsWith("aider")
+    );
+  }
+  return false;
 }
 
 interface Props {
@@ -276,14 +297,33 @@ export function BlockTerminal({
   // hiding the PromptInput frees ~80px of vertical real estate that
   // the alacritty grid can claim). Translate pixel size → cell grid
   // assuming a fixed monospace metric (13px font @ 1.35 line height).
+  //
+  // The PTY's row count is what claude / codex / shell commands paint
+  // into. We size it to the *visible* scroll viewport (container
+  // height minus input chrome) so the in-progress LiveBlock fits
+  // without overflowing the pane when scrolled to the bottom. The
+  // LiveBlock's own header (~50px for cwd row + command name +
+  // border) is reserved on top of that — without it, claude's last
+  // row gets clipped behind the input zone.
+  //
+  // Agent mode (claude / codex / aider) gets an oversized PTY: the
+  // visible viewport plus AGENT_ROW_HEADROOM. Without the headroom,
+  // a multi-line paste that exceeds the visible row count overflows
+  // claude's own input box, claude scrolls within itself, and the
+  // top of the prompt slides into alacritty's scrollback (which we
+  // don't render). With it, claude's input has enough rows to paint
+  // the full prompt; trimEchoAndBlanks strips the leading blank
+  // rows so the LiveBlock body sizes naturally to actual content;
+  // and the outer column-reverse scroll lets the user reach the top
+  // of the prompt by scrolling up.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const compute = () => {
       const rect = el.getBoundingClientRect();
-      // Status bar + textarea + hint ≈ 80px when shown; agent mode
-      // hides them so we only reserve a thin gutter.
-      const reserved = agentMode ? 8 : 80;
+      const inputChrome = agentMode ? 8 : 80;
+      const liveBlockChrome = 50;
+      const reserved = inputChrome + liveBlockChrome;
       const usableHeight = Math.max(120, rect.height - reserved);
       const cellHeight = 13 * 1.35;
       // JetBrains Mono at 13px advances ~7.8px per glyph. Be slightly
@@ -292,7 +332,11 @@ export function BlockTerminal({
       // on the right than to have claude paint a column that gets
       // clipped, which reads as "broken / cut off".
       const cellWidth = 13 * 0.62;
-      const rows = Math.max(8, Math.floor(usableHeight / cellHeight));
+      const visibleRows = Math.max(8, Math.floor(usableHeight / cellHeight));
+      const AGENT_ROW_HEADROOM = 80;
+      const rows = foregroundIsAgent
+        ? visibleRows + AGENT_ROW_HEADROOM
+        : visibleRows;
       const cols = Math.max(20, Math.floor((rect.width - 24) / cellWidth));
       void resize(rows, cols).catch(() => {});
     };
@@ -300,11 +344,15 @@ export function BlockTerminal({
     const observer = new ResizeObserver(compute);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [resize, agentMode]);
+  }, [resize, agentMode, foregroundIsAgent]);
 
   // Sniff the live frame for the Claude banner so the 5h usage bar
   // attaches automatically AND we know to hide PromptInput in favor
-  // of the agent's own input.
+  // of the agent's own input. Used only as a fallback — the
+  // activeCommand-based foregrounding effect below covers the common
+  // case (user typed "claude" / "codex" / "aider" at the shell).
+  // Sniffing remains useful for wrappers, aliases, and direct-launch
+  // panes whose initial frames pre-date this state being wired up.
   //
   // CRITICAL: only sniff while a command is actively running. After
   // Ctrl+C kills an agent the alacritty grid still holds the agent's
@@ -312,14 +360,26 @@ export function BlockTerminal({
   // command_running=false transition would re-detect claude from
   // those leftover bytes and flip foregroundIsAgent back to true,
   // pinning PromptInput off-screen forever.
+  //
+  // Scans the full grid (claude's banner paints near the top of the
+  // initial draw, so a tail-only scan misses it). Bails on the first
+  // marker hit — the inner loop appends span text and short-circuits
+  // as soon as detectClaude succeeds.
   useEffect(() => {
     if (foregroundIsAgent) return;
     if (!liveFrame) return;
     if (!liveFrame.command_running) return;
-    const text = liveFrame.dirty
-      .map((dr) => dr.spans.map((s) => s.text).join(""))
-      .join("\n");
-    sniffBufferRef.current = (sniffBufferRef.current + text).slice(-16_384);
+    let text = "";
+    for (const dr of liveFrame.dirty) {
+      const spans = dr.spans;
+      for (let j = 0; j < spans.length; j++) text += spans[j].text;
+      text += "\n";
+    }
+    if (text.length === 0) return;
+    sniffBufferRef.current =
+      sniffBufferRef.current.length + text.length > 16_384
+        ? (sniffBufferRef.current + text).slice(-16_384)
+        : sniffBufferRef.current + text;
     if (detectClaude(sniffBufferRef.current)) {
       setForegroundIsAgent(true);
       if (!claudeDetectedLocal) {
@@ -329,6 +389,24 @@ export function BlockTerminal({
       sniffBufferRef.current = "";
     }
   }, [liveFrame, foregroundIsAgent, claudeDetectedLocal]);
+
+  // Foreground the agent the moment the user runs one from the shell.
+  // The Claude-only banner sniff above is a slow path that doesn't
+  // know about codex/aider; this catches every known agent on its
+  // command line as soon as command_running flips to true. Skipped
+  // for direct-launch panes (already foregrounded at mount).
+  useEffect(() => {
+    if (directAgent) return;
+    if (foregroundIsAgent) return;
+    if (!liveFrame?.command_running) return;
+    if (!commandLineIsAgent(activeCommand)) return;
+    setForegroundIsAgent(true);
+  }, [
+    directAgent,
+    foregroundIsAgent,
+    liveFrame?.command_running,
+    activeCommand,
+  ]);
 
 
   const onSubmit = useCallback(
@@ -521,14 +599,24 @@ export function BlockTerminal({
         </div>
       )}
 
-      {!exited && altScreen && (
-        <FullGrid frame={liveFrame} onSendBytes={sendBytes} />
-      )}
+      {!exited && altScreen &&
+        (isCanvasRendererEnabled() ? (
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <CanvasGrid frame={liveFrame} onSendBytes={sendBytes} />
+          </div>
+        ) : (
+          <FullGrid frame={liveFrame} onSendBytes={sendBytes} />
+        ))}
 
-      {/* Shell mode (no agent foregrounded): one scroll container holds
-          the closed history (BlockList) and the in-progress LiveBlock,
-          so the user scrolls a single continuous view. */}
-      {!altScreen && !foregroundIsAgent && (
+      {/* One scroll container for everything that isn't alt-screen.
+          Closed-block history (BlockList) above, in-progress LiveBlock
+          pinned at the bottom (column-reverse). Same shape whether
+          the running command is a shell command or a TUI agent —
+          there is no separate "agent view." Agents render inline in
+          the conversation as a `preserveGrid` LiveBlock so claude's
+          UI doesn't wrap and the user keeps one continuous scroll
+          over their whole session. */}
+      {!altScreen && (
         <div
           style={{
             flex: 1,
@@ -539,19 +627,16 @@ export function BlockTerminal({
             overflowX: "hidden",
           }}
         >
-          {liveFrame?.command_running && (
-            <LiveBlock command={activeCommand} frame={liveFrame} cwd={effectiveCwd} />
+          {liveFrame?.command_running && !exited && (
+            <LiveBlock
+              command={activeCommand}
+              frame={liveFrame}
+              cwd={effectiveCwd}
+              preserveGrid={foregroundIsAgent}
+            />
           )}
           <BlockList blocks={blocks} />
         </div>
-      )}
-
-      {/* Agent mode (claude / codex / aider in normal screen): the agent
-          owns the pane. Hide closed-block history so prior shell output
-          doesn't ghost above the agent's UI. Skipped after PTY exit —
-          the agent that owned the surface is gone. */}
-      {!exited && !altScreen && foregroundIsAgent && (
-        <LiveBlock command={activeCommand} frame={liveFrame} fill cwd={effectiveCwd} />
       )}
 
       {!agentMode && effectiveCwd && (
@@ -573,6 +658,7 @@ export function BlockTerminal({
           ref={passthroughRef}
           onSendBytes={(b) => void sendBytes(b)}
           appCursor={liveFrame?.app_cursor ?? false}
+          bracketedPaste={liveFrame?.bracketed_paste ?? false}
         />
       )}
     </div>

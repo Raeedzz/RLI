@@ -23,7 +23,7 @@
       "@design/*": ["./src/design/*"]
     },
     "baseUrl": ".",
-    "types": ["bun"]
+    "types": ["bun", "@webgpu/types"]
   },
   "include": ["src"]
 }

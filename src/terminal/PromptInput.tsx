@@ -380,6 +380,9 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
     };
 
     // Recompute completions when the user types or cwd changes.
+    // Debounced so a fast typist doesn't queue a readDir per keystroke.
+    // 150 ms feels instant for completion UI and is comfortably above
+    // the inter-keystroke latency of normal typing.
     useEffect(() => {
       if (!cwd) {
         setCompletions([]);
@@ -393,26 +396,30 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
       const { parent, prefix } = splitPath(arg);
       const targetDir = resolveDir(parent, cwd);
       let cancelled = false;
-      fs.readDir(targetDir)
-        .then((entries) => {
-          if (cancelled) return;
-          const dirs = entries
-            .filter((e) => e.is_dir)
-            .filter((e) =>
-              prefix.length === 0
-                ? !e.name.startsWith(".")
-                : e.name.toLowerCase().startsWith(prefix.toLowerCase()),
-            )
-            .sort((a, b) => a.name.localeCompare(b.name))
-            .slice(0, COMPLETION_LIMIT);
-          setCompletions(dirs);
-          setCompletionIndex(0);
-        })
-        .catch(() => {
-          if (!cancelled) setCompletions([]);
-        });
+      const timer = setTimeout(() => {
+        if (cancelled) return;
+        fs.readDir(targetDir)
+          .then((entries) => {
+            if (cancelled) return;
+            const dirs = entries
+              .filter((e) => e.is_dir)
+              .filter((e) =>
+                prefix.length === 0
+                  ? !e.name.startsWith(".")
+                  : e.name.toLowerCase().startsWith(prefix.toLowerCase()),
+              )
+              .sort((a, b) => a.name.localeCompare(b.name))
+              .slice(0, COMPLETION_LIMIT);
+            setCompletions(dirs);
+            setCompletionIndex(0);
+          })
+          .catch(() => {
+            if (!cancelled) setCompletions([]);
+          });
+      }, 150);
       return () => {
         cancelled = true;
+        clearTimeout(timer);
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [value, cwd]);
@@ -498,13 +505,16 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
         }
       }
       // ── Completion dropdown takes over a few keys when open ──
+      // Skip when Cmd is held — Cmd+Arrow is macOS-standard "snap to
+      // start/end of textarea," which the native textarea handles
+      // for free as long as we don't preventDefault here.
       if (completionsOpen) {
-        if (e.key === "ArrowUp") {
+        if (e.key === "ArrowUp" && !meta) {
           e.preventDefault();
           setCompletionIndex((idx) => Math.max(0, idx - 1));
           return;
         }
-        if (e.key === "ArrowDown") {
+        if (e.key === "ArrowDown" && !meta) {
           e.preventDefault();
           setCompletionIndex((idx) =>
             Math.min(completions.length - 1, idx + 1),
@@ -552,7 +562,10 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
       // ↑ on empty input → open the history dropdown. Inline-fill is
       // gone; the dropdown is the single source of history-recall UI
       // (matches the cd-completion dropdown's interaction pattern).
-      if (e.key === "ArrowUp" && value === "" && historyLength > 0) {
+      // Skip when meta is held — Cmd+ArrowUp is the macOS-standard
+      // "jump to start of textarea" shortcut, and intercepting it here
+      // would silently break navigation in a multi-line prompt.
+      if (e.key === "ArrowUp" && !meta && value === "" && historyLength > 0) {
         e.preventDefault();
         setHistoryOpen(true);
         setHistoryIndex(0);
@@ -561,8 +574,9 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
       // ↓ when not in dropdown / not in completions: clear any inline
       // history-cursor state. Kept as a no-op safety net for legacy
       // state — the dropdown-driven flow above never sets historyCursor
-      // > 0 anymore.
-      if (e.key === "ArrowDown" && historyCursor >= 0) {
+      // > 0 anymore. Same meta guard as the ArrowUp branch so
+      // Cmd+ArrowDown reaches the textarea's native end-of-buffer.
+      if (e.key === "ArrowDown" && !meta && historyCursor >= 0) {
         e.preventDefault();
         const next = historyCursor - 1;
         if (next < 0) {

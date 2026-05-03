@@ -20,6 +20,20 @@ export interface DirtyRow {
 }
 
 export interface RenderFrame {
+  /**
+   * Monotonic frame sequence id. The rAF flush in `useTerminalSession`
+   * uses it to dedupe (skip if unchanged since the last flush) and to
+   * detect dropped frames in heavy bursts (gaps in seq imply
+   * coalescing under load — log + drop).
+   */
+  seq: number;
+  /**
+   * Stable id of the block this frame belongs to. 0 means no block is
+   * active (before the first prompt or briefly between blocks).
+   * Survives reflow / resize / scroll so the canvas renderer can
+   * identify which block a row belongs to without comparing text.
+   */
+  block_id: number;
   cols: number;
   rows: number;
   cursor_row: number;
@@ -39,10 +53,22 @@ export interface RenderFrame {
    * Without honoring it, the agent never sees the user's arrow keys.
    */
   app_cursor: boolean;
+  /**
+   * DECSET 2004 (bracketed paste). When true, the running program has
+   * issued `ESC[?2004h` and expects pasted bytes wrapped in
+   * `ESC[200~ ... ESC[201~`. Without those markers a multi-line paste
+   * gets read line-by-line by the agent (each newline triggers a
+   * partial redraw), making the bottom of a big prompt appear to
+   * "load slowly." Frontend's PtyPassthrough wraps paste events when
+   * this is set.
+   */
+  bracketed_paste: boolean;
   dirty: DirtyRow[];
 }
 
 export interface ClosedBlock {
+  /** Stable id minted by the Rust segmenter at OSC 133 A. */
+  block_id: number;
   input: string;
   /**
    * Full byte transcript from OSC 133 A → D. Includes the user's
@@ -60,6 +86,8 @@ export interface ClosedBlock {
 export interface Block {
   /** Stable id we generate on receipt for React keys. */
   id: string;
+  /** Stable id minted by Rust at OSC 133 A. Survives reflow/resize. */
+  block_id: number;
   input: string;
   transcript: string;
   exit_code: number | null;

@@ -1,0 +1,105 @@
+/**
+ * Shared keyboard → PTY byte encoding. FullGrid (alt-screen),
+ * PtyPassthrough (agent mode), and CanvasGrid (Phase 3 canvas
+ * renderer) all use this so the wire encoding stays in lockstep.
+ *
+ *   - Standard xterm escape sequences for arrows / function keys.
+ *   - DECCKM (`appCursor=true`) flips arrows + Home/End to SS3.
+ *   - macOS Cmd+arrow / Cmd+⌫ map to readline conventions the
+ *     agent's input loop understands.
+ *   - Ctrl+letter encodes to its 0x01–0x1A control byte.
+ *   - Plain printable chars return null so the textarea's onChange
+ *     handler routes them — preserves IME composition.
+ */
+
+import type { KeyboardEvent } from "react";
+
+const encoder = new TextEncoder();
+
+export function keyToBytes(
+  e: KeyboardEvent<HTMLTextAreaElement>,
+  appCursor: boolean,
+): Uint8Array | null {
+  const ctrl = e.ctrlKey;
+  const alt = e.altKey;
+  const meta = e.metaKey;
+  const csi = (c: string) => encoder.encode(`\x1b[${c}`);
+  const ss3 = (c: string) => encoder.encode(`\x1bO${c}`);
+  const arrow = (c: string) => (appCursor ? ss3(c) : csi(c));
+
+  // macOS standard Cmd+navigation. Maps to readline conventions:
+  //   Cmd+Left  → Ctrl+A  (beginning of line)
+  //   Cmd+Right → Ctrl+E  (end of line)
+  //   Cmd+Up    → Esc+<   (beginning of buffer)
+  //   Cmd+Down  → Esc+>   (end of buffer)
+  //   Cmd+⌫     → Ctrl+U  (kill from cursor to start of line)
+  if (meta && !ctrl && !alt) {
+    switch (e.key) {
+      case "ArrowLeft":
+        return new Uint8Array([0x01]);
+      case "ArrowRight":
+        return new Uint8Array([0x05]);
+      case "ArrowUp":
+        return encoder.encode("\x1b<");
+      case "ArrowDown":
+        return encoder.encode("\x1b>");
+      case "Backspace":
+        return new Uint8Array([0x15]);
+    }
+  }
+
+  switch (e.key) {
+    case "Enter":
+      // Plain Enter → CR (submit). Shift+Enter → LF so claude / codex /
+      // aider can distinguish "newline in prompt" from "submit". This
+      // matches Warp's convention; without it, Shift+Enter is silently
+      // collapsed into a submit and multi-line agent prompts are
+      // impossible without typing `\` + Enter.
+      return encoder.encode(e.shiftKey ? "\n" : "\r");
+    case "Backspace":
+      return new Uint8Array([0x7f]);
+    case "Tab":
+      return encoder.encode("\t");
+    case "Escape":
+      return new Uint8Array([0x1b]);
+    case "ArrowUp":
+      return arrow("A");
+    case "ArrowDown":
+      return arrow("B");
+    case "ArrowRight":
+      return arrow("C");
+    case "ArrowLeft":
+      return arrow("D");
+    case "Home":
+      return arrow("H");
+    case "End":
+      return arrow("F");
+    case "PageUp":
+      return csi("5~");
+    case "PageDown":
+      return csi("6~");
+    case "Delete":
+      return csi("3~");
+  }
+
+  // Ctrl-letter (e.g. ⌃C → 0x03, ⌃D → 0x04, ⌃Z → 0x1A)
+  if (ctrl && !alt && e.key.length === 1) {
+    const c = e.key.toLowerCase().charCodeAt(0);
+    if (c >= 97 && c <= 122) {
+      return new Uint8Array([c - 96]);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Returns true if the keystroke is a global app chord that we must
+ * NOT intercept (⌘K, ⌘B, ⌘N, ⌘W, ⌘O, etc.) — let it bubble to the
+ * window-level keybinding handler.
+ */
+export function isGlobalChord(e: KeyboardEvent<HTMLTextAreaElement>): boolean {
+  if (e.altKey) return false;
+  if (!(e.metaKey || e.ctrlKey)) return false;
+  return ["k", "b", "n", "w", "o"].includes(e.key.toLowerCase());
+}
