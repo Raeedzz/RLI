@@ -259,15 +259,13 @@ function TabButton({
       }
       style={{
         position: "relative",
-        display: "grid",
-        gridTemplateColumns: "auto 1fr auto",
-        gridTemplateRows: "auto auto",
-        gridColumnGap: 6,
+        display: "inline-flex",
         alignItems: "center",
-        height: "var(--tab-height)",
-        minWidth: 140,
+        gap: 6,
+        height: 32,
+        minWidth: 100,
         maxWidth: 220,
-        padding: "0 var(--space-2) 0 var(--space-2-5, 10px)",
+        padding: "0 var(--space-2) 0 10px",
         cursor: "default",
         backgroundColor: active ? "var(--surface-2)" : "transparent",
         color: active ? "var(--text-primary)" : "var(--text-secondary)",
@@ -279,8 +277,6 @@ function TabButton({
     >
       <span
         style={{
-          gridColumn: "1",
-          gridRow: "1 / span 2",
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
@@ -298,8 +294,8 @@ function TabButton({
       </span>
       <span
         style={{
-          gridColumn: "2",
-          gridRow: "1",
+          flex: 1,
+          minWidth: 0,
           fontSize: "var(--text-base)",
           fontWeight: "var(--weight-medium)",
           overflow: "hidden",
@@ -307,9 +303,8 @@ function TabButton({
           whiteSpace: "nowrap",
         }}
       >
-        {tab.title}
+        {tabLabel(tab)}
       </span>
-      <SummaryLine summary={tab.summary} updatedAt={tab.summaryUpdatedAt} />
       <button
         type="button"
         onClick={(e) => {
@@ -318,8 +313,6 @@ function TabButton({
         }}
         title="Close tab"
         style={{
-          gridColumn: "3",
-          gridRow: "1 / span 2",
           width: 18,
           height: 18,
           display: "inline-flex",
@@ -350,6 +343,16 @@ function TabButton({
   );
 }
 
+/** Bare label for a tab — bare names only (no path, no subtitle).
+ *  Terminal tabs that have detected an agent show the CLI name. */
+function tabLabel(tab: Tab): string {
+  if (tab.kind === "terminal") {
+    return tab.detectedCli ?? tab.title ?? "shell";
+  }
+  // diff / markdown — show the filename basename.
+  return tab.filePath.split("/").pop() ?? tab.title;
+}
+
 function TabKindGlyph({ tab }: { tab: Tab }) {
   const dot = (color: string) => (
     <span
@@ -366,36 +369,6 @@ function TabKindGlyph({ tab }: { tab: Tab }) {
   if (tab.kind === "terminal") return dot("var(--text-tertiary)");
   if (tab.kind === "diff") return dot("var(--state-info)");
   return dot("var(--state-warning)");
-}
-
-function SummaryLine({
-  summary,
-  updatedAt,
-}: {
-  summary: string;
-  updatedAt: number;
-}) {
-  // Re-mount on summary change so motion's enter animation re-fires —
-  // the differentiator: 220ms outQuint fade + slide-up of the new line.
-  return (
-    <motion.span
-      key={`${updatedAt}-${summary}`}
-      initial={{ opacity: 0, y: 3 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-      style={{
-        gridColumn: "2",
-        gridRow: "2",
-        fontSize: "var(--text-xs)",
-        color: "var(--text-tertiary)",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {summary || "ready"}
-    </motion.span>
-  );
 }
 
 /* ------------------------------------------------------------------

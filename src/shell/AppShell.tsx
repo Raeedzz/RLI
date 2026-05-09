@@ -25,9 +25,10 @@ import { useAppState } from "@/state/AppState";
  *   │      │                         │  terminal     │
  *   └──────┴─────────────────────────┴───────────────┘
  *
- * Sidebar and right panel collapse to 0 width via the
- * `--sidebar-w` / `--right-w` CSS vars driven from state. WindowChrome
- * sits above as a 28px traffic-light strip.
+ * Sidebar collapses to a 40px icon rail (the toggle stays clickable);
+ * right panel collapses fully to 0 width. Both via the `--sidebar-w` /
+ * `--right-w` CSS vars driven from state. WindowChrome sits above as a
+ * 28px traffic-light strip.
  */
 export function AppShell() {
   useKeyboardShortcuts();
@@ -45,7 +46,7 @@ export function AppShell() {
         backgroundColor: "var(--surface-0)",
         overflow: "hidden",
         ["--sidebar-w" as string]: sidebarCollapsed
-          ? "0px"
+          ? "40px"
           : "var(--sidebar-width)",
         ["--right-w" as string]: rightPanelCollapsed
           ? "0px"
