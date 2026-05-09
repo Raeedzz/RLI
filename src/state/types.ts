@@ -91,8 +91,18 @@ export interface Worktree {
   /** Vertical split between right-panel upper and the secondary terminal. */
   rightSplitPct: number;
   secondaryTab: SecondaryTab;
-  /** PTY id for the always-on secondary terminal at the bottom-right. */
+  /**
+   * Each entry is a separate PTY rendered as its own tab in the secondary
+   * panel. Created lazily — the first one is seeded from the legacy
+   * `secondaryPtyId` so existing state migrates cleanly.
+   */
+  secondaryTerminals: PtyId[];
+  /** Which secondaryTerminals[] entry is currently visible. */
+  secondaryActiveTerminalId: PtyId | null;
+  /** Legacy single-PTY id. Kept for migration; do not read directly. */
   secondaryPtyId: PtyId;
+  /** When true, the secondary panel is minimized to just its tab header. */
+  secondaryCollapsed?: boolean;
 
   /** User-assigned color tag (sidebar accent). */
   color?: TagId;
@@ -294,6 +304,10 @@ export type AppAction =
   | { type: "restore-worktree"; archiveId: ArchiveId; worktree: Worktree }
   | { type: "set-right-panel"; worktreeId: WorktreeId; panel: RightPanelTab }
   | { type: "set-secondary-tab"; worktreeId: WorktreeId; tab: SecondaryTab }
+  | { type: "add-secondary-terminal"; worktreeId: WorktreeId }
+  | { type: "select-secondary-terminal"; worktreeId: WorktreeId; ptyId: PtyId }
+  | { type: "close-secondary-terminal"; worktreeId: WorktreeId; ptyId: PtyId }
+  | { type: "toggle-secondary-collapsed"; worktreeId: WorktreeId }
   | { type: "set-right-split-pct"; worktreeId: WorktreeId; pct: number }
   | { type: "set-agent-status"; worktreeId: WorktreeId; status: AgentStatus; cli?: AgentCli | null }
   | { type: "set-change-count"; worktreeId: WorktreeId; count: number }

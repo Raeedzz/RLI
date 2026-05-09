@@ -17,6 +17,7 @@ export {
   ArrowRight01Icon as IconForward,
   ArrowDown01Icon as IconChevronDown,
   ArrowRight01Icon as IconChevronRight,
+  ArrowUp01Icon as IconChevronUp,
   ArrowUp01Icon as IconArrowUp,
   MoreVerticalIcon as IconMore,
   FilterHorizontalIcon as IconFilter,

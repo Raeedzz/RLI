@@ -84,6 +84,30 @@ export function useKeyboardShortcuts() {
         return;
       }
 
+      // ⌘T — open a new terminal tab in the main column of the active
+      // worktree. Each tab gets a fresh PTY id, named "shell" until the
+      // first prompt sets a real title.
+      if (cmd && !shift && e.key.toLowerCase() === "t" && worktree) {
+        e.preventDefault();
+        const id = `t_${Date.now().toString(36)}`;
+        const ptyId = `pty_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        dispatch({
+          type: "open-tab",
+          tab: {
+            id,
+            worktreeId: worktree.id,
+            kind: "terminal",
+            ptyId,
+            detectedCli: null,
+            agentStatus: "idle",
+            title: "shell",
+            summary: "ready",
+            summaryUpdatedAt: Date.now(),
+          },
+        });
+        return;
+      }
+
       // ⌘N — auto-create a new worktree in the active project. No
       // prompt: the branch is named `agent-N` (next free index).
       if (cmd && !shift && e.key.toLowerCase() === "n" && project) {

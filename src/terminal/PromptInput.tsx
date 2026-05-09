@@ -837,6 +837,32 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
             className="rli-prompt-input"
           />
         </PromptHighlight>
+        <div
+          aria-hidden
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            paddingTop: 2,
+            color: "var(--text-disabled)",
+            fontFamily: "var(--font-sans)",
+            fontSize: "var(--text-2xs)",
+            letterSpacing: "var(--tracking-tight)",
+            userSelect: "none",
+          }}
+        >
+          <span
+            className="tabular"
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: "var(--text-2xs)",
+              color: "var(--text-tertiary)",
+            }}
+          >
+            ⌘N
+          </span>
+          <span>new worktree</span>
+        </div>
       </div>
     );
   },

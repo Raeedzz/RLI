@@ -1,6 +1,7 @@
-import { SearchIcon, SettingsIcon } from "@/primitives/Icon";
+import { SearchIcon } from "@/primitives/Icon";
+import { IconPullRequest } from "@/design/icons";
 import { useIsFullscreen } from "@/hooks/useIsFullscreen";
-import { useAppDispatch } from "@/state/AppState";
+import { useActiveWorktree, useAppDispatch } from "@/state/AppState";
 
 const TRAFFIC_LIGHT_GUTTER = 78;
 const HEIGHT = 28;
@@ -27,6 +28,7 @@ const HEIGHT = 28;
 export function WindowChrome() {
   const dispatch = useAppDispatch();
   const isFullscreen = useIsFullscreen();
+  const worktree = useActiveWorktree();
 
   return (
     <div
@@ -67,7 +69,8 @@ export function WindowChrome() {
         />
       </div>
 
-      {/* Right-anchored settings cog stays out of the search's way. */}
+      {/* Right-anchored Create-PR button — opens the PR dialog for the
+          active worktree. Disabled when no worktree is selected. */}
       <div
         data-tauri-drag-region
         style={{
@@ -79,8 +82,12 @@ export function WindowChrome() {
           alignItems: "center",
         }}
       >
-        <SettingsButton
-          onClick={() => dispatch({ type: "set-settings-open", open: true })}
+        <CreatePRButton
+          disabled={!worktree}
+          onClick={() => {
+            if (!worktree) return;
+            dispatch({ type: "set-pr-dialog", worktreeId: worktree.id });
+          }}
         />
       </div>
     </div>
@@ -157,38 +164,57 @@ function SearchTrigger({ onOpen }: { onOpen: () => void }) {
   );
 }
 
-function SettingsButton({ onClick }: { onClick: () => void }) {
+function CreatePRButton({
+  onClick,
+  disabled,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
       data-tauri-drag-region={false}
-      title="Settings"
-      aria-label="Settings"
+      disabled={disabled}
+      title="Create pull request"
+      aria-label="Create pull request"
       style={{
-        width: 22,
         height: 22,
         display: "inline-flex",
         alignItems: "center",
-        justifyContent: "center",
-        backgroundColor: "transparent",
-        color: "var(--text-tertiary)",
+        gap: 6,
+        padding: "0 10px",
+        backgroundColor: disabled
+          ? "var(--surface-1)"
+          : "var(--surface-accent-tinted)",
+        color: disabled ? "var(--text-disabled)" : "var(--text-primary)",
+        border: disabled
+          ? "var(--border-1)"
+          : "1px solid var(--accent-muted)",
         borderRadius: "var(--radius-sm)",
-        cursor: "pointer",
+        fontFamily: "var(--font-sans)",
+        fontSize: "var(--text-2xs)",
+        fontWeight: "var(--weight-semibold)",
+        letterSpacing: "var(--tracking-tight)",
+        cursor: disabled ? "default" : "pointer",
         flexShrink: 0,
         transition:
-          "background-color var(--motion-instant) var(--ease-out-quart), color var(--motion-instant) var(--ease-out-quart)",
+          "background-color var(--motion-instant) var(--ease-out-quart), border-color var(--motion-instant) var(--ease-out-quart), color var(--motion-instant) var(--ease-out-quart)",
       }}
       onMouseEnter={(e) => {
-        e.currentTarget.style.backgroundColor = "var(--surface-3)";
-        e.currentTarget.style.color = "var(--text-primary)";
+        if (disabled) return;
+        e.currentTarget.style.backgroundColor =
+          "color-mix(in oklch, var(--surface-accent-tinted), var(--accent) 8%)";
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.backgroundColor = "transparent";
-        e.currentTarget.style.color = "var(--text-tertiary)";
+        if (disabled) return;
+        e.currentTarget.style.backgroundColor =
+          "var(--surface-accent-tinted)";
       }}
     >
-      <SettingsIcon size={14} />
+      <IconPullRequest size={12} />
+      <span>Create PR</span>
     </button>
   );
 }

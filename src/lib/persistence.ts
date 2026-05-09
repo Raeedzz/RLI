@@ -108,10 +108,37 @@ export async function loadState(): Promise<Partial<AppState> | null> {
       settings,
       markdownView,
     } = parsed;
+    // Migrate older v2 worktrees that predate `secondaryTerminals` —
+    // seed it from the legacy single-pty id so existing saved state
+    // gets a one-tab terminal strip rather than an empty one.
+    const migratedWorktrees: AppState["worktrees"] = {};
+    for (const id of Object.keys(worktrees)) {
+      const w = worktrees[id];
+      if (
+        !Array.isArray((w as { secondaryTerminals?: unknown }).secondaryTerminals) ||
+        (w as { secondaryTerminals?: unknown[] }).secondaryTerminals!.length === 0
+      ) {
+        migratedWorktrees[id] = {
+          ...w,
+          secondaryTerminals: [w.secondaryPtyId],
+          secondaryActiveTerminalId: w.secondaryPtyId,
+        };
+      } else if (
+        !(w as { secondaryActiveTerminalId?: unknown }).secondaryActiveTerminalId
+      ) {
+        const list = (w as { secondaryTerminals: string[] }).secondaryTerminals;
+        migratedWorktrees[id] = {
+          ...w,
+          secondaryActiveTerminalId: list[list.length - 1],
+        };
+      } else {
+        migratedWorktrees[id] = w;
+      }
+    }
     return {
       projects,
       projectOrder,
-      worktrees,
+      worktrees: migratedWorktrees,
       tabs,
       activeProjectId,
       activeWorktreeByProject,

@@ -57,7 +57,6 @@ export function TerminalStatusBar({ cwd, command }: Props) {
         padding: "var(--space-2) var(--space-3)",
         backgroundColor: "var(--surface-0)",
         borderTop: "var(--border-1)",
-        borderBottom: "var(--border-1)",
         fontFamily: "var(--font-sans)",
         fontSize: "var(--text-2xs)",
         color: "var(--text-tertiary)",

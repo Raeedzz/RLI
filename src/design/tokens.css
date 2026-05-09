@@ -97,12 +97,17 @@
   --surface-warning-soft:  color-mix(in oklch, var(--surface-1), var(--state-warning) 7%);
   --surface-error-soft:    color-mix(in oklch, var(--surface-1), var(--state-error) 7%);
 
-  /* Diff palette — restrained tints */
-  --diff-add-bg:     oklch(28% 0.06 145 / 0.32);
-  --diff-add-fg:     oklch(82% 0.14 145);
-  --diff-remove-bg:  oklch(28% 0.06  25 / 0.30);
-  --diff-remove-fg:  oklch(82% 0.16  25);
-  --diff-change-bg:  oklch(28% 0.06  85 / 0.30);
+  /* Diff palette — vibrant enough to scan at a glance, still tasteful
+     against the cool-dark surface. The fg colors land at high lightness
+     + chroma so + / − sigils and inline tints feel saturated, not muddy. */
+  --diff-add-bg:     oklch(34% 0.13 145 / 0.42);
+  --diff-add-bg-strong: oklch(40% 0.15 145 / 0.55);
+  --diff-add-fg:     oklch(86% 0.22 145);
+  --diff-remove-bg:  oklch(32% 0.14  25 / 0.42);
+  --diff-remove-bg-strong: oklch(38% 0.17 25 / 0.55);
+  --diff-remove-fg:  oklch(80% 0.22  25);
+  --diff-change-bg:  oklch(32% 0.13  85 / 0.40);
+  --diff-change-fg:  oklch(86% 0.18  85);
 
   /* Modal backdrop */
   --backdrop: oklch(0% 0 0 / 0.55);

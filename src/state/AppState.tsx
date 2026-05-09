@@ -63,6 +63,8 @@ const DEFAULT_WORKTREE: Worktree = {
   rightSplitPct: 60,
   secondaryTab: "terminal",
   secondaryPtyId: DEFAULT_PTY_SECONDARY,
+  secondaryTerminals: [DEFAULT_PTY_SECONDARY],
+  secondaryActiveTerminalId: DEFAULT_PTY_SECONDARY,
 };
 
 const DEFAULT_TAB: Tab = {
@@ -261,6 +263,52 @@ export function reducer(state: AppState, action: AppAction): AppState {
     case "set-secondary-tab":
       return updateWorktree(state, action.worktreeId, () => ({
         secondaryTab: action.tab,
+      }));
+
+    case "add-secondary-terminal":
+      return updateWorktree(state, action.worktreeId, (w) => {
+        const fresh = `pty_sec_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        return {
+          secondaryTerminals: [...(w.secondaryTerminals ?? []), fresh],
+          secondaryActiveTerminalId: fresh,
+          secondaryTab: "terminal" as const,
+          secondaryCollapsed: false,
+        };
+      });
+
+    case "select-secondary-terminal":
+      return updateWorktree(state, action.worktreeId, () => ({
+        secondaryActiveTerminalId: action.ptyId,
+        secondaryTab: "terminal" as const,
+      }));
+
+    case "close-secondary-terminal":
+      return updateWorktree(state, action.worktreeId, (w) => {
+        const list = (w.secondaryTerminals ?? []).filter(
+          (id) => id !== action.ptyId,
+        );
+        // Never let the list go fully empty — re-seed with a fresh PTY
+        // so the Terminal tab always renders something.
+        const next =
+          list.length > 0
+            ? list
+            : [
+                `pty_sec_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+              ];
+        const stillActive =
+          w.secondaryActiveTerminalId &&
+          next.includes(w.secondaryActiveTerminalId)
+            ? w.secondaryActiveTerminalId
+            : next[next.length - 1];
+        return {
+          secondaryTerminals: next,
+          secondaryActiveTerminalId: stillActive,
+        };
+      });
+
+    case "toggle-secondary-collapsed":
+      return updateWorktree(state, action.worktreeId, (w) => ({
+        secondaryCollapsed: !w.secondaryCollapsed,
       }));
 
     case "set-right-split-pct":
