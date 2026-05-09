@@ -10,6 +10,7 @@
 /// Per-feature plumbing lives in `crate::*` modules — registered below.
 #[cfg(target_os = "macos")]
 mod browser;
+mod claude_mem;
 mod claude_usage;
 mod connections;
 mod fs;
@@ -90,6 +91,8 @@ pub fn run() {
             memory::memory_recall,
             memory::memory_delete,
             memory::memory_graph_data,
+            // claude-mem corpus graph (Obsidian-style view over ~/.claude-mem)
+            claude_mem::claude_mem_graph,
             // Claude usage (real, from ~/.claude/projects transcripts)
             claude_usage::claude_usage_status,
             claude_usage::claude_activity_summary,

@@ -5,15 +5,26 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { memory, type GraphPayload, type GraphNode, type MemoryKind } from "@/lib/memory";
-import { useActiveProject, useActiveSession } from "@/state/AppState";
+import {
+  memory,
+  type ClaudeMemNode,
+  type ClaudeMemPayload,
+  type GraphEdge,
+} from "@/lib/memory";
+import { useActiveProject } from "@/state/AppState";
 
 /**
- * Obsidian-style memory graph. Nodes are individual memory entries,
- * edges are cosine-similarity links above the threshold defined in
- * `memory.rs::GRAPH_EDGE_THRESHOLD`. Layout is a Verlet-style force
- * simulation in pure JS — repulsion across all pairs, spring
- * attraction along edges, and a centering pull. Renders in SVG.
+ * Obsidian-style memory graph driven by the **claude-mem** corpus.
+ * Nodes are individual entries from `~/.claude-mem/chroma/` —
+ * observations, session summaries, and user prompts that the
+ * claude-mem MCP plugin has captured across sessions. Edges are
+ * cosine-similarity links above the cutoff returned by the Rust
+ * adapter (default 0.55 — MiniLM-L6 sits on a noisier floor than
+ * 768-dim Gemini embeds).
+ *
+ * Layout is a Verlet-style force simulation — repulsion across all
+ * pairs, spring attraction along edges, and a centering pull. SVG
+ * render.
  *
  * Interactions:
  *   - hover    → highlight node + connected edges, show preview card
@@ -22,46 +33,78 @@ import { useActiveProject, useActiveSession } from "@/state/AppState";
  *   - wheel    → zoom (cursor-anchored)
  */
 
-interface SimNode extends GraphNode {
+interface SimNode extends ClaudeMemNode {
   x: number;
   y: number;
   vx: number;
   vy: number;
 }
 
-const KIND_COLOR: Record<MemoryKind, string> = {
-  fact: "var(--accent-bright)",
-  qa: "var(--state-info, #6db3ff)",
-  transcript: "var(--state-warning)",
+const KIND_COLOR: Record<string, string> = {
+  observation: "var(--accent-bright)",
+  session_summary: "var(--state-success, #6dd97a)",
+  user_prompt: "var(--state-info, #6db3ff)",
+  // Fallback for any future doc_type that lands without a frontend
+  // mapping — the Rust adapter passes the value through verbatim.
+  unknown: "var(--text-tertiary)",
 };
 
-const KIND_RADIUS: Record<MemoryKind, number> = {
-  fact: 5,
-  qa: 4,
-  transcript: 6,
+const KIND_RADIUS: Record<string, number> = {
+  observation: 5,
+  session_summary: 6,
+  user_prompt: 4,
+  unknown: 4,
 };
 
-// Force-sim tunables. These were eyeballed against payloads of
-// 50–500 nodes; if it ever feels sticky on small graphs or chaotic
-// on large ones, the first dial to turn is REPEL_K.
-const REPEL_K = 1800; // strength of node-node repulsion
-const LINK_K = 0.04; // strength of edge spring
-const LINK_REST = 90; // resting length of edge spring (px)
-const CENTER_K = 0.012; // pull toward center
+function colorFor(kind: string): string {
+  return KIND_COLOR[kind] ?? KIND_COLOR.unknown;
+}
+
+function radiusFor(kind: string): number {
+  return KIND_RADIUS[kind] ?? KIND_RADIUS.unknown;
+}
+
+// Force-sim tunables. Same values as the prior FTS-backed graph —
+// they were tuned against payloads of 50–800 nodes.
+const REPEL_K = 1800;
+const LINK_K = 0.04;
+const LINK_REST = 90;
+const CENTER_K = 0.012;
 const DAMPING = 0.82;
-const MIN_KE = 0.05; // total kinetic energy below which we pause
-const MAX_DT_FRAMES = 2; // cap on dt to keep things stable when tab is backgrounded
+const MIN_KE = 0.05;
+const MAX_DT_FRAMES = 2;
+
+/**
+ * Best-guess of which claude-mem `project` value matches the active
+ * RLI project. claude-mem stores `project` as the basename of cwd
+ * (e.g. `RLI`, `sckry_0.1`, `reach.sckry`). When the active RLI
+ * project's path basename doesn't match anything in the corpus, we
+ * fall through to "all projects" so the user always sees something.
+ */
+function pickDefaultProject(
+  activePath: string | null | undefined,
+  available: string[],
+): string | null {
+  if (!activePath) return null;
+  const segs = activePath.split("/").filter(Boolean);
+  const base = segs[segs.length - 1];
+  if (!base) return null;
+  if (available.includes(base)) return base;
+  // Sometimes claude-mem stores `parent/child` (subworktree). Look
+  // for any available project that ends with our basename.
+  const suffixHit = available.find((p) => p.endsWith(`/${base}`));
+  return suffixHit ?? null;
+}
 
 export function GraphView() {
   const project = useActiveProject();
-  const session = useActiveSession();
-  const [data, setData] = useState<GraphPayload | null>(null);
+  const [data, setData] = useState<ClaudeMemPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [scope, setScope] = useState<"project" | "session">("project");
+  /** null = all projects, "" = pending default, string = filter. */
+  const [projectFilter, setProjectFilter] = useState<string | null | "">("");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // Pan/zoom transform applied to the whole graph group.
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
@@ -71,15 +114,25 @@ export function GraphView() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    const args =
-      scope === "session"
-        ? { projectId: project?.id, sessionId: session?.id }
-        : { projectId: project?.id };
+    // First load (projectFilter === "") fetches with no filter to
+    // discover `available_projects`, then we lock in a sensible
+    // default before showing the graph.
+    const probe = projectFilter === "";
     memory
-      .graph(args)
+      .claudeMemGraph(probe ? {} : { project: projectFilter ?? undefined })
       .then((p) => {
         if (cancelled) return;
-        setData(p);
+        if (probe) {
+          const guess = pickDefaultProject(project?.path, p.available_projects);
+          if (guess && guess !== null) {
+            setProjectFilter(guess);
+          } else {
+            setProjectFilter(null);
+            setData(p);
+          }
+        } else {
+          setData(p);
+        }
       })
       .catch((e) => {
         if (cancelled) return;
@@ -91,7 +144,7 @@ export function GraphView() {
     return () => {
       cancelled = true;
     };
-  }, [project?.id, session?.id, scope]);
+  }, [project?.path, projectFilter]);
 
   // ----- track container size for centering / viewport math -----
   useEffect(() => {
@@ -109,7 +162,6 @@ export function GraphView() {
 
   // ----- force simulation -----
   const simNodesRef = useRef<SimNode[]>([]);
-  // Adjacency for the spring force, by node id.
   const adjacencyRef = useRef<Map<string, Array<{ other: string; w: number }>>>(
     new Map(),
   );
@@ -135,8 +187,6 @@ export function GraphView() {
       if (existing) {
         return { ...n, x: existing.x, y: existing.y, vx: 0, vy: 0 };
       }
-      // Seed new nodes on a small spiral so they don't all overlap
-      // at the centre on first render.
       const r = 40 + Math.sqrt(i) * 12;
       const a = i * 2.4;
       return {
@@ -159,13 +209,10 @@ export function GraphView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
-  // RAF loop. Runs the force step until kinetic energy stays below
-  // MIN_KE for ~30 frames, then pauses. Resumed by any interaction
-  // that bumps node positions (drag, refetch, etc.).
   useEffect(() => {
     const step = (ts: number) => {
       const last = lastTsRef.current || ts;
-      const dtRaw = (ts - last) / 16.6667; // normalize to ~60fps frames
+      const dtRaw = (ts - last) / 16.6667;
       const dt = Math.min(dtRaw, MAX_DT_FRAMES);
       lastTsRef.current = ts;
 
@@ -174,8 +221,6 @@ export function GraphView() {
       const cx = size.w / 2;
       const cy = size.h / 2;
 
-      // Repulsion: O(N²). For our 1500-cap this is fine on a modern
-      // CPU at 60fps. If we ever uncap, swap in a Barnes-Hut quadtree.
       for (let i = 0; i < nodes.length; i++) {
         const a = nodes[i];
         for (let j = i + 1; j < nodes.length; j++) {
@@ -194,7 +239,6 @@ export function GraphView() {
         }
       }
 
-      // Edge spring + centering pull.
       for (const a of nodes) {
         const links = adj.get(a.id);
         if (links) {
@@ -214,7 +258,6 @@ export function GraphView() {
         a.vy += (cy - a.y) * CENTER_K * dt;
       }
 
-      // Integrate, damp, accumulate kinetic energy.
       let ke = 0;
       for (const n of nodes) {
         n.vx *= DAMPING;
@@ -248,8 +291,6 @@ export function GraphView() {
         rafRef.current = null;
       }
     };
-    // Re-arm whenever the data set or size changes — both can disturb
-    // the equilibrium and we want the sim to keep running.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, size.w, size.h]);
 
@@ -306,7 +347,7 @@ export function GraphView() {
 
   // ----- render -----
   const nodes = simNodesRef.current;
-  const edges = data?.edges ?? [];
+  const edges: GraphEdge[] = data?.edges ?? [];
   const focusedNode = focusId ? nodes.find((n) => n.id === focusId) : null;
 
   return (
@@ -321,12 +362,17 @@ export function GraphView() {
       }}
     >
       <Toolbar
-        scope={scope}
-        onScope={setScope}
         loading={loading}
         nodeCount={data?.nodes.length ?? 0}
         edgeCount={edges.length}
         orphans={data?.orphan_count ?? 0}
+        total={data?.total ?? 0}
+        availableProjects={data?.available_projects ?? []}
+        projectFilter={projectFilter === "" ? null : projectFilter}
+        onProjectFilter={(v) => {
+          setProjectFilter(v);
+          setSelectedId(null);
+        }}
       />
 
       <svg
@@ -354,8 +400,8 @@ export function GraphView() {
                 x2={b.x}
                 y2={b.y}
                 stroke="var(--text-tertiary)"
-                strokeOpacity={dim ? 0.05 : 0.15 + (e.weight - 0.65) * 1.2}
-                strokeWidth={Math.max(0.5, (e.weight - 0.6) * 4)}
+                strokeOpacity={dim ? 0.05 : 0.15 + (e.weight - 0.55) * 1.2}
+                strokeWidth={Math.max(0.5, (e.weight - 0.55) * 4)}
                 pointerEvents="none"
               />
             );
@@ -369,8 +415,8 @@ export function GraphView() {
                 data-graph-node
                 cx={n.x}
                 cy={n.y}
-                r={KIND_RADIUS[n.kind] + (isFocus ? 2 : 0)}
-                fill={KIND_COLOR[n.kind]}
+                r={radiusFor(n.kind) + (isFocus ? 2 : 0)}
+                fill={colorFor(n.kind)}
                 fillOpacity={dim ? 0.2 : 1}
                 stroke={isFocus ? "var(--text-primary)" : "transparent"}
                 strokeWidth={1.5}
@@ -389,11 +435,26 @@ export function GraphView() {
 
       {!loading && data && data.nodes.length === 0 && (
         <Empty>
-          no memories yet — try{" "}
-          <code style={{ fontFamily: "var(--font-mono)" }}>
-            rli-memory add "first fact"
-          </code>{" "}
-          in any pane
+          {data.total === 0 ? (
+            <>
+              no claude-mem entries for{" "}
+              {projectFilter ? <code>{projectFilter}</code> : "any project"} —
+              run a session with the claude-mem MCP plugin enabled to populate{" "}
+              <code style={{ fontFamily: "var(--font-mono)" }}>
+                ~/.claude-mem
+              </code>
+            </>
+          ) : (
+            <>
+              {data.total} {projectFilter ? <code>{projectFilter}</code> : ""}{" "}
+              entries exist, but none of the most-recent {data.orphan_count} have
+              been flushed to claude-mem's HNSW index yet — its background worker
+              hasn't committed them to{" "}
+              <code style={{ fontFamily: "var(--font-mono)" }}>data_level0.bin</code>.
+              Try again in a minute, or pick a different project to see older
+              entries that are already indexed.
+            </>
+          )}
         </Empty>
       )}
       {error && <Empty tone="error">{error}</Empty>}
@@ -403,19 +464,23 @@ export function GraphView() {
 }
 
 function Toolbar({
-  scope,
-  onScope,
   loading,
   nodeCount,
   edgeCount,
   orphans,
+  total,
+  availableProjects,
+  projectFilter,
+  onProjectFilter,
 }: {
-  scope: "project" | "session";
-  onScope: (s: "project" | "session") => void;
   loading: boolean;
   nodeCount: number;
   edgeCount: number;
   orphans: number;
+  total: number;
+  availableProjects: string[];
+  projectFilter: string | null;
+  onProjectFilter: (v: string | null) => void;
 }) {
   return (
     <div
@@ -431,41 +496,35 @@ function Toolbar({
         pointerEvents: "none",
       }}
     >
-      <div
+      <select
+        value={projectFilter ?? ""}
+        onChange={(e) =>
+          onProjectFilter(e.target.value === "" ? null : e.target.value)
+        }
         style={{
-          display: "flex",
-          gap: 0,
+          height: 22,
+          padding: "0 var(--space-2)",
           backgroundColor: "var(--surface-1)",
+          color: "var(--text-secondary)",
           border: "var(--border-1)",
           borderRadius: "var(--radius-sm)",
-          overflow: "hidden",
+          fontFamily: "var(--font-sans)",
+          fontSize: "var(--text-2xs)",
+          fontWeight: "var(--weight-medium)",
+          letterSpacing: "var(--tracking-caps)",
+          textTransform: "uppercase",
           pointerEvents: "auto",
+          cursor: "pointer",
+          appearance: "none",
         }}
       >
-        {(["project", "session"] as const).map((s) => (
-          <button
-            key={s}
-            type="button"
-            onClick={() => onScope(s)}
-            style={{
-              height: 22,
-              padding: "0 var(--space-3)",
-              backgroundColor:
-                scope === s ? "var(--surface-accent-tinted)" : "transparent",
-              color: scope === s ? "var(--accent-bright)" : "var(--text-tertiary)",
-              fontFamily: "var(--font-sans)",
-              fontSize: "var(--text-2xs)",
-              fontWeight: "var(--weight-medium)",
-              letterSpacing: "var(--tracking-caps)",
-              textTransform: "uppercase",
-              border: "none",
-              cursor: "default",
-            }}
-          >
-            {s}
-          </button>
+        <option value="">all projects</option>
+        {availableProjects.map((p) => (
+          <option key={p} value={p}>
+            {p}
+          </option>
         ))}
-      </div>
+      </select>
       <span
         style={{
           fontFamily: "var(--font-mono)",
@@ -473,20 +532,24 @@ function Toolbar({
           color: "var(--text-tertiary)",
         }}
       >
-        {loading ? "loading…" : `${nodeCount} memories · ${edgeCount} links${orphans > 0 ? ` · ${orphans} orphans` : ""}`}
+        {loading
+          ? "loading…"
+          : `${nodeCount} of ${total} nodes · ${edgeCount} links${orphans > 0 ? ` · ${orphans} orphans` : ""}`}
       </span>
     </div>
   );
 }
 
-function DetailCard({ node }: { node: GraphNode }) {
+function DetailCard({ node }: { node: ClaudeMemNode }) {
   return (
     <div
       style={{
         position: "absolute",
         right: 8,
         bottom: 8,
-        maxWidth: 360,
+        maxWidth: 420,
+        maxHeight: "60%",
+        overflow: "auto",
         padding: "var(--space-3)",
         backgroundColor: "var(--surface-2)",
         border: "var(--border-1)",
@@ -509,7 +572,7 @@ function DetailCard({ node }: { node: GraphNode }) {
             width: 6,
             height: 6,
             borderRadius: "var(--radius-pill)",
-            backgroundColor: KIND_COLOR[node.kind],
+            backgroundColor: colorFor(node.kind),
           }}
         />
         <span
@@ -522,9 +585,34 @@ function DetailCard({ node }: { node: GraphNode }) {
             color: "var(--text-tertiary)",
           }}
         >
-          {node.kind}
+          {node.kind.replace(/_/g, " ")}
         </span>
+        {node.project && (
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: "var(--text-2xs)",
+              color: "var(--text-disabled)",
+              marginLeft: "auto",
+            }}
+          >
+            {node.project}
+          </span>
+        )}
       </div>
+      {node.title && (
+        <div
+          style={{
+            fontFamily: "var(--font-sans)",
+            fontSize: "var(--text-sm)",
+            fontWeight: "var(--weight-semibold)",
+            color: "var(--text-primary)",
+            marginBottom: "var(--space-1)",
+          }}
+        >
+          {node.title}
+        </div>
+      )}
       <div
         style={{
           fontFamily: "var(--font-sans)",
@@ -532,6 +620,7 @@ function DetailCard({ node }: { node: GraphNode }) {
           color: "var(--text-primary)",
           lineHeight: "var(--leading-sm)",
           wordBreak: "break-word",
+          whiteSpace: "pre-wrap",
         }}
       >
         {node.content}
@@ -554,6 +643,8 @@ function Empty({
         inset: 0,
         display: "grid",
         placeItems: "center",
+        padding: "var(--space-6)",
+        textAlign: "center",
         fontFamily: "var(--font-mono)",
         fontSize: "var(--text-xs)",
         color:
@@ -561,7 +652,7 @@ function Empty({
         pointerEvents: "none",
       }}
     >
-      {children}
+      <div>{children}</div>
     </div>
   );
 }

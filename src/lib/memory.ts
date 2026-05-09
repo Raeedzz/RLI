@@ -59,6 +59,36 @@ export interface GraphPayload {
   orphan_count: number;
 }
 
+/**
+ * Doc kinds emitted by claude-mem (via its `embedding_metadata.doc_type`
+ * key). Surfaced verbatim from the Rust adapter so future kinds appear
+ * in the graph without a frontend change — `GraphView` falls back to a
+ * neutral color when it sees an unknown value.
+ */
+export type ClaudeMemKind =
+  | "observation"
+  | "session_summary"
+  | "user_prompt"
+  | (string & {});
+
+export interface ClaudeMemNode {
+  id: string;
+  kind: ClaudeMemKind;
+  project: string | null;
+  session_id: string | null;
+  content: string;
+  created_at: number;
+  title: string | null;
+}
+
+export interface ClaudeMemPayload {
+  nodes: ClaudeMemNode[];
+  edges: GraphEdge[];
+  orphan_count: number;
+  available_projects: string[];
+  total: number;
+}
+
 export const memory = {
   store: ({ kind, projectId, sessionId, content, embedding }: StoreArgs) =>
     invoke<string>("memory_store", {
@@ -100,6 +130,30 @@ export const memory = {
   }: { projectId?: string; sessionId?: string } = {}) =>
     invoke<GraphPayload>("memory_graph_data", {
       args: { project_id: projectId, session_id: sessionId },
+    }),
+
+  /**
+   * Read the claude-mem (MCP plugin) corpus directly: pulls embedding
+   * metadata + 384-dim vectors out of `~/.claude-mem/chroma/` and
+   * returns nodes + cosine-similarity edges. This is what powers the
+   * Memory tab — the legacy `graph()` over RLI's own `rli.db` is kept
+   * as a fallback for debugging.
+   *
+   * @param project   filter by claude-mem `project` name (basename of repo)
+   * @param limit     soft cap on returned nodes (default 800)
+   * @param threshold edge cutoff cosine (default 0.55 — MiniLM is noisier than 768-dim)
+   */
+  claudeMemGraph: ({
+    project,
+    limit,
+    threshold,
+  }: {
+    project?: string | null;
+    limit?: number;
+    threshold?: number;
+  } = {}) =>
+    invoke<ClaudeMemPayload>("claude_mem_graph", {
+      args: { project: project ?? null, limit, threshold },
     }),
 
   /**
