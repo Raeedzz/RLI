@@ -256,9 +256,17 @@ function useGitInfo(cwd: string): {
     };
     void pull();
     const id = window.setInterval(pull, POLL_MS);
+    // External nudges (commit+push, merge) so the pill state lands
+    // immediately instead of lagging the next poll cycle.
+    const onRefresh = (e: Event) => {
+      const detail = (e as CustomEvent<{ cwd?: string }>).detail;
+      if (!detail?.cwd || detail.cwd === cwd) void pull();
+    };
+    window.addEventListener("rli-git-refresh", onRefresh);
     return () => {
       cancelled = true;
       window.clearInterval(id);
+      window.removeEventListener("rli-git-refresh", onRefresh);
     };
   }, [cwd, trigger]);
 
