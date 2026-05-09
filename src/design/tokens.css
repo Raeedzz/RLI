@@ -1,6 +1,10 @@
 /* ============================================================
-   RLI design tokens
-   See design-system/README.md for the rationale behind every value.
+   RLI design tokens — Warp-black palette
+   .impeccable.md discipline:
+     - confident dark instrument (Linear / Warp / Superhuman)
+     - one cool accent reserved for active/focused only
+     - never pure #000; cool-tinted near-black
+     - animations on chrome only, exponential easing, exit ≈ 75% enter
    ============================================================ */
 
 :root {
@@ -22,7 +26,7 @@
 
   /* ---- Type weights ---- */
   --weight-regular:  400;
-  --weight-body:     450;   /* light-on-dark adjustment when supported */
+  --weight-body:     450;
   --weight-medium:   500;
   --weight-semibold: 600;
   --weight-bold:     700;
@@ -31,91 +35,90 @@
   --tracking-tight: -0.01em;
   --tracking-base:   0;
   --tracking-wide:   0.02em;
-  --tracking-caps:   0.06em;  /* for all-caps section labels */
+  --tracking-caps:   0.06em;
 
   /* ============================================================
-     COLOR — OKLCH, warm-tinted dark neutrals (hue 60, chroma 0.005)
+     COLOR — OKLCH, cool-tinted near-black neutrals (hue 250, c 0.004)
      ============================================================ */
 
-  /* Surfaces — depth via lightness, not shadow.
-     Warm-tinted greys (chroma 0.008, hue 60). Lifted from pure black so
-     the app reads like a tuned dark instrument, not Apple Terminal. */
-  --surface-0: oklch(16% 0.008 60);  /* terminal/editor backgrounds */
-  --surface-1: oklch(19% 0.008 60);  /* app background, panel backs */
-  --surface-2: oklch(23% 0.008 60);  /* raised — active tabs, palette */
-  --surface-3: oklch(27% 0.008 60);  /* tooltips, dropdowns, hover-on-2 */
-  --surface-4: oklch(31% 0.008 60);  /* hover-on-3 (rare) */
+  /* Surfaces — depth via lightness, not shadow. Never pure #000.
+     Slight cool tint (hue 250) so terminal/editor ANSI colors sit on
+     a faintly cool ground without ever shifting into "AI cyan". */
+  --surface-0: oklch(7%  0.004 250);   /* root background — app behind chrome */
+  --surface-1: oklch(10% 0.004 250);   /* sidebar / right panel base */
+  --surface-2: oklch(13% 0.004 250);   /* main column / tab content */
+  --surface-3: oklch(17% 0.004 250);   /* hover */
+  --surface-4: oklch(22% 0.005 250);   /* active row, focused pane outline */
+  --surface-5: oklch(28% 0.006 250);   /* keyboard chord chips, header borders */
 
-  /* Borders — hairlines */
-  --border-hairline: oklch(24% 0.008 60);
-  --border-default:  oklch(30% 0.008 60);
-  --border-strong:   oklch(38% 0.008 60);
+  /* Borders — almost invisible; depth comes from surface contrast */
+  --border-hairline: oklch(15% 0.004 250);
+  --border-subtle:   oklch(20% 0.004 250);
+  --border-default:  oklch(26% 0.004 250);
+  --border-strong:   oklch(34% 0.005 250);
 
-  /* Text */
-  --text-primary:    oklch(95% 0.005 60);
-  --text-secondary:  oklch(74% 0.005 60);
-  --text-tertiary:   oklch(56% 0.005 60);
-  --text-disabled:   oklch(40% 0.005 60);
-  --text-inverse:    oklch(10% 0.005 60);
+  /* Text — same cool hue, varied lightness */
+  --text-primary:    oklch(96% 0.004 250);
+  --text-secondary:  oklch(74% 0.004 250);
+  --text-tertiary:   oklch(56% 0.004 250);  /* tab summary line */
+  --text-disabled:   oklch(40% 0.004 250);
+  --text-inverse:    oklch(10% 0.004 250);
 
-  /* Single accent — steel blue */
-  --accent:        oklch(68% 0.13 240);
-  --accent-hover:  oklch(72% 0.13 240);
-  --accent-press:  oklch(62% 0.13 240);
-  --accent-muted:  oklch(40% 0.08 240);
-  --accent-focus:  oklch(72% 0.13 240 / 0.4);
-  /* Brighter accent for active-state icons — chroma bumped, lightness
-     up — reads as "on" but never neon. */
-  --accent-bright: oklch(74% 0.16 240);
+  /* Single cool accent — used ONLY for active/focused/running.
+     Slightly cyan-leaning blue, distinct from "AI purple" aesthetic. */
+  --accent:        oklch(72% 0.13 220);
+  --accent-hover:  oklch(78% 0.13 220);
+  --accent-press:  oklch(66% 0.13 220);
+  --accent-muted:  oklch(40% 0.06 220);
+  --accent-focus:  oklch(72% 0.13 220 / 0.40);
+  --accent-bright: oklch(78% 0.14 220);
 
-  /* Diagnostic colors — restrained vibrancy */
-  --state-error:    oklch(64% 0.16 25);
-  --state-warning:  oklch(78% 0.13 75);
-  --state-success:  oklch(70% 0.13 145);
-  --state-info:     oklch(72% 0.10 220);
+  /* Semantic states — only inside semantic surfaces. Never decorative. */
+  --state-error:    oklch(70% 0.16  25);
+  --state-warning:  oklch(80% 0.14  85);
+  --state-success:  oklch(78% 0.16 145);
+  --state-info:     oklch(76% 0.10 200);
 
-  --state-error-bright:   oklch(72% 0.18  25);
-  --state-warning-bright: oklch(82% 0.15  75);
-  --state-success-bright: oklch(76% 0.16 145);
+  --state-error-bright:   oklch(76% 0.18  25);
+  --state-warning-bright: oklch(84% 0.16  85);
+  --state-success-bright: oklch(82% 0.17 145);
 
-  --state-error-bg:    oklch(22% 0.05 25);
-  --state-warning-bg:  oklch(22% 0.04 75);
+  --state-error-bg:    oklch(20% 0.05  25);
+  --state-warning-bg:  oklch(20% 0.04  85);
   --state-success-bg:  oklch(20% 0.04 145);
-  --state-info-bg:     oklch(20% 0.03 220);
+  --state-info-bg:     oklch(20% 0.03 200);
 
-  /* Pre-mixed surface tints — chrome warms toward the accent without
-     ever drowning the dark grey. Saves a color-mix() everywhere. */
-  --surface-accent-soft:   color-mix(in oklch, var(--surface-1), var(--accent) 6%);
-  --surface-accent-tinted: color-mix(in oklch, var(--surface-2), var(--accent) 10%);
-  --surface-success-soft:  color-mix(in oklch, var(--surface-1), var(--state-success) 8%);
-  --surface-warning-soft:  color-mix(in oklch, var(--surface-1), var(--state-warning) 8%);
-  --surface-error-soft:    color-mix(in oklch, var(--surface-1), var(--state-error) 8%);
+  /* Pre-mixed surface tints — soft accent tint behind active rows.
+     Only used inside semantic surfaces (active worktree row, focused
+     chatbox), never as decorative chrome. */
+  --surface-accent-soft:   color-mix(in oklch, var(--surface-2), var(--accent) 6%);
+  --surface-accent-tinted: color-mix(in oklch, var(--surface-3), var(--accent) 9%);
+  --surface-success-soft:  color-mix(in oklch, var(--surface-1), var(--state-success) 7%);
+  --surface-warning-soft:  color-mix(in oklch, var(--surface-1), var(--state-warning) 7%);
+  --surface-error-soft:    color-mix(in oklch, var(--surface-1), var(--state-error) 7%);
 
-  /* Diff (git panel) */
-  --diff-add-bg:     oklch(22% 0.04 145);
-  --diff-add-fg:     oklch(82% 0.10 145);
-  --diff-remove-bg:  oklch(22% 0.05 25);
-  --diff-remove-fg:  oklch(82% 0.12 25);
-  --diff-change-bg:  oklch(22% 0.04 75);
+  /* Diff palette — restrained tints */
+  --diff-add-bg:     oklch(28% 0.06 145 / 0.32);
+  --diff-add-fg:     oklch(82% 0.14 145);
+  --diff-remove-bg:  oklch(28% 0.06  25 / 0.30);
+  --diff-remove-fg:  oklch(82% 0.16  25);
+  --diff-change-bg:  oklch(28% 0.06  85 / 0.30);
 
-  /* Modal backdrop — the only legit alpha besides focus ring */
-  --backdrop: oklch(0% 0 0 / 0.45);
+  /* Modal backdrop */
+  --backdrop: oklch(0% 0 0 / 0.55);
 
   /* ============================================================
-     TAG PALETTE — user-assignable colors for sessions and projects.
-     Workshop-pigment names. Restrained chroma (0.10–0.13), consistent
-     ~64% lightness so no color screams louder than another. Distinct
-     on the warm-dark surfaces, none in the AI-slop neon zone.
+     TAG PALETTE — restrained chroma, distinct on the cool-dark surface.
      ============================================================ */
 
-  --tag-default: var(--accent);          /* steel blue 240 — system default */
-  --tag-rust:    oklch(66% 0.13  25);    /* warm red-orange */
-  --tag-amber:   oklch(70% 0.13  60);    /* burnt orange */
-  --tag-moss:    oklch(64% 0.12 135);    /* deep sage */
-  --tag-pine:    oklch(60% 0.11 180);    /* shadow teal */
-  --tag-slate:   oklch(66% 0.10 215);    /* dusk blue-gray */
-  --tag-iris:    oklch(66% 0.13 275);    /* periwinkle indigo */
-  --tag-rose:    oklch(66% 0.12 340);    /* dusty rose */
+  --tag-default: var(--accent);
+  --tag-rust:    oklch(66% 0.13  25);
+  --tag-amber:   oklch(70% 0.13  60);
+  --tag-moss:    oklch(64% 0.12 135);
+  --tag-pine:    oklch(60% 0.11 180);
+  --tag-slate:   oklch(66% 0.10 215);
+  --tag-iris:    oklch(66% 0.13 275);
+  --tag-rose:    oklch(66% 0.12 340);
 
   /* ============================================================
      SPACING — 4pt base
@@ -137,7 +140,7 @@
   --space-20:  80px;
 
   /* ============================================================
-     RADII — friendlier curves, still desktop-precise
+     RADII
      ============================================================ */
 
   --radius-xs:   3px;
@@ -151,7 +154,7 @@
      BORDERS
      ============================================================ */
 
-  --border-1: 1px solid var(--border-hairline);
+  --border-1: 1px solid var(--border-subtle);
   --border-2: 1px solid var(--border-default);
   --border-3: 1px solid var(--border-strong);
 
@@ -159,28 +162,29 @@
      SHADOWS — only for floating surfaces
      ============================================================ */
 
-  --shadow-popover: 0 4px 16px oklch(0% 0 0 / 0.5),
+  --shadow-popover: 0 4px 16px oklch(0% 0 0 / 0.55),
                     0 0 0 1px var(--border-default);
-  --shadow-modal:   0 16px 48px oklch(0% 0 0 / 0.55),
+  --shadow-modal:   0 16px 48px oklch(0% 0 0 / 0.65),
                     0 0 0 1px var(--border-default);
 
   /* ============================================================
-     MOTION — 100/300/500 rule, exponential easing
+     MOTION — chrome-only, exponential easing
+     Exit durations are 75% of entrance.
      ============================================================ */
 
   --motion-instant: 100ms;
-  --motion-fast:    150ms;
-  --motion-base:    200ms;
-  --motion-slow:    280ms;
+  --motion-fast:    180ms;
+  --motion-base:    240ms;
+  --motion-slow:    320ms;
   --motion-slower:  400ms;
 
-  /* Exit durations are 75% of entrance */
-  --motion-exit-fast: 110ms;
-  --motion-exit-base: 150ms;
-  --motion-exit-slow: 210ms;
+  --motion-exit-fast: 140ms;
+  --motion-exit-base: 180ms;
+  --motion-exit-slow: 240ms;
 
   --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
   --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out-expo:  cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-quart:  cubic-bezier(0.5, 0, 0.75, 0);
   --ease-in-out:    cubic-bezier(0.65, 0, 0.35, 1);
 
@@ -202,14 +206,17 @@
      SIZES — chrome metrics
      ============================================================ */
 
+  --sidebar-width:    248px;   /* projects + worktrees */
+  --right-width:      372px;   /* files / changes / checks / memory + secondary terminal */
+
   --rail-width:         48px;
-  --tab-height:         44px;   /* taller than 32 — accommodates 2-line layout */
+  --tab-height:         44px;   /* taller — accommodates 2-line tab (name + summary) */
   --pane-header-height: 28px;
   --filter-bar-height:  32px;
   --section-header-height: 24px;
-  --row-height-sm:      28px;   /* file rows, log rows */
-  --row-height-md:      36px;   /* palette items */
-  --row-height-lg:      48px;   /* connection rows */
+  --row-height-sm:      28px;
+  --row-height-md:      36px;
+  --row-height-lg:      48px;
   --palette-width:      560px;
   --margin-card-width:  320px;
 }
@@ -225,7 +232,7 @@
 html, body, #root {
   height: 100%;
   margin: 0;
-  background: var(--surface-1);
+  background: var(--surface-0);
   color: var(--text-primary);
   font-family: var(--font-sans);
   font-size: var(--text-base);
@@ -236,12 +243,11 @@ html, body, #root {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
-  user-select: none;          /* desktop app default — no accidental selection on chrome */
+  user-select: none;
   cursor: default;
   overflow: hidden;
 }
 
-/* Restore selection where it makes sense */
 input, textarea,
 .allow-select,
 .terminal-content,
@@ -250,7 +256,6 @@ input, textarea,
   cursor: text;
 }
 
-/* Reset button defaults — every <button> in RLI is styled from scratch */
 button {
   font: inherit;
   color: inherit;
@@ -260,18 +265,13 @@ button {
   cursor: default;
 }
 
-/* Focus rings — keyboard only. Tab/arrow keyboard navigation lights
-   up the focused element with the same blue used for accents elsewhere.
-   `accent-bright` (not `accent`) so it pops against the surface tints
-   used on most focusable controls. */
 :focus { outline: none; }
 :focus-visible {
-  outline: 2px solid var(--accent-bright);
+  outline: 1px solid var(--accent);
   outline-offset: 1px;
   border-radius: var(--radius-sm);
 }
 
-/* Scrollbars — thin, surface-tinted */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--border-default) transparent;
@@ -284,25 +284,24 @@ button {
 }
 *::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
 
-/* Tabular numerals globally — counts, sizes, durations all align */
 body { font-variant-numeric: tabular-nums; }
 
-/* Disable ligatures in code surfaces */
 .terminal-content, .editor-content, code, pre, kbd, samp {
   font-variant-ligatures: none;
 }
 
-/* Reduced motion — preserve function, kill spatial movement */
+/* Reduced motion — collapse all animation/transition durations. Every
+   interaction must still complete; nothing is gated on motion. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
-    transition-duration: 80ms !important;
-    transition-timing-function: linear !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
 
 /* ============================================================
-   UTILITY CLASSES — tiny, opinionated
+   UTILITY CLASSES
    ============================================================ */
 
 .hairline-h { border-top: var(--border-1); }
@@ -311,11 +310,21 @@ body { font-variant-numeric: tabular-nums; }
 .tabular { font-variant-numeric: tabular-nums; }
 .mono    { font-family: var(--font-mono); font-variant-ligatures: none; }
 
-/* All-caps section labels (tracking-caps + small) */
 .label {
   font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
   color: var(--text-tertiary);
+}
+
+/* Running-agent loader: a 270° arc rotating linearly. Restrained — no
+   glow, no surrounding pulse. Stops within 200ms of agent going idle. */
+@keyframes rli-loader-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.rli-loader-spin {
+  animation: rli-loader-spin 1.4s linear infinite;
+  transform-origin: 50% 50%;
 }

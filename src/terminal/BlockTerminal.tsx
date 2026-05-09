@@ -21,27 +21,42 @@ import { detectClaude } from "@/lib/claudeUsage";
 /** Command names that always run as an interactive TUI agent. */
 function isAgentCommand(command: string): boolean {
   const c = command.toLowerCase();
-  return c === "claude" || c.includes("codex") || c.includes("aider");
+  return (
+    c === "claude" ||
+    c.includes("codex") ||
+    c.includes("aider") ||
+    c === "gemini" ||
+    c === "gemini-cli"
+  );
 }
 
+export type DetectedAgentCli = "claude" | "codex" | "gemini" | null;
+
 /**
- * True when a full command line the user typed (e.g. "claude --resume",
- * "ANTHROPIC_API_KEY=foo claude", "/usr/local/bin/codex chat") invokes
- * one of our known TUI agents. Strips leading env-var assignments and
- * resolves the basename so wrapper paths still match.
+ * Classify the CLI invoked by a command line — handles env-var prefixes
+ * and absolute-path wrappers. Returns null for non-agent commands.
  */
-function commandLineIsAgent(line: string): boolean {
+function detectCliFromCommandLine(line: string): DetectedAgentCli {
   const tokens = line.trim().toLowerCase().split(/\s+/).filter(Boolean);
   for (const t of tokens) {
     if (/^[a-z_][a-z0-9_]*=/i.test(t)) continue;
-    const prog = t.split("/").pop() ?? t;
-    return (
-      prog === "claude" ||
-      prog.startsWith("codex") ||
-      prog.startsWith("aider")
-    );
+    const prog = (t.split("/").pop() ?? t).split(/[?#]/)[0];
+    if (prog === "claude" || prog === "claude-code") return "claude";
+    if (prog.startsWith("codex")) return "codex";
+    if (prog === "gemini" || prog === "gemini-cli") return "gemini";
+    if (prog.startsWith("aider")) return null; // aider isn't in the helper roster
+    return null;
   }
-  return false;
+  return null;
+}
+
+/**
+ * True when a full command line invokes one of the known TUI agents.
+ * Kept around for callers that just need a yes/no — internally derived
+ * from {@link detectCliFromCommandLine}.
+ */
+function commandLineIsAgent(line: string): boolean {
+  return detectCliFromCommandLine(line) !== null;
 }
 
 interface Props {
@@ -51,6 +66,12 @@ interface Props {
   command: string;
   args?: string[];
   cwd?: string;
+  /**
+   * When false, skip the helper-agent–driven activity-summary polling.
+   * Surfaced via `settings.autoSummarize` so users with many parallel
+   * agents can opt out of the per-PTY 4s subprocess cadence.
+   */
+  autoSummarize?: boolean;
   /**
    * Active project id. Forwarded to term_start so the PTY's env has
    * `RLI_PROJECT_ID` set — that's how the `rli-memory` CLI (and any
@@ -74,8 +95,13 @@ interface Props {
    * to session state so the StatusBar can hide the Claude pill the
    * moment the agent exits (instead of leaving it stuck on for the
    * remainder of the 5h window).
+   *
+   * `cli` is the detected agent CLI (claude / codex / gemini), or
+   * null when no agent is running or the command line wasn't a known
+   * agent. Used by the helper-agent layer to route summaries / commit
+   * messages / PR drafts to the same CLI the user is actively driving.
    */
-  onAgentRunningChange?: (running: boolean) => void;
+  onAgentRunningChange?: (running: boolean, cli: DetectedAgentCli) => void;
   /**
    * Fires whenever the live activity summary changes — i.e. what the
    * terminal is currently doing in one line. Empty string means idle.
@@ -110,6 +136,7 @@ export function BlockTerminal({
   command,
   args,
   cwd,
+  autoSummarize = true,
   projectId,
   sessionId,
   onClaudeDetected,
@@ -169,17 +196,6 @@ export function BlockTerminal({
   const directAgent = useMemo(() => isAgentCommand(command), [command]);
   const [foregroundIsAgent, setForegroundIsAgent] = useState(directAgent);
 
-  // Tell the parent (which dispatches into session state) every time
-  // the foreground-agent flag flips. Done in an effect rather than
-  // inside setForegroundIsAgent calls so we don't have to remember
-  // to forward at every callsite.
-  const lastReportedAgentRef = useRef(false);
-  useEffect(() => {
-    if (foregroundIsAgent !== lastReportedAgentRef.current) {
-      lastReportedAgentRef.current = foregroundIsAgent;
-      onAgentRunningChangeRef.current?.(foregroundIsAgent);
-    }
-  }, [foregroundIsAgent]);
   // What the user typed to start the currently-running command.
   // Populates the synthetic header on the in-progress LiveBlock; used
   // to trim zsh's command-echo line out of the live grid body so the
@@ -189,31 +205,58 @@ export function BlockTerminal({
     directAgent ? command : "",
   );
 
-  // While an agent (claude / codex / aider) is foregrounded, "claude"
-  // tells you nothing about what's actually happening. Ask the Rust
-  // side to summarize the last 3 turns of the transcript via Gemini
-  // Flash-Lite — that lands a phrase like "wiring up the OSC 133
-  // segmenter" instead. Results are cached server-side keyed by the
-  // turn uuids, so polling here is cheap unless a new exchange has
-  // actually landed.
+  // Tell the parent (which dispatches into session state) every time
+  // the foreground-agent flag flips. Done in an effect rather than
+  // inside setForegroundIsAgent calls so we don't have to remember
+  // to forward at every callsite. Includes the detected CLI so the
+  // helper-agent layer can route to the same binary the user is
+  // actively using.
+  const lastReportedAgentRef = useRef(false);
+  useEffect(() => {
+    if (foregroundIsAgent !== lastReportedAgentRef.current) {
+      lastReportedAgentRef.current = foregroundIsAgent;
+      const cli: DetectedAgentCli = foregroundIsAgent
+        ? detectCliFromCommandLine(activeCommand || command)
+        : null;
+      onAgentRunningChangeRef.current?.(foregroundIsAgent, cli);
+    }
+  }, [foregroundIsAgent, activeCommand, command]);
+
+  // While a Claude-Code session is foregrounded, the launch command
+  // ("claude") tells you nothing about what's actually happening. Ask
+  // the helper-agent layer to summarize the last 3 turns of the
+  // transcript — that lands a phrase like "wiring up the OSC 133
+  // segmenter" instead. The Rust side caches the result keyed by the
+  // turn uuids, so polling here is cheap unless a new exchange landed.
+  //
+  // Codex / Gemini have their own transcript layouts; for now we only
+  // run this against Claude transcripts (the only one the helper
+  // currently knows how to parse). Other CLIs fall back to the launch
+  // command via the activeCommand path below.
   const [claudeSummary, setClaudeSummary] = useState<string | null>(null);
   useEffect(() => {
+    if (!autoSummarize) {
+      setClaudeSummary(null);
+      return;
+    }
     if (!foregroundIsAgent) {
       setClaudeSummary(null);
       return;
     }
     if (!cwd) return;
+    const isClaudeLine = commandLineIsAgent(activeCommand || command)
+      && detectCliFromCommandLine(activeCommand || command) === "claude";
+    if (!isClaudeLine) return;
     let cancelled = false;
     const tick = async () => {
       try {
         const summary = await invoke<string | null>("claude_activity_summary", {
           projectCwd: cwd,
+          cli: "claude",
         });
         if (!cancelled) setClaudeSummary(summary);
       } catch {
-        // Transient failures (file rotation mid-read, network blip on
-        // the Gemini call) just keep the last value — better than
-        // blanking the subtitle.
+        // Transient failures keep the last value — better than blanking.
       }
     };
     void tick();
@@ -222,7 +265,7 @@ export function BlockTerminal({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [foregroundIsAgent, cwd]);
+  }, [foregroundIsAgent, cwd, activeCommand, command]);
 
   // Forward the live activity summary up to the pane chrome, where it
   // surfaces as the subtitle next to the pane header. Trimmed and

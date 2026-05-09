@@ -13,17 +13,14 @@
 //!   - `worktree_add`, `worktree_remove` — session lifecycle (Task #9)
 //!   - `log` — for the merge-back UI
 //!g
-//! AI commit messages live in this module too (`git_ai_commit_message`)
-//! since they need both the staged diff and the Gemini client.
+//! AI commit messages now live in the helper-agent layer — see
+//! `helper_agent.rs` and `src/lib/git.ts::aiCommitMessage`.
 
 use std::path::Path;
 use std::process::Output;
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
 use tokio::process::Command;
-
-use crate::gemini::{self, GeminiState, GenerateArgs};
 
 /* ------------------------------------------------------------------
    Helpers - test change
@@ -436,44 +433,12 @@ pub struct LogEntry {
 }
 
 /* ------------------------------------------------------------------
-   AI commit message — Gemini Flash-Lite
+   AI commit message — moved to the helper-agent layer.
+
+   The frontend now reads the staged diff via `git_diff` and calls
+   `helper_run` with the worktree's CLI directly. See
+   `src/lib/git.ts::aiCommitMessage` for the new path.
    ------------------------------------------------------------------ */
-
-#[tauri::command]
-pub async fn git_ai_commit_message(
-    state: State<'_, GeminiState>,
-    cwd: String,
-) -> Result<String, String> {
-    // Get the staged diff. Truncate to ~8KB so we don't blow Flash-Lite's
-    // context with a huge changeset.
-    let diff = run(&cwd, &["diff", "--staged", "--no-color"]).await?;
-    if diff.trim().is_empty() {
-        return Err("no staged changes".into());
-    }
-    let trimmed = if diff.len() > 8000 {
-        let mut s = diff.chars().take(8000).collect::<String>();
-        s.push_str("\n\n[…truncated…]");
-        s
-    } else {
-        diff
-    };
-
-    let system = "You write commit messages for git diffs. Output ONLY the commit message — no explanation, no markdown, no quotes. Format: a short imperative subject under 60 chars on the first line, then optionally a blank line and a short body explaining the WHY (not the what — the diff already shows that). Be specific. Skip the body if the change is small enough.";
-    let prompt = format!("Write a commit message for this staged diff:\n\n{trimmed}");
-
-    let msg = gemini::gemini_generate(
-        state,
-        GenerateArgs {
-            prompt,
-            system: Some(system.to_string()),
-            max_tokens: Some(200),
-            temperature: Some(0.4),
-        },
-    )
-    .await?;
-
-    Ok(msg.trim().to_string())
-}
 
 /* ------------------------------------------------------------------
    Tests

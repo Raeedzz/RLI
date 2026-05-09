@@ -20,13 +20,13 @@ interface DiffLine {
 }
 
 /**
- * Unified diff viewer overlay. Shown over the workspace when the user
- * clicks a file in GitPanel. ‐/+ lines are tinted with `--diff-add-bg`
- * and `--diff-remove-bg`; line numbers track old/new sides for hunk
- * navigation. Esc or × dismisses.
+ * Unified diff viewer. Mounted as a tab in the main column when the
+ * user clicks a file row in the right panel's Changes tab. ‐/+ lines
+ * are tinted with `--diff-add-bg` and `--diff-remove-bg`; line numbers
+ * track old/new sides for hunk navigation. Esc or × dismisses.
  *
  * Renders as `position:absolute; inset:0` — the parent is responsible
- * for being a positioning context. Used inside SplitLayout.
+ * for being a positioning context.
  */
 export function DiffView({ projectPath, filePath, staged, onClose }: Props) {
   const [raw, setRaw] = useState<string | null>(null);

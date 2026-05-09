@@ -13,20 +13,18 @@ mod browser;
 mod claude_usage;
 mod connections;
 mod fs;
-mod gemini;
 mod git;
-#[cfg(target_os = "macos")]
-mod keychain;
+mod helper_agent;
 mod memory;
+mod pr;
 mod search;
 mod state;
 mod term;
+mod worktree;
 
 #[cfg(target_os = "macos")]
 use browser::BrowserState;
-use gemini::GeminiState;
 use memory::MemoryState;
-use tauri::Manager;
 use term::TerminalState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -38,7 +36,6 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
         .manage(TerminalState::default())
-        .manage(GeminiState::default())
         .manage(MemoryState::default())
         .manage(memory::daemon::MemoryDaemonPort::default());
 
@@ -78,15 +75,6 @@ pub fn run() {
             // anywhere on PATH. No-op if the file is already present
             // and matches the bundled version.
             install_memory_cli();
-
-            // Eagerly warm the Gemini key cache from disk. The file
-            // read never prompts (no Touch ID, no keychain ACL), so
-            // this is free — and means the user's FIRST gemini call
-            // (commit message, AskCard, session summary, anything)
-            // hits a hot cache and returns immediately. No more
-            // password/fingerprint friction at action time.
-            let gemini_state = app.state::<GeminiState>();
-            gemini::warm_cache_from_disk(&gemini_state);
             Ok(())
         });
 
@@ -97,12 +85,6 @@ pub fn run() {
             term::term_input,
             term::term_resize,
             term::term_close,
-            // Gemini (Task #11)
-            gemini::gemini_set_key,
-            gemini::gemini_clear_key,
-            gemini::gemini_key_status,
-            gemini::gemini_generate,
-            gemini::gemini_embed,
             // Memory (Task #12)
             memory::memory_store,
             memory::memory_recall,
@@ -126,7 +108,18 @@ pub fn run() {
             git::git_worktree_add,
             git::git_worktree_remove,
             git::git_log,
-            git::git_ai_commit_message,
+            // Worktree lifecycle (v2 UI rewrite)
+            worktree::worktree_list,
+            worktree::worktree_create,
+            worktree::worktree_archive,
+            worktree::worktree_restore,
+            worktree::archive_list,
+            // Helper agent (claude/codex/gemini one-shot)
+            helper_agent::helper_run,
+            helper_agent::detect_agent,
+            // Pull request creation
+            pr::pr_draft,
+            pr::pr_create,
             // Connections (Task #10)
             connections::connections_scan,
             // Search (Task #15)

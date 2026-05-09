@@ -36,7 +36,6 @@ use super::{
     extract, recall_in_conn, with_conn, Memory, MemoryKind, MemoryState, RecallArgs,
     StoreArgs,
 };
-use crate::gemini::GeminiState;
 
 const PORT_FIRST: u16 = 5555;
 const PORT_LAST: u16 = 5599;
@@ -189,6 +188,11 @@ struct ExtractBody {
     transcript: String,
     #[serde(default)]
     project_id: Option<String>,
+    /// Which CLI agent to shell out to. Defaults to "claude" when
+    /// unset. Caller (rli-memory CLI / in-pane agent) typically
+    /// knows which CLI it is via the `RLI_AGENT_CLI` env var.
+    #[serde(default)]
+    cli: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -207,8 +211,9 @@ async fn memory_extract<R: Runtime>(
     Json(body): Json<ExtractBody>,
 ) -> Response {
     let _ = body.project_id; // reserved for future scoping; not stored here
-    let gem = ctx.app.state::<GeminiState>();
-    match extract::extract_facts(&body.transcript, &gem).await {
+    let _ = ctx; // app handle reserved for future per-project routing
+    let cli = body.cli.unwrap_or_else(|| "claude".to_string());
+    match extract::extract_facts(&body.transcript, &cli).await {
         Ok(facts) => Json(ExtractResponse {
             facts: facts
                 .into_iter()

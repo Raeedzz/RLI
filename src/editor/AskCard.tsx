@@ -1,8 +1,8 @@
 import { motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { marginCardVariants } from "@/design/motion";
-import { gemini } from "@/lib/gemini";
-import { useAppDispatch } from "@/state/AppState";
+import { helperRun } from "@/lib/helper-agent";
+import { useActiveWorktree, useAppState } from "@/state/AppState";
 
 interface Props {
   selection: string;
@@ -41,22 +41,17 @@ export function AskCard({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const ref = useRef<HTMLDivElement>(null);
-  const dispatch = useAppDispatch();
-  const needsKey =
-    error?.toLowerCase().includes("api key") ||
-    error?.toLowerCase().includes("not configured");
+  const worktree = useActiveWorktree();
+  const { settings } = useAppState();
 
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
       try {
-        const prompt = buildPrompt(selection, context, pathHint);
-        const out = await gemini.generate({
-          prompt,
-          system: ASK_SYSTEM,
-          maxTokens: 220,
-          temperature: 0.4,
-        });
+        const prompt = `${ASK_SYSTEM}\n\n${buildPrompt(selection, context, pathHint)}`;
+        const cwd = worktree?.path ?? "";
+        const cli = worktree?.agentCli ?? settings.defaultHelperCli;
+        const out = await helperRun(cwd, cli, "explain", prompt);
         if (cancelled) return;
         setAnswer(out.trim());
       } catch (e) {
@@ -70,7 +65,14 @@ export function AskCard({
     return () => {
       cancelled = true;
     };
-  }, [selection, context, pathHint]);
+  }, [
+    selection,
+    context,
+    pathHint,
+    worktree?.path,
+    worktree?.agentCli,
+    settings.defaultHelperCli,
+  ]);
 
   // Esc + click-outside dismiss
   useEffect(() => {
@@ -152,40 +154,14 @@ export function AskCard({
         <div style={{ display: "grid", gap: "var(--space-2)" }}>
           <div
             style={{
-              color: needsKey ? "var(--text-secondary)" : "var(--state-error)",
+              color: "var(--state-error)",
               fontSize: "var(--text-xs)",
-              fontFamily: needsKey ? "var(--font-sans)" : "var(--font-mono)",
+              fontFamily: "var(--font-mono)",
               lineHeight: "var(--leading-xs)",
             }}
           >
-            {needsKey
-              ? "Set your Gemini API key to use highlight-and-ask."
-              : error}
+            {error}
           </div>
-          {needsKey && (
-            <button
-              type="button"
-              onClick={() => {
-                onClose();
-                dispatch({ type: "set-api-key-dialog", open: true });
-              }}
-              style={{
-                height: 24,
-                padding: "0 var(--space-3)",
-                fontFamily: "var(--font-sans)",
-                fontSize: "var(--text-xs)",
-                fontWeight: "var(--weight-medium)",
-                color: "var(--text-inverse)",
-                backgroundColor: "var(--accent)",
-                border: "none",
-                borderRadius: "var(--radius-sm)",
-                cursor: "default",
-                justifySelf: "start",
-              }}
-            >
-              set API key
-            </button>
-          )}
         </div>
       )}
 

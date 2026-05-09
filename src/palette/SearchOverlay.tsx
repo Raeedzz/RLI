@@ -5,11 +5,10 @@ import { search, type SearchHit } from "@/lib/search";
 import { fs } from "@/lib/fs";
 import {
   useActiveProject,
-  useActiveSession,
+  useActiveWorktree,
   useAppDispatch,
   useAppState,
 } from "@/state/AppState";
-import { leaves } from "@/state/paneTree";
 
 type Mode = "text" | "regex" | "structural";
 
@@ -82,7 +81,7 @@ export function SearchOverlay() {
 
 function SearchInner({ onClose }: { onClose: () => void }) {
   const project = useActiveProject();
-  const session = useActiveSession();
+  const worktree = useActiveWorktree();
   const dispatch = useAppDispatch();
   const inputRef = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState<Mode>("text");
@@ -97,41 +96,35 @@ function SearchInner({ onClose }: { onClose: () => void }) {
   }, []);
 
   /**
-   * Open the file behind a result hit in the editor pane and close
-   * the search popup. Mirrors the file-tree's open-file flow: split
-   * the rightmost pane to add an editor leaf if none exists yet, then
-   * dispatch open-file with the disk content.
+   * Open the file behind a result hit as a markdown tab in the active
+   * worktree's main column. The tab loads its content lazily on mount;
+   * we don't read here to keep the overlay snappy.
    */
   const openHit = async (hit: SearchHit) => {
-    if (!session) {
+    if (!worktree) {
       onClose();
       return;
     }
-    const allLeaves = leaves(session.workspace);
-    const hasEditor = allLeaves.some((l) => l.content === "editor");
-    if (!hasEditor && allLeaves.length > 0) {
-      dispatch({
-        type: "split-pane",
-        sessionId: session.id,
-        paneId: allLeaves[allLeaves.length - 1].id,
-        direction: "right",
-        content: "editor",
-      });
-    }
     try {
       const content = await fs.readTextFile(hit.path);
+      const id = `t_${Date.now().toString(36)}`;
       dispatch({
-        type: "open-file",
-        sessionId: session.id,
-        file: { path: hit.path, content },
+        type: "open-tab",
+        tab: {
+          id,
+          worktreeId: worktree.id,
+          kind: "markdown",
+          filePath: hit.path,
+          mode: "edit",
+          content,
+          title: hit.path.split("/").pop() ?? hit.path,
+          summary: hit.path,
+          summaryUpdatedAt: Date.now(),
+        },
       });
     } catch (err) {
-      const synthetic = `// could not read file: ${String(err)}`;
-      dispatch({
-        type: "open-file",
-        sessionId: session.id,
-        file: { path: hit.path, content: synthetic },
-      });
+      // best-effort; skip on read failure
+      void err;
     }
     onClose();
   };

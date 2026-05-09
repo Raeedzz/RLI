@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { AgentCli } from "@/state/types";
+import { helperRun } from "./helper-agent";
 
 /**
  * Frontend wrapper around the Rust-side git commands.
@@ -59,6 +61,22 @@ export const git = {
     invoke<void>("git_worktree_remove", { cwd, path, force }),
   log: (cwd: string, n?: number) =>
     invoke<LogEntry[]>("git_log", { cwd, n }),
-  aiCommitMessage: (cwd: string) =>
-    invoke<string>("git_ai_commit_message", { cwd }),
+  /**
+   * Generate a commit message via the helper-agent layer. Reads the
+   * staged diff, truncates, and shells out to whichever CLI the
+   * caller specifies (defaults to claude).
+   */
+  aiCommitMessage: async (cwd: string, cli: AgentCli = "claude") => {
+    const diff = await invoke<string>("git_diff", {
+      cwd,
+      path: undefined,
+      staged: true,
+    });
+    if (!diff.trim()) throw new Error("no staged changes");
+    const trimmed =
+      diff.length > 8000
+        ? diff.slice(0, 8000) + "\n\n[…truncated…]"
+        : diff;
+    return helperRun(cwd, cli, "commit-message", trimmed);
+  },
 };

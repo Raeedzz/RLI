@@ -2,52 +2,38 @@
 //!
 //! Manual-only in v1 — invoked via `POST /memory/extract` from the
 //! `rli-memory extract <file>` CLI. The route returns extracted facts
-//! to the caller; storage is the caller's choice. This keeps Gemini API
-//! spend predictable (no surprise calls on every closed PTY block).
+//! to the caller; storage is the caller's choice.
+//!
+//! Routes through whichever CLI agent (claude / codex / gemini) the
+//! caller specifies — defaults to `claude` if none is given. The
+//! daemon spawns the CLI as a one-shot subprocess via
+//! {@link crate::helper_agent::run_inline}.
 //!
 //! Returned facts are atomic statements ≤80 chars each, intended to be
 //! fed back into `/memory/add` (with dedupe-on-add) one at a time.
-use tauri::State;
 
-use crate::gemini::{generate_text, GeminiState};
+use crate::helper_agent::{run_inline, HelperMode};
 
-const SYSTEM: &str = "You distill developer transcripts into atomic project facts. \
+const PROMPT_PREFIX: &str = "You distill developer transcripts into atomic project facts. \
 Return ONE fact per line, no bullets, no numbering, no preamble. \
 Each fact must be a single concrete statement under 80 characters. \
-Skip command outputs; only emit project-level conclusions worth remembering.";
+Skip command outputs; only emit project-level conclusions worth remembering.\n\nTranscript:\n---\n";
 
-const MAX_TOKENS: u32 = 256;
-const TEMPERATURE: f32 = 0.2;
-
-/// Run the transcript through Flash-Lite and parse the response into a
-/// `Vec<String>` of atomic facts. Lines longer than 80 chars are kept
-/// (the prompt is a soft constraint) but each fact is trimmed and
-/// deduped against the same response (case-insensitive).
+/// Extract facts from a transcript. `cli` selects which agent CLI to
+/// shell out to; pass `"claude"` (or whichever the caller is using).
 pub async fn extract_facts(
     transcript: &str,
-    gemini: &State<'_, GeminiState>,
+    cli: &str,
 ) -> Result<Vec<String>, String> {
     if transcript.trim().is_empty() {
         return Ok(Vec::new());
     }
-
     let prompt = format!(
-        "Transcript:\n---\n{}\n---\n\nFacts:",
-        // Cap the prompt size so a 200KB transcript doesn't burn the
-        // model's context. Flash-Lite's 1M ctx is plenty in theory but
-        // we don't need it; recent context is more relevant anyway.
+        "{}{}\n---\n\nFacts:",
+        PROMPT_PREFIX,
         truncate_tail(transcript, 16_000)
     );
-
-    let raw = generate_text(
-        gemini,
-        &prompt,
-        Some(SYSTEM),
-        Some(MAX_TOKENS),
-        Some(TEMPERATURE),
-    )
-    .await?;
-
+    let raw = run_inline("", cli, HelperMode::Summary, &prompt).await?;
     Ok(parse_facts(&raw))
 }
 

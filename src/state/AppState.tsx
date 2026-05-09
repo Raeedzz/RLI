@@ -11,63 +11,83 @@ import type {
   AppAction,
   AppState,
   Project,
-  Session,
+  ProjectId,
+  Tab,
+  Worktree,
+  WorktreeId,
 } from "./types";
-import {
-  closeLeaf,
-  defaultWorkspaceWithEditor,
-  leaves,
-  movePane,
-  setLeafContent,
-  splitLeaf,
-  swapLeaves,
-} from "./paneTree";
+import { DEFAULT_SETTINGS } from "./types";
 import { loadState, saveState } from "../lib/persistence";
 
 /* ------------------------------------------------------------------
-   Stub data for the v1 visual scaffold. Real persistence + project
-   discovery lands in Task #9 (worktree session lifecycle).
+   First-launch defaults — one project pointing at the current cwd,
+   one worktree using the project root (no detached worktree yet),
+   one terminal tab. The user replaces this with ⌘O.
    ------------------------------------------------------------------ */
 
-/**
- * Default state on first launch — one real project pointing at the
- * current working directory, one fresh session.
- *
- * The cwd path is set asynchronously after mount in App.tsx; until
- * that resolves we ship a sensible macOS-shaped default that the user
- * can immediately replace with ⌘O.
- */
+const DEFAULT_PROJECT_ID: ProjectId = "p_default";
+const DEFAULT_WORKTREE_ID: WorktreeId = "w_default";
+const DEFAULT_TAB_ID = "t_default";
+const DEFAULT_PTY_PRIMARY = "pty_default_primary";
+const DEFAULT_PTY_SECONDARY = "pty_default_secondary";
+
 const DEFAULT_PROJECT: Project = {
-  id: "p_default",
+  id: DEFAULT_PROJECT_ID,
   path: "/Users/raeedz/Developer/RLI",
   name: "RLI",
   glyph: "R",
+  faviconDataUri: null,
   pinned: false,
+  expanded: true,
 };
 
-const DEFAULT_SESSION: Session = {
-  id: "s_default",
-  projectId: DEFAULT_PROJECT.id,
-  name: "session 1",
-  subtitle: "ready",
+const DEFAULT_WORKTREE: Worktree = {
+  id: DEFAULT_WORKTREE_ID,
+  projectId: DEFAULT_PROJECT_ID,
   branch: "main",
-  status: "idle",
+  name: "main",
+  path: "/Users/raeedz/Developer/RLI",
+  changeCount: 0,
+  agentStatus: "idle",
+  agentCli: null,
   createdAt: Date.now(),
-  workspace: defaultWorkspaceWithEditor(),
-  openFile: null,
+  tabIds: [DEFAULT_TAB_ID],
+  activeTabId: DEFAULT_TAB_ID,
+  rightPanel: "files",
+  rightSplitPct: 60,
+  secondaryTab: "terminal",
+  secondaryPtyId: DEFAULT_PTY_SECONDARY,
+};
+
+const DEFAULT_TAB: Tab = {
+  id: DEFAULT_TAB_ID,
+  worktreeId: DEFAULT_WORKTREE_ID,
+  kind: "terminal",
+  title: "main",
+  summary: "ready",
+  summaryUpdatedAt: Date.now(),
+  ptyId: DEFAULT_PTY_PRIMARY,
+  detectedCli: null,
+  agentStatus: "idle",
 };
 
 export const INITIAL_STATE: AppState = {
-  projects: [DEFAULT_PROJECT],
-  sessions: [DEFAULT_SESSION],
-  activeProjectId: DEFAULT_PROJECT.id,
-  activeSessionByProject: {
-    [DEFAULT_PROJECT.id]: DEFAULT_SESSION.id,
+  projects: { [DEFAULT_PROJECT_ID]: DEFAULT_PROJECT },
+  projectOrder: [DEFAULT_PROJECT_ID],
+  worktrees: { [DEFAULT_WORKTREE_ID]: DEFAULT_WORKTREE },
+  tabs: { [DEFAULT_TAB_ID]: DEFAULT_TAB },
+  activeProjectId: DEFAULT_PROJECT_ID,
+  activeWorktreeByProject: {
+    [DEFAULT_PROJECT_ID]: DEFAULT_WORKTREE_ID,
   },
+  archivedWorktrees: [],
+  sidebarCollapsed: false,
+  rightPanelCollapsed: false,
   paletteOpen: false,
-  leftPanel: "files",
   searchOpen: false,
-  apiKeyDialogOpen: false,
+  settingsOpen: false,
+  prDialogOpen: null,
+  settings: DEFAULT_SETTINGS,
   markdownView: "rich",
 };
 
@@ -77,39 +97,256 @@ export const INITIAL_STATE: AppState = {
 
 export function reducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
+    /* Projects ---------------------------------------------------- */
+
     case "set-active-project":
       return { ...state, activeProjectId: action.id };
 
     case "add-project": {
-      const exists = state.projects.find((p) => p.id === action.project.id);
-      if (exists) {
+      if (state.projects[action.project.id]) {
         return { ...state, activeProjectId: action.project.id };
       }
       return {
         ...state,
-        projects: [...state.projects, action.project],
+        projects: { ...state.projects, [action.project.id]: action.project },
+        projectOrder: [...state.projectOrder, action.project.id],
         activeProjectId: action.project.id,
       };
     }
 
     case "remove-project": {
-      const projects = state.projects.filter((p) => p.id !== action.id);
-      const sessions = state.sessions.filter((s) => s.projectId !== action.id);
+      const { [action.id]: _removed, ...projects } = state.projects;
+      const projectOrder = state.projectOrder.filter((id) => id !== action.id);
+      // Remove worktrees and their tabs belonging to the project
+      const removedWorktreeIds = Object.values(state.worktrees)
+        .filter((w) => w.projectId === action.id)
+        .map((w) => w.id);
+      const worktrees = { ...state.worktrees };
+      const tabs = { ...state.tabs };
+      for (const wid of removedWorktreeIds) {
+        delete worktrees[wid];
+        for (const tid of Object.keys(tabs)) {
+          if (tabs[tid].worktreeId === wid) delete tabs[tid];
+        }
+      }
+      const { [action.id]: _activeRemoved, ...activeWorktreeByProject } =
+        state.activeWorktreeByProject;
       const activeProjectId =
         state.activeProjectId === action.id
-          ? (projects[0]?.id ?? null)
+          ? projectOrder[0] ?? null
           : state.activeProjectId;
-      return { ...state, projects, sessions, activeProjectId };
-    }
-
-    case "set-active-session":
       return {
         ...state,
-        activeSessionByProject: {
-          ...state.activeSessionByProject,
-          [action.projectId]: action.sessionId,
+        projects,
+        projectOrder,
+        worktrees,
+        tabs,
+        activeProjectId,
+        activeWorktreeByProject,
+      };
+    }
+
+    case "reorder-projects":
+      return { ...state, projectOrder: action.ids };
+
+    case "set-project-expanded":
+      return {
+        ...state,
+        projects: {
+          ...state.projects,
+          [action.id]: { ...state.projects[action.id], expanded: action.expanded },
         },
       };
+
+    case "set-project-color":
+      return {
+        ...state,
+        projects: {
+          ...state.projects,
+          [action.id]: { ...state.projects[action.id], color: action.color },
+        },
+      };
+
+    /* Worktrees --------------------------------------------------- */
+
+    case "add-worktree": {
+      const w = action.worktree;
+      const tabs = { ...state.tabs };
+      // Caller is expected to also dispatch open-tab for w.tabIds, but
+      // for convenience let new worktrees come with their tabs included
+      // — only used by initial seeding.
+      return {
+        ...state,
+        worktrees: { ...state.worktrees, [w.id]: w },
+        tabs,
+        activeWorktreeByProject: {
+          ...state.activeWorktreeByProject,
+          [w.projectId]: w.id,
+        },
+      };
+    }
+
+    case "update-worktree": {
+      const cur = state.worktrees[action.id];
+      if (!cur) return state;
+      return {
+        ...state,
+        worktrees: {
+          ...state.worktrees,
+          [action.id]: { ...cur, ...action.patch },
+        },
+      };
+    }
+
+    case "set-active-worktree":
+      return {
+        ...state,
+        activeWorktreeByProject: {
+          ...state.activeWorktreeByProject,
+          [action.projectId]: action.worktreeId,
+        },
+      };
+
+    case "archive-worktree": {
+      const w = state.worktrees[action.id];
+      if (!w) return state;
+      const { [action.id]: _removed, ...worktrees } = state.worktrees;
+      const tabs = { ...state.tabs };
+      for (const tid of w.tabIds) delete tabs[tid];
+      const activeWorktreeByProject = { ...state.activeWorktreeByProject };
+      if (activeWorktreeByProject[w.projectId] === action.id) {
+        const sibling = Object.values(worktrees).find(
+          (s) => s.projectId === w.projectId,
+        );
+        activeWorktreeByProject[w.projectId] = sibling?.id ?? null;
+      }
+      return {
+        ...state,
+        worktrees,
+        tabs,
+        activeWorktreeByProject,
+        archivedWorktrees: [action.record, ...state.archivedWorktrees],
+      };
+    }
+
+    case "restore-worktree": {
+      const w = action.worktree;
+      const archivedWorktrees = state.archivedWorktrees.filter(
+        (a) => a.id !== action.archiveId,
+      );
+      return {
+        ...state,
+        worktrees: { ...state.worktrees, [w.id]: w },
+        archivedWorktrees,
+        activeWorktreeByProject: {
+          ...state.activeWorktreeByProject,
+          [w.projectId]: w.id,
+        },
+      };
+    }
+
+    case "set-right-panel":
+      return updateWorktree(state, action.worktreeId, () => ({
+        rightPanel: action.panel,
+      }));
+
+    case "set-secondary-tab":
+      return updateWorktree(state, action.worktreeId, () => ({
+        secondaryTab: action.tab,
+      }));
+
+    case "set-right-split-pct":
+      return updateWorktree(state, action.worktreeId, () => ({
+        rightSplitPct: action.pct,
+      }));
+
+    case "set-agent-status":
+      return updateWorktree(state, action.worktreeId, () => ({
+        agentStatus: action.status,
+        agentCli: action.cli ?? state.worktrees[action.worktreeId]?.agentCli ?? null,
+      }));
+
+    case "set-change-count":
+      return updateWorktree(state, action.worktreeId, () => ({
+        changeCount: action.count,
+      }));
+
+    /* Tabs -------------------------------------------------------- */
+
+    case "open-tab": {
+      const t = action.tab;
+      const w = state.worktrees[t.worktreeId];
+      if (!w) return state;
+      const tabIds = w.tabIds.includes(t.id) ? w.tabIds : [...w.tabIds, t.id];
+      const activeTabId = action.activate !== false ? t.id : w.activeTabId;
+      return {
+        ...state,
+        tabs: { ...state.tabs, [t.id]: t },
+        worktrees: {
+          ...state.worktrees,
+          [w.id]: { ...w, tabIds, activeTabId },
+        },
+      };
+    }
+
+    case "close-tab": {
+      const t = state.tabs[action.id];
+      if (!t) return state;
+      const w = state.worktrees[t.worktreeId];
+      if (!w) return state;
+      const tabIds = w.tabIds.filter((id) => id !== action.id);
+      const activeTabId =
+        w.activeTabId === action.id
+          ? tabIds[tabIds.length - 1] ?? null
+          : w.activeTabId;
+      const { [action.id]: _removed, ...tabs } = state.tabs;
+      return {
+        ...state,
+        tabs,
+        worktrees: {
+          ...state.worktrees,
+          [w.id]: { ...w, tabIds, activeTabId },
+        },
+      };
+    }
+
+    case "select-tab":
+      return updateWorktree(state, action.worktreeId, () => ({
+        activeTabId: action.id,
+      }));
+
+    case "update-tab": {
+      const cur = state.tabs[action.id];
+      if (!cur) return state;
+      return {
+        ...state,
+        tabs: { ...state.tabs, [action.id]: { ...cur, ...action.patch } as Tab },
+      };
+    }
+
+    case "set-tab-summary": {
+      const cur = state.tabs[action.id];
+      if (!cur) return state;
+      return {
+        ...state,
+        tabs: {
+          ...state.tabs,
+          [action.id]: {
+            ...cur,
+            summary: action.summary,
+            summaryUpdatedAt: Date.now(),
+          } as Tab,
+        },
+      };
+    }
+
+    /* Chrome ------------------------------------------------------ */
+
+    case "toggle-sidebar":
+      return { ...state, sidebarCollapsed: !state.sidebarCollapsed };
+
+    case "toggle-right-panel":
+      return { ...state, rightPanelCollapsed: !state.rightPanelCollapsed };
 
     case "toggle-palette":
       return { ...state, paletteOpen: !state.paletteOpen };
@@ -117,240 +354,48 @@ export function reducer(state: AppState, action: AppAction): AppState {
     case "set-palette":
       return { ...state, paletteOpen: action.open };
 
-    case "set-left-panel":
-      return { ...state, leftPanel: action.panel };
-
-    case "toggle-left-panel":
-      return {
-        ...state,
-        leftPanel: state.leftPanel === action.panel ? null : action.panel,
-      };
-
     case "toggle-search":
       return { ...state, searchOpen: !state.searchOpen };
 
     case "set-search":
       return { ...state, searchOpen: action.open };
 
+    case "set-pr-dialog":
+      return {
+        ...state,
+        prDialogOpen: action.worktreeId ? { worktreeId: action.worktreeId } : null,
+      };
+
+    case "set-settings-open":
+      return { ...state, settingsOpen: action.open };
+
+    case "toggle-settings":
+      return { ...state, settingsOpen: !state.settingsOpen };
+
+    case "update-settings":
+      return { ...state, settings: { ...state.settings, ...action.patch } };
+
     case "set-markdown-view":
       return { ...state, markdownView: action.view };
 
-    case "toggle-browser": {
-      // Browser is just another pane — toggle = add or remove a browser
-      // leaf in the active session's workspace tree. That gets us the
-      // same PaneFrame chrome (drag, split, snap, header) for free.
-      const projectId = state.activeProjectId;
-      if (!projectId) return state;
-      const sessionId = state.activeSessionByProject[projectId];
-      if (!sessionId) return state;
-      const session = state.sessions.find((s) => s.id === sessionId);
-      if (!session) return state;
-      const allLeaves = leaves(session.workspace);
-      const browserLeaf = allLeaves.find((l) => l.content === "browser");
-      const nextWorkspace = browserLeaf
-        ? closeLeaf(session.workspace, browserLeaf.id)
-        : splitLeaf(
-            session.workspace,
-            allLeaves[allLeaves.length - 1].id,
-            "right",
-            "browser",
-          );
-      return {
-        ...state,
-        sessions: state.sessions.map((s) =>
-          s.id === sessionId ? { ...s, workspace: nextWorkspace } : s,
-        ),
-      };
-    }
-
-    case "toggle-graph": {
-      // Same shape as toggle-browser. Splits a graph pane onto the
-      // right edge of the workspace tree (or closes it if open). The
-      // graph view itself fetches data via memory_graph_data and
-      // runs a force simulation in SVG.
-      const projectId = state.activeProjectId;
-      if (!projectId) return state;
-      const sessionId = state.activeSessionByProject[projectId];
-      if (!sessionId) return state;
-      const session = state.sessions.find((s) => s.id === sessionId);
-      if (!session) return state;
-      const allLeaves = leaves(session.workspace);
-      const graphLeaf = allLeaves.find((l) => l.content === "graph");
-      const nextWorkspace = graphLeaf
-        ? closeLeaf(session.workspace, graphLeaf.id)
-        : splitLeaf(
-            session.workspace,
-            allLeaves[allLeaves.length - 1].id,
-            "right",
-            "graph",
-          );
-      return {
-        ...state,
-        sessions: state.sessions.map((s) =>
-          s.id === sessionId ? { ...s, workspace: nextWorkspace } : s,
-        ),
-      };
-    }
-
-    case "toggle-api-key":
-      return { ...state, apiKeyDialogOpen: !state.apiKeyDialogOpen };
-
-    case "set-api-key-dialog":
-      return { ...state, apiKeyDialogOpen: action.open };
-
-    case "open-file":
-      return updateSession(state, action.sessionId, () => ({
-        openFile: action.file,
-      }));
-
-    case "close-file":
-      return updateSession(state, action.sessionId, () => ({
-        openFile: null,
-      }));
-
-    case "add-session": {
-      const next = [...state.sessions, action.session];
-      return {
-        ...state,
-        sessions: next,
-        activeSessionByProject: {
-          ...state.activeSessionByProject,
-          [action.session.projectId]: action.session.id,
-        },
-      };
-    }
-
-    case "remove-session": {
-      const target = state.sessions.find((s) => s.id === action.id);
-      if (!target) return state;
-      const remaining = state.sessions.filter((s) => s.id !== action.id);
-      const sameProject = remaining.filter(
-        (s) => s.projectId === target.projectId,
-      );
-      const wasActive =
-        state.activeSessionByProject[target.projectId] === action.id;
-      return {
-        ...state,
-        sessions: remaining,
-        activeSessionByProject: {
-          ...state.activeSessionByProject,
-          [target.projectId]: wasActive
-            ? sameProject[0]?.id ?? null
-            : state.activeSessionByProject[target.projectId],
-        },
-      };
-    }
-
-    case "update-session":
-      return {
-        ...state,
-        sessions: state.sessions.map((s) =>
-          s.id === action.id ? { ...s, ...action.patch } : s,
-        ),
-      };
-
-    case "set-project-color":
-      return {
-        ...state,
-        projects: state.projects.map((p) =>
-          p.id === action.id ? { ...p, color: action.color } : p,
-        ),
-      };
-
-    case "set-session-color":
-      return {
-        ...state,
-        sessions: state.sessions.map((s) =>
-          s.id === action.id ? { ...s, color: action.color } : s,
-        ),
-      };
-
-    case "reorder-projects":
-      return {
-        ...state,
-        projects: action.ids
-          .map((id) => state.projects.find((p) => p.id === id))
-          .filter((p): p is Project => p != null),
-      };
-
-    case "reorder-sessions": {
-      const ordered = action.ids
-        .map((id) => state.sessions.find((s) => s.id === id))
-        .filter((s): s is Session => s != null);
-      const others = state.sessions.filter(
-        (s) => s.projectId !== action.projectId,
-      );
-      return { ...state, sessions: [...others, ...ordered] };
-    }
-
-    case "split-pane":
-      return updateSession(state, action.sessionId, (s) => ({
-        workspace: splitLeaf(
-          s.workspace,
-          action.paneId,
-          action.direction,
-          action.content,
-        ),
-      }));
-
-    case "close-pane":
-      return updateSession(state, action.sessionId, (s) => ({
-        workspace: closeLeaf(s.workspace, action.paneId),
-      }));
-
-    case "set-pane-content":
-      return updateSession(state, action.sessionId, (s) => ({
-        workspace: setLeafContent(
-          s.workspace,
-          action.paneId,
-          action.content,
-        ),
-      }));
-
-    case "swap-panes":
-      return updateSession(state, action.sessionId, (s) => ({
-        workspace: swapLeaves(s.workspace, action.aId, action.bId),
-      }));
-
-    case "move-pane":
-      return updateSession(state, action.sessionId, (s) => ({
-        workspace: movePane(
-          s.workspace,
-          action.sourceId,
-          action.targetId,
-          action.direction,
-        ),
-      }));
+    /* Hydrate ----------------------------------------------------- */
 
     case "hydrate":
-      return {
-        ...state,
-        projects: action.projects,
-        sessions: action.sessions,
-        activeProjectId: action.activeProjectId,
-        activeSessionByProject: action.activeSessionByProject,
-      };
+      return { ...state, ...action.state };
   }
 }
 
-/**
- * Apply a partial update to one session by id. Used by pane and file
- * mutations so non-targeted sessions keep their reference (React skips
- * re-renders that depend on them).
- */
-function updateSession(
+function updateWorktree(
   state: AppState,
-  sessionId: string,
-  patch: (s: Session) => Partial<Session>,
+  id: WorktreeId,
+  patch: (w: Worktree) => Partial<Worktree>,
 ): AppState {
-  let changed = false;
-  const next = state.sessions.map((s) => {
-    if (s.id !== sessionId) return s;
-    changed = true;
-    return { ...s, ...patch(s) };
-  });
-  if (!changed) return state;
-  return { ...state, sessions: next };
+  const cur = state.worktrees[id];
+  if (!cur) return state;
+  return {
+    ...state,
+    worktrees: { ...state.worktrees, [id]: { ...cur, ...patch(cur) } },
+  };
 }
 
 /* ------------------------------------------------------------------
@@ -360,22 +405,12 @@ function updateSession(
 const AppStateContext = createContext<AppState | null>(null);
 const AppDispatchContext = createContext<Dispatch<AppAction> | null>(null);
 
-/**
- * Debounce window for autosave. 400 ms is short enough that a Cmd-Q
- * after a change still flushes (Tauri's window-close fires the unload
- * event after this) but long enough that rapid pane shuffling doesn't
- * pin the disk.
- */
 const SAVE_DEBOUNCE_MS = 400;
 
 export function AppStateProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
-  // Suppress the autosave that would otherwise fire immediately after
-  // the hydrate dispatch (no real change, but still a state transition).
   const hydratedRef = useRef(false);
 
-  // Hydrate on mount — fire-and-forget. If load fails or there's no
-  // saved state, the INITIAL_STATE default sticks.
   useEffect(() => {
     let cancelled = false;
     loadState()
@@ -384,16 +419,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           hydratedRef.current = true;
           return;
         }
-        dispatch({
-          type: "hydrate",
-          projects: persisted.projects,
-          sessions: persisted.sessions,
-          activeProjectId: persisted.activeProjectId,
-          activeSessionByProject: persisted.activeSessionByProject,
-        });
-        // Mark hydrated AFTER the dispatch lands so the save effect
-        // that observes the post-hydrate state doesn't re-write the
-        // same blob.
+        dispatch({ type: "hydrate", state: persisted });
         requestAnimationFrame(() => {
           hydratedRef.current = true;
         });
@@ -404,27 +430,25 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-    // Run once on mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Save the persistent slice whenever it changes — debounced.
   useEffect(() => {
     if (!hydratedRef.current) return;
     const timer = window.setTimeout(() => {
-      saveState(state).catch(() => {
-        // Best-effort. A failed save shouldn't crash the app; the next
-        // change retries automatically. We could surface a toast once
-        // we have toast infra, but persistent failures here are rare
-        // (write-protected app data dir is the only realistic cause).
-      });
+      saveState(state).catch(() => {});
     }, SAVE_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [
     state.projects,
-    state.sessions,
+    state.projectOrder,
+    state.worktrees,
+    state.tabs,
     state.activeProjectId,
-    state.activeSessionByProject,
+    state.activeWorktreeByProject,
+    state.archivedWorktrees,
+    state.markdownView,
+    state.sidebarCollapsed,
+    state.rightPanelCollapsed,
   ]);
 
   return (
@@ -453,25 +477,50 @@ export function useAppDispatch(): Dispatch<AppAction> {
 }
 
 /* ------------------------------------------------------------------
-   Convenience selectors
+   Selectors
    ------------------------------------------------------------------ */
 
 export function useActiveProject(): Project | null {
   const state = useAppState();
   if (!state.activeProjectId) return null;
-  return state.projects.find((p) => p.id === state.activeProjectId) ?? null;
+  return state.projects[state.activeProjectId] ?? null;
 }
 
-export function useProjectSessions(projectId: string | null): Session[] {
-  const state = useAppState();
-  if (!projectId) return [];
-  return state.sessions.filter((s) => s.projectId === projectId);
-}
-
-export function useActiveSession(): Session | null {
+export function useActiveWorktree(): Worktree | null {
   const state = useAppState();
   if (!state.activeProjectId) return null;
-  const sessionId = state.activeSessionByProject[state.activeProjectId];
-  if (!sessionId) return null;
-  return state.sessions.find((s) => s.id === sessionId) ?? null;
+  const wid = state.activeWorktreeByProject[state.activeProjectId];
+  if (!wid) return null;
+  return state.worktrees[wid] ?? null;
 }
+
+export function useProjectWorktrees(projectId: ProjectId | null): Worktree[] {
+  const state = useAppState();
+  if (!projectId) return [];
+  return Object.values(state.worktrees).filter(
+    (w) => w.projectId === projectId,
+  );
+}
+
+export function useWorktreeTabs(worktreeId: WorktreeId | null): Tab[] {
+  const state = useAppState();
+  if (!worktreeId) return [];
+  const w = state.worktrees[worktreeId];
+  if (!w) return [];
+  return w.tabIds.map((id) => state.tabs[id]).filter(Boolean) as Tab[];
+}
+
+export function useActiveTab(): Tab | null {
+  const w = useActiveWorktree();
+  const state = useAppState();
+  if (!w?.activeTabId) return null;
+  return state.tabs[w.activeTabId] ?? null;
+}
+
+/* ------------------------------------------------------------------
+   Legacy aliases — temporary shims so callers from the old schema
+   still typecheck. They funnel into Worktree/Tab semantics.
+   ------------------------------------------------------------------ */
+
+/** @deprecated use useActiveWorktree */
+export const useActiveSession = useActiveWorktree;

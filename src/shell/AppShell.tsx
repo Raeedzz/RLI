@@ -1,38 +1,39 @@
 import { WindowChrome } from "./WindowChrome";
-import { SplitLayout } from "./SplitLayout";
-import { StatusBar } from "./StatusBar";
-import { ActivityRail } from "./ActivityRail";
+import { Sidebar } from "./Sidebar";
+import { MainColumn } from "./MainColumn";
+import { RightPanel } from "./RightPanel";
+import { CreatePRDialog } from "./CreatePRDialog";
+import { SettingsView } from "./SettingsView";
 import { SearchOverlay } from "@/palette/SearchOverlay";
-import { ApiKeyDialog } from "@/onboarding/ApiKeyDialog";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useSpatialNavigation } from "@/hooks/useSpatialNavigation";
 import { useOpenUrlInBrowser } from "@/hooks/useOpenUrlInBrowser";
+import { useAppState } from "@/state/AppState";
 
 /**
- * Top-level frame:
+ * Three-column shell:
  *
- *   ┌──────────────────────────────────────────────────────────┐
- *   │ ●●●         [⌕  Search      ⌘⇧F]              [⚙]        │  chrome (28px)
- *   ├──┬──────────┬────────────────────────────────────────────┤
- *   │  │          │ [● tab] [tab] [+]      [project: RLI ▾]   │  tabs over workspace
- *   │AR│  left    │────────────────────────────────────────────│
- *   │  │  panel   │                                             │
- *   │  │          │   workspace                                │
- *   │  │          │                                             │
- *   ├──┴──────────┴────────────────────────────────────────────┤
- *   │ ● rli/branch · subtitle           ✻ Claude · ⌘K commands  │  status bar (24px)
- *   └──────────────────────────────────────────────────────────┘
+ *   ┌──────┬─────────────────────────┬───────────────┐
+ *   │      │                         │               │
+ *   │ side │  main column            │  right panel  │
+ *   │      │  (tabs + content +      │  (files /     │
+ *   │      │   chatbox)              │   changes /   │
+ *   │      │                         │   checks /    │
+ *   │      │                         │   memory)     │
+ *   │      │                         │  ───────────  │
+ *   │      │                         │  setup / run /│
+ *   │      │                         │  terminal     │
+ *   └──────┴─────────────────────────┴───────────────┘
  *
- * Activity rail and the left panel run full height from the chrome
- * down to the status bar. The session tabs only span the workspace
- * column on the right — that's how Cursor / VS Code arrange tabs so
- * they sit "above the file you're editing" rather than across the
- * whole window.
+ * Sidebar and right panel collapse to 0 width via the
+ * `--sidebar-w` / `--right-w` CSS vars driven from state. WindowChrome
+ * sits above as a 28px traffic-light strip.
  */
 export function AppShell() {
   useKeyboardShortcuts();
   useSpatialNavigation();
   useOpenUrlInBrowser();
+  const { sidebarCollapsed, rightPanelCollapsed } = useAppState();
 
   return (
     <div
@@ -41,8 +42,14 @@ export function AppShell() {
         width: "100vw",
         display: "flex",
         flexDirection: "column",
-        backgroundColor: "var(--surface-1)",
+        backgroundColor: "var(--surface-0)",
         overflow: "hidden",
+        ["--sidebar-w" as string]: sidebarCollapsed
+          ? "0px"
+          : "var(--sidebar-width)",
+        ["--right-w" as string]: rightPanelCollapsed
+          ? "0px"
+          : "var(--right-width)",
       }}
     >
       <WindowChrome />
@@ -51,21 +58,42 @@ export function AppShell() {
         style={{
           flex: 1,
           minHeight: 0,
-          display: "flex",
-          position: "relative",
+          display: "grid",
+          gridTemplateColumns: "var(--sidebar-w) 1fr var(--right-w)",
+          transition:
+            "grid-template-columns var(--motion-base) var(--ease-out-quart)",
         }}
       >
-        <ActivityRail />
+        <aside
+          style={{
+            minWidth: 0,
+            overflow: "hidden",
+            backgroundColor: "var(--surface-1)",
+            borderRight: "var(--border-1)",
+          }}
+        >
+          <Sidebar />
+        </aside>
 
-        <div style={{ flex: 1, minWidth: 0, position: "relative" }}>
-          <SplitLayout />
-        </div>
+        <main style={{ minWidth: 0, overflow: "hidden" }}>
+          <MainColumn />
+        </main>
+
+        <aside
+          style={{
+            minWidth: 0,
+            overflow: "hidden",
+            backgroundColor: "var(--surface-1)",
+            borderLeft: "var(--border-1)",
+          }}
+        >
+          <RightPanel />
+        </aside>
       </div>
 
-      <StatusBar />
-
       <SearchOverlay />
-      <ApiKeyDialog />
+      <CreatePRDialog />
+      <SettingsView />
     </div>
   );
 }

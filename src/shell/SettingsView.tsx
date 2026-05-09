@@ -1,0 +1,588 @@
+import { useState, type CSSProperties, type ReactNode } from "react";
+import { motion, AnimatePresence } from "motion/react";
+import {
+  IconBack,
+  IconSettings,
+  IconHelp,
+  IconBranch,
+  IconFolder,
+} from "@/design/icons";
+import {
+  useAppDispatch,
+  useAppState,
+} from "@/state/AppState";
+import type {
+  AgentCli,
+  ArchiveBehavior,
+  CompletionSound,
+  Settings,
+} from "@/state/types";
+
+type Section = "general" | "repository";
+
+/**
+ * Full-window settings overlay. Replaces the 3-column shell while open.
+ * Two sections — General (RLI-relevant toggles) and Repositories
+ * (snapshot of the projects list). Esc / Back-to-app dismisses.
+ */
+export function SettingsView() {
+  const state = useAppState();
+  const dispatch = useAppDispatch();
+  const open = state.settingsOpen;
+  const [section, setSection] = useState<Section>("general");
+
+  const close = () => dispatch({ type: "set-settings-open", open: false });
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          key="settings-root"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: "var(--z-modal)",
+            backgroundColor: "var(--surface-0)",
+            display: "grid",
+            gridTemplateColumns: "260px 1fr",
+            color: "var(--text-secondary)",
+          }}
+        >
+          <SettingsSidebar
+            current={section}
+            onPick={setSection}
+            onClose={close}
+            projectNames={state.projectOrder
+              .map((id) => state.projects[id])
+              .filter(Boolean)
+              .map((p) => p!.name)}
+          />
+          <SettingsMain section={section} settings={state.settings} />
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+/* ------------------------------------------------------------------
+   Sidebar
+   ------------------------------------------------------------------ */
+
+function SettingsSidebar({
+  current,
+  onPick,
+  onClose,
+  projectNames,
+}: {
+  current: Section;
+  onPick: (s: Section) => void;
+  onClose: () => void;
+  projectNames: string[];
+}) {
+  return (
+    <aside
+      style={{
+        height: "100%",
+        backgroundColor: "var(--surface-1)",
+        borderRight: "var(--border-1)",
+        display: "grid",
+        gridTemplateRows: "auto auto 1fr auto",
+        padding: "var(--space-3) 0",
+      }}
+    >
+      <button
+        type="button"
+        onClick={onClose}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          height: 28,
+          padding: "0 var(--space-3)",
+          marginBottom: "var(--space-2)",
+          color: "var(--text-secondary)",
+          fontSize: "var(--text-sm)",
+          backgroundColor: "transparent",
+          textAlign: "left",
+        }}
+        onMouseOver={(e) => {
+          e.currentTarget.style.color = "var(--text-primary)";
+        }}
+        onMouseOut={(e) => {
+          e.currentTarget.style.color = "var(--text-secondary)";
+        }}
+      >
+        <IconBack size={14} />
+        Back to app
+      </button>
+
+      <nav
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          padding: "0 var(--space-2)",
+          gap: 1,
+        }}
+      >
+        <NavItem
+          active={current === "general"}
+          icon={<IconSettings size={14} />}
+          label="General"
+          onClick={() => onPick("general")}
+        />
+        <NavItem
+          active={false}
+          icon={<IconBranch size={14} />}
+          label="Helpers"
+          onClick={() => onPick("general")}
+        />
+      </nav>
+
+      <div style={{ padding: "var(--space-4) var(--space-3) var(--space-2)" }}>
+        <span
+          style={{
+            display: "block",
+            fontSize: "var(--text-2xs)",
+            letterSpacing: "var(--tracking-wide)",
+            textTransform: "uppercase",
+            color: "var(--text-tertiary)",
+            marginBottom: "var(--space-1)",
+          }}
+        >
+          Repositories
+        </span>
+        <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+          {projectNames.map((name) => (
+            <li
+              key={name}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                height: 26,
+                padding: "0 var(--space-2)",
+                color: "var(--text-secondary)",
+                fontSize: "var(--text-xs)",
+              }}
+            >
+              <IconFolder size={12} />
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                {name}
+              </span>
+            </li>
+          ))}
+          {projectNames.length === 0 && (
+            <li
+              style={{
+                fontSize: "var(--text-xs)",
+                color: "var(--text-tertiary)",
+                padding: "0 var(--space-2)",
+              }}
+            >
+              No projects yet
+            </li>
+          )}
+        </ul>
+      </div>
+
+      <div
+        style={{
+          padding: "var(--space-2) var(--space-3)",
+          borderTop: "var(--border-1)",
+          display: "flex",
+          justifyContent: "flex-end",
+          gap: 4,
+        }}
+      >
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            fontSize: "var(--text-2xs)",
+            color: "var(--text-tertiary)",
+          }}
+        >
+          <IconHelp size={12} />
+          ⌘,
+        </span>
+      </div>
+    </aside>
+  );
+}
+
+function NavItem({
+  active,
+  icon,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        height: 30,
+        padding: "0 var(--space-2)",
+        borderRadius: "var(--radius-sm)",
+        backgroundColor: active ? "var(--surface-3)" : "transparent",
+        color: active ? "var(--text-primary)" : "var(--text-secondary)",
+        fontSize: "var(--text-sm)",
+        textAlign: "left",
+        transition: "background-color var(--motion-instant) var(--ease-out-quart)",
+      }}
+      onMouseOver={(e) => {
+        if (!active) e.currentTarget.style.backgroundColor = "var(--surface-2)";
+      }}
+      onMouseOut={(e) => {
+        if (!active) e.currentTarget.style.backgroundColor = "transparent";
+      }}
+    >
+      <span style={{ color: "var(--text-tertiary)" }}>{icon}</span>
+      <span>{label}</span>
+    </button>
+  );
+}
+
+/* ------------------------------------------------------------------
+   Main panel
+   ------------------------------------------------------------------ */
+
+function SettingsMain({
+  section,
+  settings,
+}: {
+  section: Section;
+  settings: Settings;
+}) {
+  return (
+    <main
+      style={{
+        height: "100%",
+        overflow: "auto",
+        backgroundColor: "var(--surface-0)",
+        padding: "var(--space-8) max(var(--space-12), 8vw)",
+      }}
+    >
+      <h1
+        style={{
+          margin: 0,
+          marginBottom: "var(--space-6)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 28,
+          fontWeight: "var(--weight-semibold)",
+          letterSpacing: "var(--tracking-tight)",
+          color: "var(--text-primary)",
+        }}
+      >
+        {section === "general" ? "General" : "Repositories"}
+      </h1>
+      <GeneralSection settings={settings} />
+    </main>
+  );
+}
+
+function GeneralSection({ settings }: { settings: Settings }) {
+  const dispatch = useAppDispatch();
+  const update = (patch: Partial<Settings>) =>
+    dispatch({ type: "update-settings", patch });
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", maxWidth: 760 }}>
+      <SettingRow
+        title="Notify when an agent finishes"
+        description="Show a macOS notification when a worktree's agent goes idle."
+        control={
+          <Toggle
+            checked={settings.notifyOnIdle}
+            onChange={(v) => update({ notifyOnIdle: v })}
+          />
+        }
+      />
+
+      <SettingRow
+        title="Completion sound"
+        description="Play a short sound when a worktree's agent goes idle."
+        control={
+          <SelectChips<CompletionSound>
+            value={settings.completionSound}
+            onChange={(v) => update({ completionSound: v })}
+            options={[
+              { value: "none", label: "No sound" },
+              { value: "subtle", label: "Subtle" },
+              { value: "bell", label: "Bell" },
+            ]}
+          />
+        }
+      />
+
+      <SettingRow
+        title="Always show context usage"
+        description="Always render the breadcrumb's `% / 5h` indicator. By default it self-hides when no Anthropic session is active."
+        control={
+          <Toggle
+            checked={settings.alwaysShowContextUsage}
+            onChange={(v) => update({ alwaysShowContextUsage: v })}
+          />
+        }
+      />
+
+      <SettingRow
+        title="Caffeinate while agents are running"
+        description="Prevent your Mac from sleeping while any worktree's agent is active. Shuts off below 10% battery."
+        control={
+          <Toggle
+            checked={settings.caffeinate}
+            onChange={(v) => update({ caffeinate: v })}
+          />
+        }
+      />
+
+      <SectionDivider label="Helpers" />
+
+      <SettingRow
+        title="Default helper CLI"
+        description="Used by Create-PR, AskCard, and commit-message generation when the active worktree hasn't surfaced its own CLI yet."
+        control={
+          <SelectChips<AgentCli>
+            value={settings.defaultHelperCli}
+            onChange={(v) => update({ defaultHelperCli: v })}
+            options={[
+              { value: "claude", label: "Claude" },
+              { value: "codex", label: "Codex" },
+              { value: "gemini", label: "Gemini" },
+            ]}
+          />
+        }
+      />
+
+      <SettingRow
+        title="Auto-summarize tab activity"
+        description="Drive the tab subtitle (the 11px line under each tab name) from the active CLI on idle. Off skips subprocess invocations — the subtitle then shows the launch command instead."
+        control={
+          <Toggle
+            checked={settings.autoSummarize}
+            onChange={(v) => update({ autoSummarize: v })}
+          />
+        }
+      />
+
+      <SectionDivider label="Worktrees" />
+
+      <SettingRow
+        title="Archive behavior on close"
+        description="What happens when you click ✕ on a worktree row. `Stash` keeps your dirty changes safe (default), `Force` discards them, `Ask` prompts each time."
+        control={
+          <SelectChips<ArchiveBehavior>
+            value={settings.archiveBehavior}
+            onChange={(v) => update({ archiveBehavior: v })}
+            options={[
+              { value: "stash", label: "Stash & archive" },
+              { value: "force", label: "Force archive" },
+              { value: "ask", label: "Ask each time" },
+            ]}
+          />
+        }
+      />
+
+      <SettingRow
+        title="Worktrees directory"
+        description="Where worktree checkouts live on disk. Each project gets its own subdirectory."
+        control={
+          <code
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: "var(--text-xs)",
+              color: "var(--text-tertiary)",
+            }}
+          >
+            ~/Library/Application Support/RLI/worktrees
+          </code>
+        }
+      />
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
+   Primitives
+   ------------------------------------------------------------------ */
+
+function SectionDivider({ label }: { label: string }) {
+  return (
+    <div
+      style={{
+        marginTop: "var(--space-6)",
+        marginBottom: "var(--space-2)",
+        paddingTop: "var(--space-4)",
+        borderTop: "var(--border-1)",
+        fontSize: "var(--text-2xs)",
+        letterSpacing: "var(--tracking-wide)",
+        textTransform: "uppercase",
+        color: "var(--text-tertiary)",
+      }}
+    >
+      {label}
+    </div>
+  );
+}
+
+function SettingRow({
+  title,
+  description,
+  control,
+}: {
+  title: string;
+  description?: string;
+  control: ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--space-6)",
+        padding: "var(--space-4) 0",
+        borderBottom: "var(--border-1)",
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            fontSize: "var(--text-md)",
+            fontWeight: "var(--weight-medium)",
+            color: "var(--text-primary)",
+          }}
+        >
+          {title}
+        </div>
+        {description && (
+          <div
+            style={{
+              marginTop: 4,
+              fontSize: "var(--text-xs)",
+              lineHeight: "var(--leading-base)",
+              color: "var(--text-tertiary)",
+              maxWidth: 520,
+            }}
+          >
+            {description}
+          </div>
+        )}
+      </div>
+      <div style={{ flexShrink: 0 }}>{control}</div>
+    </div>
+  );
+}
+
+function Toggle({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  const onStyle: CSSProperties = {
+    position: "relative",
+    width: 36,
+    height: 20,
+    borderRadius: "var(--radius-pill)",
+    backgroundColor: checked ? "var(--accent)" : "var(--surface-3)",
+    transition: "background-color var(--motion-fast) var(--ease-out-quart)",
+    cursor: "default",
+    flexShrink: 0,
+  };
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      style={onStyle}
+    >
+      <span
+        aria-hidden
+        style={{
+          position: "absolute",
+          top: 2,
+          left: 2,
+          width: 16,
+          height: 16,
+          borderRadius: "var(--radius-pill)",
+          backgroundColor: checked ? "var(--text-inverse)" : "var(--text-secondary)",
+          transform: checked ? "translateX(16px)" : "translateX(0)",
+          transition: "transform var(--motion-fast) var(--ease-out-quart)",
+          boxShadow: "0 1px 2px oklch(0% 0 0 / 0.4)",
+        }}
+      />
+    </button>
+  );
+}
+
+function SelectChips<T extends string>({
+  value,
+  onChange,
+  options,
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  options: Array<{ value: T; label: string }>;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      style={{
+        display: "inline-flex",
+        padding: 2,
+        borderRadius: "var(--radius-md)",
+        backgroundColor: "var(--surface-2)",
+        border: "var(--border-1)",
+      }}
+    >
+      {options.map((opt) => {
+        const active = opt.value === value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            onClick={() => onChange(opt.value)}
+            style={{
+              height: 26,
+              padding: "0 10px",
+              borderRadius: "var(--radius-sm)",
+              backgroundColor: active ? "var(--surface-4)" : "transparent",
+              color: active ? "var(--text-primary)" : "var(--text-secondary)",
+              fontSize: "var(--text-xs)",
+              fontWeight: "var(--weight-medium)",
+              transition:
+                "background-color var(--motion-instant) var(--ease-out-quart)," +
+                "color var(--motion-instant) var(--ease-out-quart)",
+            }}
+            onMouseOver={(e) => {
+              if (!active) e.currentTarget.style.color = "var(--text-primary)";
+            }}
+            onMouseOut={(e) => {
+              if (!active) e.currentTarget.style.color = "var(--text-secondary)";
+            }}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}

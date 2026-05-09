@@ -38,7 +38,9 @@ export async function openProjectDialog(
       path,
       name,
       glyph,
+      faviconDataUri: null,
       pinned: false,
+      expanded: true,
     },
   });
   return id;

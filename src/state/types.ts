@@ -1,30 +1,17 @@
 export type ProjectId = string;
-export type SessionId = string;
-export type PaneNodeId = string;
+export type WorktreeId = string;
+export type TabId = string;
+export type PtyId = string;
+export type ArchiveId = string;
 
-/** What a leaf pane displays. */
-export type PaneContent = "terminal" | "editor" | "browser" | "graph";
+/**
+ * The chrome ships in three persistent column families:
+ *   sidebar (projects + worktrees) | main column (tabs) | right panel
+ */
 
-/** A direction the user can request when splitting an existing pane. */
-export type SplitDirection = "left" | "right" | "up" | "down";
+export type AgentCli = "claude" | "codex" | "gemini";
 
-export interface PaneLeaf {
-  kind: "leaf";
-  id: PaneNodeId;
-  content: PaneContent;
-}
-
-export interface PaneSplit {
-  kind: "split";
-  id: PaneNodeId;
-  /** "horizontal" splits side-by-side, "vertical" stacks top/bottom. */
-  direction: "horizontal" | "vertical";
-  children: [PaneNode, PaneNode];
-}
-
-export type PaneNode = PaneLeaf | PaneSplit;
-
-export type SessionStatus = "idle" | "streaming" | "error";
+export type AgentStatus = "idle" | "running";
 
 /** Workshop-pigment palette — see tokens.css `--tag-*` */
 export type TagId =
@@ -48,152 +35,287 @@ export const TAG_IDS: readonly TagId[] = [
   "rose",
 ];
 
-/** Resolves a TagId (or undefined) to a CSS color expression. */
 export function tagVar(tag: TagId | undefined): string {
   return `var(--tag-${tag ?? "default"})`;
 }
+
+/* ------------------------------------------------------------------
+   Project — a git repo on disk. One row in the sidebar's Projects
+   section. Expanded reveals its worktrees.
+   ------------------------------------------------------------------ */
 
 export interface Project {
   id: ProjectId;
   path: string;
   name: string;
-  /** 1–2 character glyph, only used inside dense menu rows. */
+  /** 1–2 character glyph fallback used when no favicon resolved. */
   glyph: string;
+  /** Resolved at scan time; data URI if found. Null if no icon source. */
+  faviconDataUri: string | null;
   pinned: boolean;
-  /** User-assigned color tag. Defaults to the system accent if unset. */
+  /** Sidebar expand-collapse state. */
+  expanded: boolean;
+  /** User-assigned color tag. */
   color?: TagId;
 }
 
-export interface Session {
-  id: SessionId;
+/* ------------------------------------------------------------------
+   Worktree — a git worktree of a project. Owns its own tabs, a chatbox
+   target, and a secondary terminal in the right panel.
+   ------------------------------------------------------------------ */
+
+export type RightPanelTab = "files" | "changes" | "checks" | "memory";
+export type SecondaryTab = "setup" | "run" | "terminal";
+
+export interface Worktree {
+  id: WorktreeId;
   projectId: ProjectId;
-  /** Slug-friendly title generated from the user's first prompt to the agent. */
-  name: string;
-  /** Single-line activity summary — updated by Flash-Lite when agent goes idle. */
-  subtitle: string;
-  /** Branch name in the project's worktree, e.g. `rli/fix-oauth-redirect-bug`. */
+  /** Branch checked out in the worktree, e.g. `fix-enrich-phase-stuck`. */
   branch: string;
-  status: SessionStatus;
+  /** User label, e.g. "Fix enrich phase stuck". */
+  name: string;
+  /** Absolute worktree checkout dir. */
+  path: string;
+  /** +N changes count from `git_status`. Polled. */
+  changeCount: number;
+  agentStatus: AgentStatus;
+  agentCli: AgentCli | null;
   createdAt: number;
-  /** User-assigned color tag. Defaults to the system accent if unset. */
+
+  /** Tabs (terminal / diff / markdown) in the main column for this worktree. */
+  tabIds: TabId[];
+  activeTabId: TabId | null;
+
+  /** Right-panel selected tab and split position. */
+  rightPanel: RightPanelTab;
+  /** Vertical split between right-panel upper and the secondary terminal. */
+  rightSplitPct: number;
+  secondaryTab: SecondaryTab;
+  /** PTY id for the always-on secondary terminal at the bottom-right. */
+  secondaryPtyId: PtyId;
+
+  /** User-assigned color tag (sidebar accent). */
   color?: TagId;
-  /** Per-session workspace tree — splits, pane content, layout. */
-  workspace: PaneNode;
-  /** Currently open file in this session's editor pane(s). */
-  openFile: OpenFile | null;
-  /**
-   * Wall-clock millis at which Claude was first detected in any
-   * terminal pane of this session. Drives the 5h-window pill's %
-   * and remaining-time math. Null until detection; persists across
-   * app restarts (the 5h Anthropic window outlives a relaunch).
-   */
-  claudeStartedAt?: number | null;
-  /**
-   * True iff a foreground TUI agent (claude, etc.) is currently
-   * running in some terminal pane of this session. Gates whether
-   * the global status bar shows the Claude pill — `claudeStartedAt`
-   * alone keeps the pill stuck on after the agent exits.
-   * Runtime-only (always reset to `false` on persistence).
-   */
-  agentRunning?: boolean;
 }
 
+/* ------------------------------------------------------------------
+   Tab — what shows in the main column. Three kinds for v1.
+   ------------------------------------------------------------------ */
+
+export type MarkdownMode = "diff" | "preview" | "edit";
+
+interface TabBase {
+  id: TabId;
+  worktreeId: WorktreeId;
+  /** Top line on the tab strip. Auto-generated for terminal tabs from
+      the user's first prompt, or filename for diff/markdown tabs. */
+  title: string;
+  /** 11px tertiary line under the title — live activity for terminals,
+      file path for diff/markdown. The differentiator. */
+  summary: string;
+  summaryUpdatedAt: number;
+}
+
+export interface TerminalTab extends TabBase {
+  kind: "terminal";
+  ptyId: PtyId;
+  /** Detected CLI (set by helper-agent detection on each prompt block). */
+  detectedCli: AgentCli | null;
+  agentStatus: AgentStatus;
+}
+
+export interface DiffTab extends TabBase {
+  kind: "diff";
+  filePath: string;
+  staged: boolean;
+}
+
+export interface MarkdownTab extends TabBase {
+  kind: "markdown";
+  filePath: string;
+  mode: MarkdownMode;
+  /** In-memory cache of file content; written on edit, persisted by autosave. */
+  content: string | null;
+}
+
+export type Tab = TerminalTab | DiffTab | MarkdownTab;
+
+/* ------------------------------------------------------------------
+   Archive — a previously-active worktree, persisted on close.
+   Restorable from the History section.
+   ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------
+   Settings — user preferences. Persisted across launches.
+   ------------------------------------------------------------------ */
+
+export type CompletionSound = "none" | "subtle" | "bell";
+export type ArchiveBehavior = "stash" | "force" | "ask";
+
+export interface Settings {
+  /** Show a macOS notification when an agent in a worktree goes idle. */
+  notifyOnIdle: boolean;
+  /** Play a sound when an agent in a worktree goes idle. */
+  completionSound: CompletionSound;
+  /**
+   * Always render the breadcrumb's `n% / 5h` Anthropic-window pill,
+   * even when no Claude transcript was found. Off by default — the
+   * pill self-hides when there's no active session, matching the
+   * "boring on purpose" .impeccable.md discipline.
+   */
+  alwaysShowContextUsage: boolean;
+  /**
+   * Prevent the system from sleeping while any worktree's agent is
+   * running. Implemented via macOS `caffeinate -di` once the backend
+   * command lands (TODO).
+   */
+  caffeinate: boolean;
+  /**
+   * Which CLI to spawn for helper operations (PR drafting, commit
+   * messages, AskCard) when the active worktree hasn't detected one.
+   */
+  defaultHelperCli: AgentCli;
+  /**
+   * Drive the helper-agent–driven tab-summary polling. Off skips the
+   * subprocess invocations — the tab subtitle then shows the launch
+   * command (cheaper if you're running many parallel agents).
+   */
+  autoSummarize: boolean;
+  /**
+   * Default behavior when archiving a worktree from the sidebar.
+   *   stash → `git stash push -u` then `git worktree remove`.
+   *   force → `git worktree remove --force` (drops dirty changes).
+   *   ask   → prompt each time.
+   */
+  archiveBehavior: ArchiveBehavior;
+}
+
+export const DEFAULT_SETTINGS: Settings = {
+  notifyOnIdle: true,
+  completionSound: "subtle",
+  alwaysShowContextUsage: false,
+  caffeinate: true,
+  defaultHelperCli: "claude",
+  autoSummarize: true,
+  archiveBehavior: "stash",
+};
+
+export interface ArchiveRecord {
+  id: ArchiveId;
+  projectId: ProjectId;
+  branch: string;
+  name: string;
+  createdAt: number;
+  archivedAt: number;
+  lastSummary: string;
+  changeCountAtArchive: number;
+  /** Original worktree checkout path — the restore target. */
+  originalPath: string;
+  agentCli: AgentCli | null;
+  /** Stash ref iff archive used `stash` option. */
+  stashRef?: string;
+}
+
+/* ------------------------------------------------------------------
+   App state
+   ------------------------------------------------------------------ */
+
+export interface AppState {
+  /** Project records keyed by id. */
+  projects: Record<ProjectId, Project>;
+  /** Display order in the sidebar. */
+  projectOrder: ProjectId[];
+
+  /** Worktree records keyed by id. */
+  worktrees: Record<WorktreeId, Worktree>;
+
+  /** Tab records keyed by id. */
+  tabs: Record<TabId, Tab>;
+
+  activeProjectId: ProjectId | null;
+  activeWorktreeByProject: Record<ProjectId, WorktreeId | null>;
+
+  archivedWorktrees: ArchiveRecord[];
+
+  sidebarCollapsed: boolean;
+  rightPanelCollapsed: boolean;
+
+  paletteOpen: boolean;
+  searchOpen: boolean;
+  settingsOpen: boolean;
+  prDialogOpen: { worktreeId: WorktreeId } | null;
+
+  settings: Settings;
+  markdownView: "rich" | "source";
+}
+
+/* ------------------------------------------------------------------
+   Reducer actions
+   ------------------------------------------------------------------ */
+
+export type AppAction =
+  // Projects
+  | { type: "set-active-project"; id: ProjectId }
+  | { type: "add-project"; project: Project }
+  | { type: "remove-project"; id: ProjectId }
+  | { type: "reorder-projects"; ids: ProjectId[] }
+  | { type: "set-project-expanded"; id: ProjectId; expanded: boolean }
+  | { type: "set-project-color"; id: ProjectId; color: TagId | undefined }
+
+  // Worktrees
+  | { type: "add-worktree"; worktree: Worktree }
+  | { type: "update-worktree"; id: WorktreeId; patch: Partial<Worktree> }
+  | { type: "set-active-worktree"; projectId: ProjectId; worktreeId: WorktreeId }
+  | { type: "archive-worktree"; id: WorktreeId; record: ArchiveRecord }
+  | { type: "restore-worktree"; archiveId: ArchiveId; worktree: Worktree }
+  | { type: "set-right-panel"; worktreeId: WorktreeId; panel: RightPanelTab }
+  | { type: "set-secondary-tab"; worktreeId: WorktreeId; tab: SecondaryTab }
+  | { type: "set-right-split-pct"; worktreeId: WorktreeId; pct: number }
+  | { type: "set-agent-status"; worktreeId: WorktreeId; status: AgentStatus; cli?: AgentCli | null }
+  | { type: "set-change-count"; worktreeId: WorktreeId; count: number }
+
+  // Tabs
+  | { type: "open-tab"; tab: Tab; activate?: boolean }
+  | { type: "close-tab"; id: TabId }
+  | { type: "select-tab"; worktreeId: WorktreeId; id: TabId }
+  | { type: "update-tab"; id: TabId; patch: Partial<Tab> }
+  | { type: "set-tab-summary"; id: TabId; summary: string }
+
+  // Chrome
+  | { type: "toggle-sidebar" }
+  | { type: "toggle-right-panel" }
+  | { type: "toggle-palette" }
+  | { type: "set-palette"; open: boolean }
+  | { type: "toggle-search" }
+  | { type: "set-search"; open: boolean }
+  | { type: "set-pr-dialog"; worktreeId: WorktreeId | null }
+  | { type: "set-settings-open"; open: boolean }
+  | { type: "toggle-settings" }
+  | { type: "update-settings"; patch: Partial<Settings> }
+  | { type: "set-markdown-view"; view: "rich" | "source" }
+
+  // Persistence
+  | { type: "hydrate"; state: Partial<AppState> };
+
+/* ------------------------------------------------------------------
+   Backwards-compat re-exports.
+   The previous schema used `Session` and `OpenFile`. A handful of
+   callers still import these names; we export aliases pointing at
+   the closest replacement so legacy code keeps compiling during the
+   incremental migration. New code should use Worktree/Tab directly.
+   ------------------------------------------------------------------ */
+
+/** @deprecated alias to Worktree for legacy callers. */
+export type Session = Worktree;
+/** @deprecated alias to WorktreeId for legacy callers. */
+export type SessionId = WorktreeId;
+/** @deprecated marker — used by some legacy code paths. */
 export interface OpenFile {
   path: string;
   content: string;
 }
-
-export type LeftPanel = "files" | "git" | "connections" | null;
-
-export interface AppState {
-  projects: Project[];
-  sessions: Session[];
-  activeProjectId: ProjectId | null;
-  activeSessionByProject: Record<ProjectId, SessionId | null>;
-  paletteOpen: boolean;
-  /**
-   * Which side panel is showing on the left. Only one of files / git /
-   * connections at a time — clicking a tab in the ActivityRail swaps
-   * the slot. `null` hides the left panel entirely.
-   */
-  leftPanel: LeftPanel;
-  searchOpen: boolean;
-  apiKeyDialogOpen: boolean;
-  /**
-   * Markdown editor view: "rich" renders an editable WYSIWYG (TipTap)
-   * and "source" drops to the plain CodeMirror view. Persisted across
-   * file switches so the user's preference sticks.
-   */
-  markdownView: "rich" | "source";
-}
-
-export type AppAction =
-  | { type: "set-active-project"; id: ProjectId }
-  | { type: "add-project"; project: Project }
-  | { type: "remove-project"; id: ProjectId }
-  | { type: "set-active-session"; projectId: ProjectId; sessionId: SessionId }
-  | { type: "toggle-palette" }
-  | { type: "set-palette"; open: boolean }
-  | { type: "set-left-panel"; panel: LeftPanel }
-  | { type: "toggle-left-panel"; panel: Exclude<LeftPanel, null> }
-  | { type: "toggle-search" }
-  | { type: "set-search"; open: boolean }
-  | { type: "set-markdown-view"; view: "rich" | "source" }
-  | { type: "toggle-browser" }
-  | { type: "toggle-graph" }
-  | { type: "toggle-api-key" }
-  | { type: "set-api-key-dialog"; open: boolean }
-  | { type: "open-file"; sessionId: SessionId; file: OpenFile }
-  | { type: "close-file"; sessionId: SessionId }
-  | { type: "add-session"; session: Session }
-  | { type: "remove-session"; id: SessionId }
-  | { type: "update-session"; id: SessionId; patch: Partial<Session> }
-  | { type: "set-project-color"; id: ProjectId; color: TagId | undefined }
-  | { type: "set-session-color"; id: SessionId; color: TagId | undefined }
-  | { type: "reorder-projects"; ids: ProjectId[] }
-  | { type: "reorder-sessions"; projectId: ProjectId; ids: SessionId[] }
-  | {
-      type: "split-pane";
-      sessionId: SessionId;
-      paneId: PaneNodeId;
-      direction: SplitDirection;
-      content: PaneContent;
-    }
-  | { type: "close-pane"; sessionId: SessionId; paneId: PaneNodeId }
-  | {
-      type: "set-pane-content";
-      sessionId: SessionId;
-      paneId: PaneNodeId;
-      content: PaneContent;
-    }
-  | {
-      type: "swap-panes";
-      sessionId: SessionId;
-      aId: PaneNodeId;
-      bId: PaneNodeId;
-    }
-  | {
-      /**
-       * Relocate a pane next to another pane on a chosen edge. Used by
-       * drag-and-drop with edge-zone detection — drop on a target's
-       * left/right/up/down edge to land the source on that side.
-       */
-      type: "move-pane";
-      sessionId: SessionId;
-      sourceId: PaneNodeId;
-      targetId: PaneNodeId;
-      direction: SplitDirection;
-    }
-  | {
-      /**
-       * Replace the persistent slice (projects, sessions, active pointers)
-       * with a snapshot loaded from disk. Transient UI flags (palette,
-       * dialogs) are left at their current values so we don't briefly
-       * flash open menus on boot. Dispatched once after the store loads.
-       */
-      type: "hydrate";
-      projects: Project[];
-      sessions: Session[];
-      activeProjectId: ProjectId | null;
-      activeSessionByProject: Record<ProjectId, SessionId | null>;
-    };
+/**
+ * @deprecated kept as a thin status enum so legacy primitives (StatusDot)
+ * still compile. New code uses {@link AgentStatus} directly.
+ */
+export type SessionStatus = "idle" | "streaming" | "error";

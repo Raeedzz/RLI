@@ -38,9 +38,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
 
-use crate::gemini::{generate_text, GeminiState};
+use crate::helper_agent::{run_inline, HelperMode};
 
 /// Anthropic's enforced 5-hour session length. A "session" in
 /// Claude.ai's UI = a 5h timer that starts on your first message after
@@ -606,8 +605,8 @@ fn normalize_summary(raw: &str) -> String {
 ///     user prompt verbatim. Still better than just "claude".
 #[tauri::command]
 pub async fn claude_activity_summary(
-    state: State<'_, GeminiState>,
     project_cwd: String,
+    cli: Option<String>,
 ) -> Result<Option<String>, String> {
     let Some(dir) = transcript_dir_for(&project_cwd) else {
         return Ok(None);
@@ -645,9 +644,8 @@ pub async fn claude_activity_summary(
         }
     }
 
-    // Fallback used when Gemini isn't reachable: the most recent real
-    // user prompt verbatim. Always populated when we have any turns,
-    // since `read_recent_turns` returns at most n_user + their replies.
+    // Fallback used when the helper CLI isn't reachable: the most recent
+    // real user prompt verbatim. Always populated when we have any turns.
     let fallback = turns
         .iter()
         .rev()
@@ -655,7 +653,7 @@ pub async fn claude_activity_summary(
         .map(|t| cap_inline(&t.text, 80))
         .unwrap_or_default();
 
-    let summary = match summarize_with_gemini(&state, &turns).await {
+    let summary = match summarize_with_helper(&cli.unwrap_or_else(|| "claude".to_string()), &turns).await {
         Ok(s) => s,
         Err(_) => fallback.clone(),
     };
@@ -671,13 +669,10 @@ pub async fn claude_activity_summary(
     Ok(Some(summary))
 }
 
-/// Build the prompt for Gemini and parse its single-line reply. Kept
-/// separate from the cache/file logic so it's easy to unit-test the
-/// shape of the prompt without standing up a Tauri app.
-async fn summarize_with_gemini(
-    state: &State<'_, GeminiState>,
-    turns: &[Turn],
-) -> Result<String, String> {
+/// Ask the helper agent to compress recent turns into a single short
+/// activity summary. CLI defaults to "claude" but can be any of our
+/// supported agents.
+async fn summarize_with_helper(cli: &str, turns: &[Turn]) -> Result<String, String> {
     let mut convo = String::new();
     for t in turns {
         convo.push_str(&format!("[{}]\n{}\n\n", t.role.to_uppercase(), t.text));
@@ -689,12 +684,8 @@ async fn summarize_with_gemini(
          phrase, 8 words or fewer, sentence case, no trailing period, no \
          quotes. Use an active verb. Be specific about the task — not \
          \"working on code\".",
-        convo = convo
     );
-    let system = "You write concise activity summaries (max 8 words) for \
-                  a status line. Output only the summary itself — no \
-                  preamble, no explanation, no quotes, no trailing period.";
-    let raw = generate_text(state, &prompt, Some(system), Some(40), Some(0.2)).await?;
+    let raw = run_inline("", cli, HelperMode::Summary, &prompt).await?;
     Ok(normalize_summary(&raw))
 }
 

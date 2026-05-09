@@ -80,7 +80,7 @@ export function WindowChrome() {
         }}
       >
         <SettingsButton
-          onClick={() => dispatch({ type: "toggle-api-key" })}
+          onClick={() => dispatch({ type: "set-settings-open", open: true })}
         />
       </div>
     </div>

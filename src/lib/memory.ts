@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { gemini } from "./gemini";
 
 /**
  * Frontend wrapper around the Rust-side memory commands.
@@ -104,33 +103,14 @@ export const memory = {
     }),
 
   /**
-   * Embed `content` via Gemini and store it. Falls back to plain
-   * (FTS-only) store if the API key isn't set or the embed call fails —
-   * memory always succeeds even when AI is offline.
+   * Plain FTS-backed store. Embeddings were dropped with the Gemini
+   * removal — the memory layer ranks via FTS5 bm25 alone now.
    */
-  embedAndStore: async (args: StoreArgs): Promise<string> => {
-    let embedding: number[] | undefined;
-    try {
-      embedding = await gemini.embed(args.content);
-    } catch {
-      embedding = undefined;
-    }
-    return memory.store({ ...args, embedding });
-  },
+  embedAndStore: async (args: StoreArgs): Promise<string> => memory.store(args),
 
   /**
-   * Embed the query, then recall with cosine reranking. Falls back to
-   * plain FTS recall if embedding fails.
+   * Plain FTS-backed recall. Same rationale as `embedAndStore`.
    */
-  embedAndRecall: async (args: RecallArgs): Promise<Memory[]> => {
-    let queryEmbedding: number[] | undefined;
-    if (args.query.trim().length > 0) {
-      try {
-        queryEmbedding = await gemini.embed(args.query);
-      } catch {
-        queryEmbedding = undefined;
-      }
-    }
-    return memory.recall({ ...args, queryEmbedding });
-  },
+  embedAndRecall: async (args: RecallArgs): Promise<Memory[]> =>
+    memory.recall(args),
 };

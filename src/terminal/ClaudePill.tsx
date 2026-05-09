@@ -9,6 +9,7 @@ import {
   type ClaudeUsageStatus,
 } from "@/lib/claudeUsage";
 import { useAppState } from "@/state/AppState";
+import type { TerminalTab } from "@/state/types";
 
 /**
  * Compact Claude usage indicator. Sources its numbers from the real
@@ -26,16 +27,17 @@ import { useAppState } from "@/state/AppState";
  */
 export function ClaudePill() {
   const { status, derived } = useClaudeUsage();
-  const { sessions } = useAppState();
+  const state = useAppState();
   const [pickerOpen, setPickerOpen] = useState(false);
 
-  // Hard gate: only render when an agent (claude / codex / aider) is
-  // CURRENTLY running in some pane. The 5h window keeps ticking on
-  // Anthropic's side after the agent exits, but the pill is meant to
-  // be a status indicator for the active TUI — not a permanent decoration.
-  // BlockTerminal flips `agentRunning` via onAgentRunningChange; we
-  // just OR across all sessions here.
-  const anyAgentRunning = sessions.some((s) => s.agentRunning === true);
+  // Hard gate: only render when a terminal tab in any worktree is
+  // currently running an agent. Worktree.agentStatus and TerminalTab
+  // .agentStatus both flip via BlockTerminal's onAgentRunningChange.
+  const anyAgentRunning =
+    Object.values(state.worktrees).some((w) => w.agentStatus === "running") ||
+    Object.values(state.tabs).some(
+      (t): t is TerminalTab => t.kind === "terminal" && t.agentStatus === "running",
+    );
   if (!anyAgentRunning) return null;
 
   if (!status || !status.active || !derived) return null;
