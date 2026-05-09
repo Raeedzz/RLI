@@ -1,10 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { motion } from "motion/react";
-import { invoke } from "@tauri-apps/api/core";
 import {
   IconPlus,
   IconClose,
-  IconChevronDown,
   IconRunning,
 } from "@/design/icons";
 import {
@@ -54,11 +52,10 @@ export function MainColumn() {
       style={{
         height: "100%",
         display: "grid",
-        gridTemplateRows: "auto auto 1fr",
+        gridTemplateRows: "auto 1fr",
         backgroundColor: "var(--surface-2)",
       }}
     >
-      <Breadcrumb project={project} worktree={worktree} />
       <TabStrip tabs={tabs} activeTabId={activeTab?.id ?? null} worktreeId={worktree.id} />
       <TabContent
         worktree={worktree}
@@ -72,78 +69,6 @@ export function MainColumn() {
 /* ------------------------------------------------------------------
    Breadcrumb
    ------------------------------------------------------------------ */
-
-function Breadcrumb({
-  project,
-  worktree,
-}: {
-  project: { name: string; path: string };
-  worktree: Worktree;
-}) {
-  const segName = worktree.path.split("/").filter(Boolean).pop() ?? "";
-  const usage = useClaudeUsage();
-  const { settings } = useAppState();
-  const showUsage = usage !== null || settings.alwaysShowContextUsage;
-  const usageVal = usage ?? { active: false, percent: 0 };
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        height: 36,
-        padding: "0 var(--space-3)",
-        borderBottom: "var(--border-1)",
-        gap: "var(--space-1-5)",
-        fontSize: "var(--text-xs)",
-        color: "var(--text-tertiary)",
-        whiteSpace: "nowrap",
-      }}
-    >
-      <span style={{ color: "var(--text-secondary)" }}>{project.name}</span>
-      <Sep />
-      <span style={{ color: "var(--text-secondary)" }}>{worktree.branch}</span>
-      <span style={{ flex: 1 }} />
-      {showUsage && (
-        <span
-          className="tabular"
-          title={`${usageVal.percent}% of Anthropic 5-hour window used`}
-          style={{
-            fontSize: "var(--text-2xs)",
-            color:
-              usageVal.percent >= 80
-                ? "var(--state-warning)"
-                : "var(--text-tertiary)",
-          }}
-        >
-          {usageVal.percent}% / 5h
-        </span>
-      )}
-      <button
-        type="button"
-        title={worktree.path}
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 4,
-          height: 22,
-          padding: "0 var(--space-1-5)",
-          borderRadius: "var(--radius-xs)",
-          color: "var(--text-secondary)",
-          backgroundColor: "var(--surface-3)",
-          fontFamily: "var(--font-mono)",
-          fontSize: "var(--text-2xs)",
-        }}
-      >
-        /{segName}
-        <IconChevronDown size={11} />
-      </button>
-    </div>
-  );
-}
-
-function Sep() {
-  return <span style={{ color: "var(--text-disabled)" }}>›</span>;
-}
 
 /* ------------------------------------------------------------------
    Tab strip
@@ -614,53 +539,3 @@ function Kbd({ children }: { children: React.ReactNode }) {
   );
 }
 
-/* ------------------------------------------------------------------
-   Claude 5h-window usage hook — polls the existing Tauri command.
-   Surfaced in the breadcrumb as `<n>% / 5h`. Self-hides when no
-   active Anthropic session is detected.
-   ------------------------------------------------------------------ */
-
-interface ClaudeUsageStatus {
-  active: boolean;
-  used_tokens?: number;
-  window_tokens?: number;
-  percent?: number;
-  remaining_seconds?: number;
-}
-
-interface ClaudeUsage {
-  active: boolean;
-  percent: number;
-}
-
-function useClaudeUsage(): ClaudeUsage | null {
-  const [usage, setUsage] = useState<ClaudeUsage | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const status = await invoke<ClaudeUsageStatus>("claude_usage_status");
-        if (cancelled) return;
-        if (!status.active) {
-          setUsage(null);
-          return;
-        }
-        const percent =
-          status.percent ??
-          (status.used_tokens && status.window_tokens
-            ? Math.round((status.used_tokens / status.window_tokens) * 100)
-            : 0);
-        setUsage({ active: status.active, percent });
-      } catch {
-        if (!cancelled) setUsage(null);
-      }
-    };
-    void tick();
-    const interval = window.setInterval(tick, 30_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, []);
-  return usage;
-}

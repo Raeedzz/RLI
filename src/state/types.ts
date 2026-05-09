@@ -190,6 +190,24 @@ export interface Settings {
   archiveBehavior: ArchiveBehavior;
 }
 
+/** Resize bounds for the side columns. Reducer clamps writes here. */
+export const SIDEBAR_MIN = 200;
+export const SIDEBAR_MAX = 480;
+export const SIDEBAR_DEFAULT = 248;
+export const RIGHT_MIN = 280;
+export const RIGHT_MAX = 720;
+export const RIGHT_DEFAULT = 372;
+
+export function clampSidebar(w: number): number {
+  if (Number.isNaN(w)) return SIDEBAR_DEFAULT;
+  return Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, Math.round(w)));
+}
+
+export function clampRight(w: number): number {
+  if (Number.isNaN(w)) return RIGHT_DEFAULT;
+  return Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, Math.round(w)));
+}
+
 export const DEFAULT_SETTINGS: Settings = {
   notifyOnIdle: true,
   completionSound: "subtle",
@@ -240,6 +258,12 @@ export interface AppState {
   sidebarCollapsed: boolean;
   rightPanelCollapsed: boolean;
 
+  /** Resizable column widths in px. Persisted across launches; clamped
+      to [SIDEBAR_MIN, SIDEBAR_MAX] / [RIGHT_MIN, RIGHT_MAX] at the
+      reducer boundary so out-of-bounds blobs can't break the layout. */
+  sidebarWidth: number;
+  rightPanelWidth: number;
+
   paletteOpen: boolean;
   searchOpen: boolean;
   settingsOpen: boolean;
@@ -284,6 +308,8 @@ export type AppAction =
   // Chrome
   | { type: "toggle-sidebar" }
   | { type: "toggle-right-panel" }
+  | { type: "set-sidebar-width"; width: number }
+  | { type: "set-right-panel-width"; width: number }
   | { type: "toggle-palette" }
   | { type: "set-palette"; open: boolean }
   | { type: "toggle-search" }

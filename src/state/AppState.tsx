@@ -16,7 +16,13 @@ import type {
   Worktree,
   WorktreeId,
 } from "./types";
-import { DEFAULT_SETTINGS } from "./types";
+import {
+  DEFAULT_SETTINGS,
+  SIDEBAR_DEFAULT,
+  RIGHT_DEFAULT,
+  clampSidebar,
+  clampRight,
+} from "./types";
 import { loadState, saveState } from "../lib/persistence";
 
 /* ------------------------------------------------------------------
@@ -83,6 +89,8 @@ export const INITIAL_STATE: AppState = {
   archivedWorktrees: [],
   sidebarCollapsed: false,
   rightPanelCollapsed: false,
+  sidebarWidth: SIDEBAR_DEFAULT,
+  rightPanelWidth: RIGHT_DEFAULT,
   paletteOpen: false,
   searchOpen: false,
   settingsOpen: false,
@@ -348,6 +356,12 @@ export function reducer(state: AppState, action: AppAction): AppState {
     case "toggle-right-panel":
       return { ...state, rightPanelCollapsed: !state.rightPanelCollapsed };
 
+    case "set-sidebar-width":
+      return { ...state, sidebarWidth: clampSidebar(action.width) };
+
+    case "set-right-panel-width":
+      return { ...state, rightPanelWidth: clampRight(action.width) };
+
     case "toggle-palette":
       return { ...state, paletteOpen: !state.paletteOpen };
 
@@ -449,6 +463,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     state.markdownView,
     state.sidebarCollapsed,
     state.rightPanelCollapsed,
+    state.sidebarWidth,
+    state.rightPanelWidth,
   ]);
 
   return (

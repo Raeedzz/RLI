@@ -6,6 +6,7 @@ import {
   useAppState,
 } from "@/state/AppState";
 import { openProjectDialog } from "@/lib/projectDialog";
+import { nextAutoBranch, worktreeCreate } from "@/lib/worktrees";
 
 /**
  * Match a digit press regardless of modifier-induced char shifting.
@@ -38,7 +39,8 @@ export function useKeyboardShortcuts() {
   const dispatch = useAppDispatch();
   const project = useActiveProject();
   const worktree = useActiveWorktree();
-  const { projectOrder, worktrees } = useAppState();
+  const state = useAppState();
+  const { projectOrder, worktrees } = state;
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -79,6 +81,28 @@ export function useKeyboardShortcuts() {
       if (cmd && !shift && e.key.toLowerCase() === "o") {
         e.preventDefault();
         void openProjectDialog(dispatch);
+        return;
+      }
+
+      // ⌘N — auto-create a new worktree in the active project. No
+      // prompt: the branch is named `agent-N` (next free index).
+      if (cmd && !shift && e.key.toLowerCase() === "n" && project) {
+        e.preventDefault();
+        const branch = nextAutoBranch(project.id, state);
+        const proj = project;
+        void (async () => {
+          try {
+            const w = await worktreeCreate(
+              proj.id,
+              proj.path,
+              branch,
+              branch,
+            );
+            dispatch({ type: "add-worktree", worktree: w });
+          } catch (err) {
+            window.alert(`Worktree creation failed: ${err}`);
+          }
+        })();
         return;
       }
 
@@ -131,5 +155,5 @@ export function useKeyboardShortcuts() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [dispatch, project, worktree, worktrees, projectOrder]);
+  }, [dispatch, project, worktree, worktrees, projectOrder, state]);
 }

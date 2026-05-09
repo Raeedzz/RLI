@@ -1,15 +1,20 @@
 import {
+  useEffect,
+  useRef,
   useState,
   type CSSProperties,
+  type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
 } from "react";
-import { motion, AnimatePresence } from "motion/react";
+import { AnimatePresence } from "motion/react";
+import { ColorPicker } from "@/primitives/ColorPicker";
 import {
   IconSidebar,
   IconBack,
   IconForward,
   IconHistory,
+  IconFilter,
   IconFolderAdd,
   IconPlus,
   IconBranch,
@@ -17,8 +22,6 @@ import {
   IconClose,
   IconHelp,
   IconSettings,
-  IconTerminal,
-  IconCheck,
 } from "@/design/icons";
 import {
   useActiveWorktree,
@@ -26,14 +29,13 @@ import {
   useAppState,
 } from "@/state/AppState";
 import type {
-  AgentCli,
   ArchiveRecord,
   Project,
-  Tab,
   Worktree,
 } from "@/state/types";
 import { openProjectDialog } from "@/lib/projectDialog";
 import {
+  nextAutoBranch,
   worktreeArchive,
   worktreeCreate,
   worktreeRestore,
@@ -63,7 +65,9 @@ export function Sidebar() {
     return <CollapsedRail />;
   }
 
-  const allWorktrees = Object.values(state.worktrees);
+  const projectIds = state.projectOrder.length
+    ? state.projectOrder
+    : Object.keys(state.projects);
 
   return (
     <div
@@ -85,36 +89,35 @@ export function Sidebar() {
           minHeight: 0,
           overflowY: "auto",
           overflowX: "hidden",
-          padding: "var(--space-2)",
         }}
       >
-        <WorktreesHeader projects={state.projects} />
+        <ProjectsHeader />
         <ul
           style={{
             listStyle: "none",
             margin: 0,
-            padding: 0,
+            padding: "0 var(--space-1) var(--space-2)",
             display: "flex",
             flexDirection: "column",
-            gap: 4,
+            gap: 6,
           }}
         >
-          {allWorktrees.map((worktree, i) => {
-            const project = state.projects[worktree.projectId];
+          {projectIds.map((id) => {
+            const project = state.projects[id];
             if (!project) return null;
-            const summary = pickSummary(worktree, state.tabs);
+            const projectWorktrees = Object.values(state.worktrees).filter(
+              (w) => w.projectId === id,
+            );
             return (
-              <WorktreeCard
-                key={worktree.id}
-                worktree={worktree}
+              <ProjectGroup
+                key={id}
                 project={project}
-                summary={summary}
-                isActive={activeWorktree?.id === worktree.id}
-                index={i}
+                worktrees={projectWorktrees}
+                activeWorktreeId={activeWorktree?.id ?? null}
               />
             );
           })}
-          {allWorktrees.length === 0 && (
+          {projectIds.length === 0 && (
             <li
               style={{
                 padding: "var(--space-3)",
@@ -122,7 +125,7 @@ export function Sidebar() {
                 fontSize: "var(--text-xs)",
               }}
             >
-              No worktrees yet.
+              No projects yet — press ⌘O to open a folder.
             </li>
           )}
         </ul>
@@ -137,30 +140,6 @@ export function Sidebar() {
    Helpers
    ------------------------------------------------------------------ */
 
-/** Resolve the activity summary for a worktree — grab it from the
- *  active terminal tab, or the first terminal tab if the active is
- *  diff/markdown. Empty when the worktree has no terminals. */
-function pickSummary(
-  worktree: Worktree,
-  tabs: Record<string, Tab>,
-): string {
-  const active = worktree.activeTabId ? tabs[worktree.activeTabId] : null;
-  if (active?.kind === "terminal" && active.summary) return active.summary;
-  for (const id of worktree.tabIds) {
-    const t = tabs[id];
-    if (t?.kind === "terminal" && t.summary) return t.summary;
-  }
-  return "";
-}
-
-/** Turn `/Users/raeedz/Developer/RLI` → `~/Developer/RLI`. */
-function relHome(absPath: string): string {
-  // Hardcoding $HOME is fine in v1 — RLI ships only as a Tauri DMG and
-  // there's no environment-injection path on the renderer side.
-  const home = "/Users/raeedz";
-  if (absPath.startsWith(home)) return "~" + absPath.slice(home.length);
-  return absPath;
-}
 
 /* ------------------------------------------------------------------
    Header rows
@@ -198,33 +177,61 @@ function SidebarHeader() {
   );
 }
 
-function WorktreesHeader({
-  projects,
+function ProjectsHeader() {
+  const dispatch = useAppDispatch();
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        height: 30,
+        padding: "0 var(--space-2) 0 var(--space-3)",
+        color: "var(--text-tertiary)",
+        fontSize: "var(--text-xs)",
+        letterSpacing: "var(--tracking-wide)",
+      }}
+    >
+      <span>Projects</span>
+      <span style={{ flex: 1 }} />
+      <SmallIconButton title="Filter">
+        <IconFilter size={14} />
+      </SmallIconButton>
+      <SmallIconButton
+        title="Open project (⌘O)"
+        onClick={() => void openProjectDialog(dispatch)}
+      >
+        <IconFolderAdd size={14} />
+      </SmallIconButton>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
+   Project group: header (glyph + name + add) + worktree rows
+   ------------------------------------------------------------------ */
+
+function ProjectGroup({
+  project,
+  worktrees,
+  activeWorktreeId,
 }: {
-  projects: Record<string, Project>;
+  project: Project;
+  worktrees: Worktree[];
+  activeWorktreeId: string | null;
 }) {
   const dispatch = useAppDispatch();
   const toast = useToast();
+  const [hovering, setHovering] = useState(false);
 
-  const onAdd = async () => {
-    const ids = Object.keys(projects);
-    if (ids.length === 0) {
-      // No projects yet — open the picker.
-      void openProjectDialog(dispatch);
-      return;
-    }
-    // For v1 we always create the new worktree inside the most recently
-    // active project. ⌘O picks a different project entirely.
-    const projectId = ids[ids.length - 1];
-    const project = projects[projectId];
-    const branch = window.prompt("New branch name", "");
-    if (!branch?.trim()) return;
+  const state = useAppState();
+  const onCreate = async () => {
+    const branch = nextAutoBranch(project.id, state);
     try {
       const w = await worktreeCreate(
         project.id,
         project.path,
-        branch.trim(),
-        branch.trim(),
+        branch,
+        branch,
       );
       dispatch({ type: "add-worktree", worktree: w });
     } catch (err) {
@@ -233,30 +240,86 @@ function WorktreesHeader({
   };
 
   return (
-    <div
+    <li
+      onMouseEnter={() => setHovering(true)}
+      onMouseLeave={() => setHovering(false)}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          height: 30,
+          padding: "0 var(--space-2)",
+          color: "var(--text-primary)",
+          fontSize: "var(--text-base)",
+          fontWeight: "var(--weight-medium)",
+        }}
+      >
+        <ProjectGlyph project={project} />
+        <span
+          style={{
+            flex: 1,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {project.name}
+        </span>
+        {hovering && (
+          <SmallIconButton title="New worktree" onClick={onCreate}>
+            <IconPlus size={14} />
+          </SmallIconButton>
+        )}
+      </div>
+
+      <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+        {worktrees.map((w) => (
+          <WorktreeRow
+            key={w.id}
+            worktree={w}
+            project={project}
+            isActive={activeWorktreeId === w.id}
+          />
+        ))}
+      </ul>
+    </li>
+  );
+}
+
+function ProjectGlyph({ project }: { project: Project }) {
+  if (project.faviconDataUri) {
+    return (
+      <img
+        src={project.faviconDataUri}
+        alt=""
+        width={16}
+        height={16}
+        style={{ borderRadius: 3, flexShrink: 0 }}
+      />
+    );
+  }
+  return (
+    <span
+      aria-hidden
       style={{
-        display: "flex",
+        width: 16,
+        height: 16,
+        borderRadius: 3,
+        backgroundColor: "var(--surface-3)",
+        display: "inline-flex",
         alignItems: "center",
-        height: 28,
-        padding: "0 var(--space-1) 0 var(--space-2)",
-        marginBottom: 4,
-        color: "var(--text-tertiary)",
-        fontSize: "var(--text-xs)",
-        letterSpacing: "var(--tracking-wide)",
+        justifyContent: "center",
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+        fontWeight: 600,
+        color: "var(--text-secondary)",
+        flexShrink: 0,
       }}
     >
-      <span>Worktrees</span>
-      <span style={{ flex: 1 }} />
-      <SmallIconButton
-        title="Open project (⌘O)"
-        onClick={() => void openProjectDialog(dispatch)}
-      >
-        <IconFolderAdd size={14} />
-      </SmallIconButton>
-      <SmallIconButton title="New worktree" onClick={onAdd}>
-        <IconPlus size={14} />
-      </SmallIconButton>
-    </div>
+      {project.glyph}
+    </span>
   );
 }
 
@@ -374,26 +437,27 @@ function HistorySection({ records }: { records: ArchiveRecord[] }) {
 }
 
 /* ------------------------------------------------------------------
-   Worktree card
+   Worktree row — compact, indented under its project header.
    ------------------------------------------------------------------ */
 
-function WorktreeCard({
+function WorktreeRow({
   worktree,
   project,
-  summary,
   isActive,
-  index,
 }: {
   worktree: Worktree;
   project: Project;
-  summary: string;
   isActive: boolean;
-  index: number;
 }) {
   const dispatch = useAppDispatch();
   const settings = useAppState().settings;
   const toast = useToast();
   const [hovering, setHovering] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draftName, setDraftName] = useState(worktree.name);
+  const [colorAnchor, setColorAnchor] = useState<
+    { x: number; y: number } | null
+  >(null);
   const isRunning = worktree.agentStatus === "running";
 
   const onSelect = () => {
@@ -403,6 +467,38 @@ function WorktreeCard({
       projectId: project.id,
       worktreeId: worktree.id,
     });
+  };
+
+  const onDoubleClick = (e: MouseEvent) => {
+    // Ignore double-clicks landing on inner buttons (archive ✕, etc.)
+    const t = e.target as HTMLElement;
+    if (t.tagName === "BUTTON" && t !== e.currentTarget) return;
+    e.preventDefault();
+    setDraftName(worktree.name);
+    setEditing(true);
+  };
+
+  const onContextMenu = (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setColorAnchor({ x: e.clientX, y: e.clientY });
+  };
+
+  const commitRename = () => {
+    const trimmed = draftName.trim();
+    if (trimmed && trimmed !== worktree.name) {
+      dispatch({
+        type: "update-worktree",
+        id: worktree.id,
+        patch: { name: trimmed },
+      });
+    }
+    setEditing(false);
+  };
+
+  const cancelRename = () => {
+    setDraftName(worktree.name);
+    setEditing(false);
   };
 
   const onArchive = async (e: MouseEvent) => {
@@ -447,61 +543,97 @@ function WorktreeCard({
     }
   };
 
-  const cardStyle: CSSProperties = {
-    position: "relative",
-    display: "grid",
-    gridTemplateColumns: "32px 1fr auto",
-    gridColumnGap: 10,
-    alignItems: "start",
+  // Idle: transparent. Active: surface-3 fill. Hover: surface-2.
+  // When colored, blend the tag in subtly so the row reads tinted but
+  // doesn't fight the rest of the chrome.
+  const colored = !!worktree.color;
+  const restingBg = colored
+    ? `color-mix(in oklch, transparent, var(--tag-${worktree.color}) 25%)`
+    : "transparent";
+  const hoverBg = colored
+    ? `color-mix(in oklch, var(--surface-2), var(--tag-${worktree.color}) 35%)`
+    : "var(--surface-2)";
+  const activeBg = colored
+    ? `color-mix(in oklch, var(--surface-3), var(--tag-${worktree.color}) 35%)`
+    : "var(--surface-3)";
+  const startBg = isActive ? activeBg : restingBg;
+  const textColor = isActive ? "var(--text-primary)" : "var(--text-secondary)";
+
+  const rowStyle: CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
     width: "100%",
-    padding: "10px 10px 10px 12px",
-    borderRadius: "var(--radius-md)",
-    backgroundColor: isActive ? "var(--surface-3)" : "var(--surface-2)",
-    boxShadow: isActive
-      ? "inset 2px 0 0 0 var(--accent)"
-      : "inset 2px 0 0 0 transparent",
-    color: "var(--text-secondary)",
+    height: 30,
+    padding: "0 var(--space-2) 0 28px",
+    borderRadius: "var(--radius-sm)",
+    backgroundColor: startBg,
+    color: textColor,
+    fontSize: "var(--text-base)",
     textAlign: "left",
     border: "none",
     cursor: "default",
     transition:
       "background-color var(--motion-instant) var(--ease-out-quart)," +
-      "box-shadow var(--motion-fast) var(--ease-out-quart)",
+      "color var(--motion-instant) var(--ease-out-quart)",
   };
 
   return (
-    <motion.li
-      initial={{ opacity: 0, y: 4 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{
-        duration: 0.24,
-        ease: [0.25, 1, 0.5, 1],
-        delay: Math.min(index * 0.03, 0.21),
-      }}
+    <li
       onMouseEnter={() => setHovering(true)}
       onMouseLeave={() => setHovering(false)}
     >
       <button
         type="button"
         onClick={onSelect}
-        style={cardStyle}
+        onDoubleClick={onDoubleClick}
+        onContextMenu={onContextMenu}
+        style={rowStyle}
         onMouseOver={(e) => {
-          if (!isActive)
-            e.currentTarget.style.backgroundColor = "var(--surface-3)";
+          if (!isActive) e.currentTarget.style.backgroundColor = hoverBg;
         }}
         onMouseOut={(e) => {
-          if (!isActive)
-            e.currentTarget.style.backgroundColor = "var(--surface-2)";
+          if (!isActive) e.currentTarget.style.backgroundColor = restingBg;
         }}
       >
-        <Avatar agentCli={worktree.agentCli} isRunning={isRunning} />
+        <span
+          aria-hidden
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 14,
+            height: 14,
+            color: isRunning ? "var(--accent)" : "var(--text-tertiary)",
+            transition: "color var(--motion-fast) var(--ease-out-quart)",
+            flexShrink: 0,
+          }}
+        >
+          {isRunning ? (
+            <span
+              key="running"
+              className="rli-loader-spin"
+              style={{ display: "inline-flex" }}
+            >
+              <IconRunning size={14} />
+            </span>
+          ) : (
+            <IconBranch key="idle" size={14} />
+          )}
+        </span>
 
-        <div style={{ minWidth: 0, display: "grid", gridRowGap: 2 }}>
+        {editing ? (
+          <RenameInput
+            value={draftName}
+            onChange={setDraftName}
+            onCommit={commitRename}
+            onCancel={cancelRename}
+          />
+        ) : (
           <span
             style={{
-              fontSize: "var(--text-base)",
-              fontWeight: "var(--weight-medium)",
-              color: isActive ? "var(--text-primary)" : "var(--text-secondary)",
+              flex: 1,
+              minWidth: 0,
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
@@ -509,173 +641,105 @@ function WorktreeCard({
           >
             {worktree.name}
           </span>
-          <span
-            style={{
-              fontSize: "var(--text-2xs)",
-              color: "var(--text-tertiary)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              fontFamily: "var(--font-mono)",
-            }}
-          >
-            {relHome(project.path)}
-          </span>
-          <span
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-              fontSize: "var(--text-2xs)",
-              color: "var(--text-tertiary)",
-              fontFamily: "var(--font-mono)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            <IconBranch size={11} /> {worktree.branch}
-          </span>
-          <SummaryLine summary={summary} />
-        </div>
+        )}
 
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "flex-end",
-            gap: 4,
-          }}
-        >
-          {hovering && (
-            <SmallIconButton title="Archive worktree" onClick={onArchive}>
-              <IconClose size={12} />
-            </SmallIconButton>
-          )}
-          {!hovering && worktree.changeCount > 0 && (
-            <span
-              className="tabular"
-              style={{
-                fontSize: "var(--text-2xs)",
-                fontFamily: "var(--font-mono)",
-                color: "var(--state-success)",
-              }}
-            >
-              +{worktree.changeCount}
-            </span>
-          )}
-        </div>
+        {hovering ? (
+          <SmallIconButton title="Archive worktree" onClick={onArchive}>
+            <IconClose size={12} />
+          </SmallIconButton>
+        ) : worktree.changeCount > 0 ? (
+          <span
+            className="tabular"
+            style={{
+              fontSize: "var(--text-2xs)",
+              fontFamily: "var(--font-mono)",
+              color: "var(--state-success)",
+            }}
+          >
+            +{worktree.changeCount}
+          </span>
+        ) : null}
       </button>
-    </motion.li>
+
+      <AnimatePresence>
+        {colorAnchor && (
+          <ColorPicker
+            anchor={colorAnchor}
+            selected={worktree.color ?? "default"}
+            onSelect={(id) =>
+              dispatch({
+                type: "update-worktree",
+                id: worktree.id,
+                patch: { color: id === "default" ? undefined : id },
+              })
+            }
+            onClose={() => setColorAnchor(null)}
+          />
+        )}
+      </AnimatePresence>
+    </li>
   );
 }
 
-function SummaryLine({ summary }: { summary: string }) {
-  const text = summary.replace(/\s+/g, " ").trim();
-  return (
-    <AnimatePresence mode="wait">
-      <motion.span
-        key={text || "idle"}
-        initial={{ opacity: 0, y: 3 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, y: -3 }}
-        transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-        style={{
-          marginTop: 4,
-          fontSize: "var(--text-2xs)",
-          lineHeight: "var(--leading-2xs)",
-          color: text ? "var(--text-secondary)" : "var(--text-disabled)",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          display: "-webkit-box",
-          WebkitLineClamp: 2,
-          WebkitBoxOrient: "vertical",
-          whiteSpace: "normal",
-          minHeight: "var(--leading-2xs)",
-        }}
-      >
-        {text || "idle"}
-      </motion.span>
-    </AnimatePresence>
-  );
-}
-
-function Avatar({
-  agentCli,
-  isRunning,
+/**
+ * Inline rename input — shown when the user double-clicks a card.
+ * Enter commits, Esc cancels, blur commits. Auto-focuses + selects all
+ * on mount so the user can either replace or extend the name.
+ */
+function RenameInput({
+  value,
+  onChange,
+  onCommit,
+  onCancel,
 }: {
-  agentCli: AgentCli | null;
-  isRunning: boolean;
+  value: string;
+  onChange: (v: string) => void;
+  onCommit: () => void;
+  onCancel: () => void;
 }) {
-  return (
-    <div
-      style={{
-        position: "relative",
-        width: 32,
-        height: 32,
-        borderRadius: "var(--radius-pill)",
-        backgroundColor: "var(--surface-4)",
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        color: "var(--text-secondary)",
-        flexShrink: 0,
-      }}
-    >
-      {isRunning ? (
-        <span className="rli-loader-spin" style={{ display: "inline-flex" }}>
-          <IconRunning size={16} />
-        </span>
-      ) : (
-        <IconTerminal size={16} />
-      )}
-      <AvatarBadge agentCli={agentCli} isRunning={isRunning} />
-    </div>
-  );
-}
+  const ref = useRef<HTMLInputElement>(null);
 
-function AvatarBadge({
-  agentCli,
-  isRunning,
-}: {
-  agentCli: AgentCli | null;
-  isRunning: boolean;
-}) {
-  if (!isRunning && !agentCli) return null;
-  const bg = isRunning ? "var(--accent)" : "var(--state-success-bg)";
-  const fg = isRunning ? "var(--surface-0)" : "var(--state-success)";
+  useEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
+
+  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      onCommit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      onCancel();
+    }
+  };
+
   return (
-    <span
-      aria-hidden
+    <input
+      ref={ref}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      onKeyDown={onKeyDown}
+      onBlur={onCommit}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      className="allow-select"
+      spellCheck={false}
       style={{
-        position: "absolute",
-        right: -2,
-        bottom: -2,
-        width: 14,
-        height: 14,
-        borderRadius: "var(--radius-pill)",
-        border: "2px solid var(--surface-1)",
-        backgroundColor: bg,
-        color: fg,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
+        width: "100%",
+        height: 20,
+        padding: "0 6px",
+        margin: "-2px -6px",
+        backgroundColor: "var(--surface-1)",
+        border: "1px solid var(--accent-muted)",
+        borderRadius: "var(--radius-xs)",
+        color: "var(--text-primary)",
+        fontFamily: "var(--font-sans)",
+        fontSize: "var(--text-base)",
+        fontWeight: "var(--weight-medium)",
+        outline: "none",
       }}
-    >
-      {isRunning ? (
-        <span
-          aria-hidden
-          style={{
-            width: 4,
-            height: 4,
-            borderRadius: "var(--radius-pill)",
-            backgroundColor: "var(--surface-0)",
-          }}
-        />
-      ) : (
-        <IconCheck size={9} strokeWidth={2.4} />
-      )}
-    </span>
+    />
   );
 }
 

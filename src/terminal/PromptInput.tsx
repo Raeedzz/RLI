@@ -837,29 +837,6 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
             className="rli-prompt-input"
           />
         </PromptHighlight>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "var(--space-2)",
-            fontFamily: "var(--font-sans)",
-            fontSize: "var(--text-2xs)",
-            color: "var(--text-disabled)",
-            letterSpacing: "var(--tracking-tight)",
-          }}
-        >
-          <span
-            style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: "var(--text-2xs)",
-              color: "var(--text-tertiary)",
-              fontVariantLigatures: "none",
-            }}
-          >
-            ⌘↵
-          </span>
-          <span>new /agent conversation</span>
-        </div>
       </div>
     );
   },

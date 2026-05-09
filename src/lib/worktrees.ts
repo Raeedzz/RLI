@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AppState,
   ArchiveRecord,
+  ProjectId,
   Worktree,
   WorktreeId,
 } from "@/state/types";
@@ -71,3 +73,29 @@ export async function archiveList(
 }
 
 export type { WorktreeId };
+
+/**
+ * Compute the next auto-named branch for a project. Walks all current
+ * and archived worktree branches matching `agent-N` and picks the
+ * smallest unused N. v1: numeric only (`agent-1`, `agent-2`, …) — the
+ * user can rename via double-click on the row.
+ */
+export function nextAutoBranch(
+  projectId: ProjectId,
+  state: Pick<AppState, "worktrees" | "archivedWorktrees">,
+): string {
+  const used = new Set<number>();
+  for (const w of Object.values(state.worktrees)) {
+    if (w.projectId !== projectId) continue;
+    const m = /^agent-(\d+)$/.exec(w.branch);
+    if (m) used.add(Number(m[1]));
+  }
+  for (const a of state.archivedWorktrees) {
+    if (a.projectId !== projectId) continue;
+    const m = /^agent-(\d+)$/.exec(a.branch);
+    if (m) used.add(Number(m[1]));
+  }
+  let n = 1;
+  while (used.has(n)) n++;
+  return `agent-${n}`;
+}

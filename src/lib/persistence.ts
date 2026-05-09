@@ -1,6 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AppState } from "../state/types";
-import { DEFAULT_SETTINGS } from "../state/types";
+import {
+  DEFAULT_SETTINGS,
+  RIGHT_DEFAULT,
+  SIDEBAR_DEFAULT,
+  clampRight,
+  clampSidebar,
+} from "../state/types";
 
 /**
  * Persistence wrapper around the Rust state commands.
@@ -25,6 +31,8 @@ export interface PersistedState {
   archivedWorktrees: AppState["archivedWorktrees"];
   sidebarCollapsed: AppState["sidebarCollapsed"];
   rightPanelCollapsed: AppState["rightPanelCollapsed"];
+  sidebarWidth: AppState["sidebarWidth"];
+  rightPanelWidth: AppState["rightPanelWidth"];
   settings: AppState["settings"];
   markdownView: AppState["markdownView"];
 }
@@ -63,6 +71,8 @@ export function pickPersistent(state: AppState): PersistedState {
     archivedWorktrees: state.archivedWorktrees,
     sidebarCollapsed: state.sidebarCollapsed,
     rightPanelCollapsed: state.rightPanelCollapsed,
+    sidebarWidth: state.sidebarWidth,
+    rightPanelWidth: state.rightPanelWidth,
     settings: state.settings,
     markdownView: state.markdownView,
   };
@@ -93,6 +103,8 @@ export async function loadState(): Promise<Partial<AppState> | null> {
       archivedWorktrees,
       sidebarCollapsed,
       rightPanelCollapsed,
+      sidebarWidth,
+      rightPanelWidth,
       settings,
       markdownView,
     } = parsed;
@@ -106,8 +118,9 @@ export async function loadState(): Promise<Partial<AppState> | null> {
       archivedWorktrees,
       sidebarCollapsed,
       rightPanelCollapsed,
-      // Older v2 blobs predate the settings field; fall back to defaults
-      // and merge any persisted overrides on top.
+      // Older v2 blobs may predate the resize fields; default + clamp.
+      sidebarWidth: clampSidebar(sidebarWidth ?? SIDEBAR_DEFAULT),
+      rightPanelWidth: clampRight(rightPanelWidth ?? RIGHT_DEFAULT),
       settings: { ...DEFAULT_SETTINGS, ...(settings ?? {}) },
       markdownView,
     };
