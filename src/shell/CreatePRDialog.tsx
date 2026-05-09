@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppDispatch, useAppState } from "@/state/AppState";
@@ -19,17 +19,27 @@ export function CreatePRDialog() {
   const dispatch = useAppDispatch();
   const toast = useToast();
   const open = !!state.prDialogOpen;
+  const mode = state.prDialogOpen?.mode ?? "auto";
   const worktreeId = state.prDialogOpen?.worktreeId ?? null;
   const worktree = worktreeId ? state.worktrees[worktreeId] : null;
   const [draft, setDraft] = useState<PrDraft>({ title: "", body: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Tracks whether mouse-down originated on the backdrop. Without this,
+  // a drag that starts inside the dialog (e.g. selecting text in the
+  // textarea) and releases on the backdrop would close the dialog.
+  const backdropMouseDownRef = useRef(false);
 
   useEffect(() => {
     if (!open || !worktree) return;
     setDraft({ title: "", body: "" });
-    setBusy(true);
     setError(null);
+    if (mode === "manual") {
+      // User asked for an empty form — don't burn an agent invocation.
+      setBusy(false);
+      return;
+    }
+    setBusy(true);
     const cli = worktree.agentCli ?? state.settings.helperCliPr;
     const model =
       cli === state.settings.helperCliPr ? state.settings.helperModelPr : "";
@@ -43,6 +53,7 @@ export function CreatePRDialog() {
       .finally(() => setBusy(false));
   }, [
     open,
+    mode,
     worktree?.id,
     worktree?.path,
     worktree?.agentCli,
@@ -88,7 +99,26 @@ export function CreatePRDialog() {
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.16 }}
-          onClick={close}
+          // Only close when the click lands on the backdrop itself —
+          // bubbled events from children (textarea selection drags,
+          // accidental highlights, dropdown menus from a future field)
+          // should not be able to dismiss the dialog. Also handles
+          // mousedown so a press-and-drag from inside the dialog that
+          // ends on the backdrop doesn't count as an outside click.
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) {
+              backdropMouseDownRef.current = true;
+            }
+          }}
+          onMouseUp={(e) => {
+            if (
+              backdropMouseDownRef.current &&
+              e.target === e.currentTarget
+            ) {
+              close();
+            }
+            backdropMouseDownRef.current = false;
+          }}
           style={{
             position: "fixed",
             inset: 0,
@@ -105,6 +135,8 @@ export function CreatePRDialog() {
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onMouseUp={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
             style={{
               width: "min(680px, 90vw)",

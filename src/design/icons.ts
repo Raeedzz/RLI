@@ -50,6 +50,8 @@ export {
   Tick01Icon as IconCheck,
   StopCircleIcon as IconStop,
   PlayCircleIcon as IconPlay,
+  MagicWand01Icon as IconSparkles,
+  CloudUploadIcon as IconPush,
 
   // Terminal & memory
   ComputerTerminal01Icon as IconTerminal,

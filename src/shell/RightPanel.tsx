@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
+  IconCheck,
   IconChevronDown,
   IconMore,
   IconPlus,
   IconPullRequest,
+  IconPush,
+  IconSparkles,
 } from "@/design/icons";
 import {
   useActiveWorktree,
@@ -255,6 +258,7 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
   const state = useAppState();
   const toast = useToast();
   const [entries, setEntries] = useState<StatusEntry[]>([]);
+  const [ahead, setAhead] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string>("");
   const [busy, setBusy] = useState<null | "stage" | "unstage" | "commit" | "push" | "draft">(null);
@@ -263,6 +267,7 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
     try {
       const result = await git.status(worktree.path);
       setEntries(result.entries);
+      setAhead(result.ahead);
       setError(null);
       dispatch({
         type: "set-change-count",
@@ -281,6 +286,7 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
         const result = await git.status(worktree.path);
         if (cancelled) return;
         setEntries(result.entries);
+        setAhead(result.ahead);
         setError(null);
         dispatch({
           type: "set-change-count",
@@ -371,7 +377,7 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
     }
   };
 
-  const commit = async (push: boolean) => {
+  const commit = async () => {
     if (stagedCount === 0) {
       toast.show({ message: "Nothing staged to commit." });
       return;
@@ -380,27 +386,37 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
       toast.show({ message: "Write a commit message first." });
       return;
     }
-    setBusy(push ? "push" : "commit");
+    setBusy("commit");
     try {
       await git.commit(worktree.path, message.trim());
-      if (push) {
-        await git.push(worktree.path);
-        toast.show({ message: "Committed and pushed." });
-      } else {
-        toast.show({ message: "Committed." });
-      }
+      toast.show({ message: "Committed." });
       setMessage("");
       await refresh();
-      // Broadcast so any other panel (status pill, change badge,
-      // PR-status poll in WindowChrome) re-reads in sync — without
-      // this they'd lag the local panel by up to 4–12s.
       window.dispatchEvent(
         new CustomEvent("rli-git-refresh", {
           detail: { cwd: worktree.path },
         }),
       );
     } catch (e) {
-      toast.show({ message: `${push ? "Push" : "Commit"} failed: ${e}` });
+      toast.show({ message: `Commit failed: ${e}` });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const push = async () => {
+    setBusy("push");
+    try {
+      await git.push(worktree.path);
+      toast.show({ message: "Pushed." });
+      await refresh();
+      window.dispatchEvent(
+        new CustomEvent("rli-git-refresh", {
+          detail: { cwd: worktree.path },
+        }),
+      );
+    } catch (e) {
+      toast.show({ message: `Push failed: ${e}` });
     } finally {
       setBusy(null);
     }
@@ -457,10 +473,11 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
         message={message}
         onChange={setMessage}
         onDraft={draftMessage}
-        onCommit={() => commit(false)}
-        onCommitAndPush={() => commit(true)}
+        onCommit={commit}
+        onPush={push}
         busy={busy}
         stagedCount={stagedCount}
+        ahead={ahead}
       />
 
       <div style={{ minHeight: 0, overflow: "auto" }}>
@@ -695,30 +712,59 @@ function ChangeRow({
   );
 }
 
+/**
+ * Single-action commit / push composer. The textarea is the whole
+ * surface; two icon-shaped buttons live in its corners:
+ *
+ *   ┌──────────────────────────── [✨] ┐ ← AI-draft (top-right)
+ *   │ Describe the change…             │
+ *   │                                  │
+ *   │                       [Commit ↵] │ ← morphing action (bottom-right)
+ *   └──────────────────────────────────┘
+ *
+ * The bottom-right button is one slot that morphs between Commit and
+ * Push depending on the worktree's git state — never two buttons at
+ * once. Commit when you have staged changes + a message; Push when
+ * the branch is ahead. Disabled state when there's nothing to do.
+ */
 function CommitComposer({
   message,
   onChange,
   onDraft,
   onCommit,
-  onCommitAndPush,
+  onPush,
   busy,
   stagedCount,
+  ahead,
 }: {
   message: string;
   onChange: (s: string) => void;
   onDraft: () => void;
   onCommit: () => void;
-  onCommitAndPush: () => void;
+  onPush: () => void;
   busy: null | "stage" | "unstage" | "commit" | "push" | "draft";
   stagedCount: number;
+  ahead: number;
 }) {
-  const canCommit = stagedCount > 0 && message.trim().length > 0 && busy === null;
+  // Mode picker. Commit takes priority when there are staged changes
+  // — the user is mid-edit; pushing existing commits can wait. Push
+  // appears once the working tree is settled.
+  const canCommit = stagedCount > 0 && message.trim().length > 0;
+  const mode: "commit" | "push" | "idle" =
+    canCommit ? "commit" : ahead > 0 ? "push" : "idle";
+  const disabled = busy !== null || mode === "idle";
+
+  const onAction = () => {
+    if (disabled) return;
+    if (mode === "commit") onCommit();
+    else if (mode === "push") onPush();
+  };
+
   return (
     <div
       style={{
-        display: "grid",
-        gap: 6,
-        padding: "var(--space-2) var(--space-3)",
+        position: "relative",
+        padding: "var(--space-3)",
         borderBottom: "var(--border-1)",
         backgroundColor: "var(--surface-2)",
       }}
@@ -729,15 +775,24 @@ function CommitComposer({
         placeholder={
           stagedCount > 0
             ? "Describe the change…"
-            : "Stage changes to commit"
+            : ahead > 0
+              ? "Push to share — message optional for next commit"
+              : "Stage changes to commit"
         }
-        rows={3}
+        rows={4}
         style={{
           width: "100%",
-          minHeight: 60,
-          maxHeight: 160,
-          resize: "vertical",
-          padding: "var(--space-2)",
+          minHeight: 96,
+          maxHeight: 240,
+          // No native resize handle — it sat behind the Commit button
+          // as a visual artifact. The textarea grows via row height
+          // when its content exceeds 4 lines.
+          resize: "none",
+          // Reserve room in the corners for the absolutely-positioned
+          // AI button (top-right) and action button (bottom-right) so
+          // text never slides under them — generous so the buttons
+          // breathe instead of crowding the textarea wall.
+          padding: "var(--space-3) 44px var(--space-8) var(--space-3)",
           backgroundColor: "var(--surface-1)",
           border: "var(--border-1)",
           borderRadius: "var(--radius-sm)",
@@ -750,75 +805,189 @@ function CommitComposer({
         onKeyDown={(e) => {
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
             e.preventDefault();
-            if (canCommit) {
-              if (e.shiftKey) onCommitAndPush();
-              else onCommit();
-            }
+            onAction();
           }
         }}
       />
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <button
-          type="button"
-          onClick={onDraft}
-          disabled={busy !== null || stagedCount === 0}
-          title="Draft commit message with your CLI agent"
-          style={composerSecondaryBtn(busy !== null || stagedCount === 0)}
-        >
-          {busy === "draft" ? "Drafting…" : "AI draft"}
-        </button>
-        <span style={{ flex: 1 }} />
-        <button
-          type="button"
-          onClick={onCommit}
-          disabled={!canCommit}
-          title="Commit (⌘↵)"
-          style={composerSecondaryBtn(!canCommit)}
-        >
-          {busy === "commit" ? "Committing…" : "Commit"}
-        </button>
-        <button
-          type="button"
-          onClick={onCommitAndPush}
-          disabled={!canCommit}
-          title="Commit and push (⌘⇧↵)"
-          style={composerPrimaryBtn(!canCommit)}
-        >
-          {busy === "push" ? "Pushing…" : "Commit & push"}
-        </button>
-      </div>
+
+      <AiDraftButton
+        onClick={onDraft}
+        disabled={busy !== null || stagedCount === 0}
+        busy={busy === "draft"}
+      />
+
+      <ComposerActionButton
+        mode={mode}
+        busy={busy}
+        disabled={disabled}
+        onClick={onAction}
+      />
     </div>
   );
 }
 
-function composerSecondaryBtn(disabled: boolean): CSSProperties {
-  return {
-    height: 24,
-    padding: "0 10px",
-    fontSize: "var(--text-2xs)",
-    fontWeight: "var(--weight-medium)",
-    color: disabled ? "var(--text-disabled)" : "var(--text-secondary)",
-    backgroundColor: "var(--surface-3)",
-    border: "var(--border-1)",
-    borderRadius: "var(--radius-sm)",
-    cursor: disabled ? "default" : "pointer",
-    transition: "background-color var(--motion-instant) var(--ease-out-quart)",
-  };
+function AiDraftButton({
+  onClick,
+  disabled,
+  busy,
+}: {
+  onClick: () => void;
+  disabled: boolean;
+  busy: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={busy ? "Drafting…" : "Draft commit message with your CLI agent"}
+      aria-label="Draft commit message with AI"
+      style={{
+        position: "absolute",
+        top: "calc(var(--space-3) + 6px)",
+        right: "calc(var(--space-3) + 6px)",
+        width: 26,
+        height: 26,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "transparent",
+        color: disabled
+          ? "var(--text-disabled)"
+          : busy
+            ? "var(--accent-bright)"
+            : "var(--text-tertiary)",
+        border: "none",
+        borderRadius: "var(--radius-sm)",
+        cursor: disabled ? "default" : "pointer",
+        transition:
+          "background-color var(--motion-instant) var(--ease-out-quart), color var(--motion-instant) var(--ease-out-quart)",
+      }}
+      onMouseEnter={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.backgroundColor = "var(--surface-3)";
+        e.currentTarget.style.color = "var(--accent-bright)";
+      }}
+      onMouseLeave={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.backgroundColor = "transparent";
+        e.currentTarget.style.color = busy
+          ? "var(--accent-bright)"
+          : "var(--text-tertiary)";
+      }}
+    >
+      <motion.span
+        animate={busy ? { rotate: 360 } : { rotate: 0 }}
+        transition={
+          busy
+            ? { duration: 1.4, ease: "linear", repeat: Infinity }
+            : { duration: 0.24, ease: [0.25, 1, 0.5, 1] }
+        }
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <IconSparkles size={14} />
+      </motion.span>
+    </button>
+  );
 }
 
-function composerPrimaryBtn(disabled: boolean): CSSProperties {
-  return {
-    height: 24,
-    padding: "0 12px",
-    fontSize: "var(--text-2xs)",
-    fontWeight: "var(--weight-semibold)",
-    color: disabled ? "var(--text-disabled)" : "var(--text-primary)",
-    backgroundColor: disabled ? "var(--surface-3)" : "var(--surface-accent-tinted)",
-    border: disabled ? "var(--border-1)" : "1px solid var(--accent-muted)",
-    borderRadius: "var(--radius-sm)",
-    cursor: disabled ? "default" : "pointer",
-    transition: "background-color var(--motion-instant) var(--ease-out-quart), border-color var(--motion-instant) var(--ease-out-quart)",
-  };
+function ComposerActionButton({
+  mode,
+  busy,
+  disabled,
+  onClick,
+}: {
+  mode: "commit" | "push" | "idle";
+  busy: null | "stage" | "unstage" | "commit" | "push" | "draft";
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  const isWorking = busy === "commit" || busy === "push";
+  const labelKey = isWorking ? `working-${busy}` : mode;
+  const label =
+    busy === "commit"
+      ? "Committing"
+      : busy === "push"
+        ? "Pushing"
+        : mode === "push"
+          ? "Push"
+          : mode === "idle"
+            ? "Commit"
+            : "Commit";
+  const Glyph =
+    mode === "push" || busy === "push" ? IconPush : IconCheck;
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={
+        mode === "push"
+          ? "Push (⌘↵)"
+          : mode === "idle"
+            ? "Stage changes and write a message to commit"
+            : "Commit (⌘↵)"
+      }
+      aria-label={label}
+      style={{
+        position: "absolute",
+        right: "calc(var(--space-3) + 10px)",
+        bottom: "calc(var(--space-3) + 10px)",
+        height: 26,
+        minWidth: 92,
+        padding: "0 12px",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 6,
+        backgroundColor: disabled
+          ? "var(--surface-3)"
+          : "var(--surface-accent-tinted)",
+        color: disabled ? "var(--text-disabled)" : "var(--text-primary)",
+        border: disabled
+          ? "var(--border-1)"
+          : "1px solid var(--accent-muted)",
+        borderRadius: "var(--radius-sm)",
+        fontFamily: "var(--font-sans)",
+        fontSize: "var(--text-2xs)",
+        fontWeight: "var(--weight-semibold)",
+        letterSpacing: "var(--tracking-tight)",
+        cursor: disabled ? "default" : "pointer",
+        transition:
+          "background-color var(--motion-instant) var(--ease-out-quart), border-color var(--motion-instant) var(--ease-out-quart), color var(--motion-instant) var(--ease-out-quart)",
+        overflow: "hidden",
+      }}
+      onMouseEnter={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.backgroundColor =
+          "color-mix(in oklch, var(--surface-accent-tinted), var(--accent) 8%)";
+      }}
+      onMouseLeave={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.backgroundColor =
+          "var(--surface-accent-tinted)";
+      }}
+    >
+      <Glyph size={12} />
+      <AnimatePresence mode="wait" initial={false}>
+        <motion.span
+          key={labelKey}
+          initial={{ opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -4 }}
+          transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+          style={{ display: "inline-block" }}
+        >
+          {label}
+        </motion.span>
+      </AnimatePresence>
+    </button>
+  );
 }
 
 function kindGlyph(kind: string): string {

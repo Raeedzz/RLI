@@ -66,17 +66,77 @@ pub async fn pr_draft(
     let raw =
         run_inline(&cwd, &cli, HelperMode::PrDescription, &prompt, model.as_deref()).await?;
 
-    // Best-effort JSON extract. Some CLIs include preamble despite
-    // instructions; we look for the first `{` and parse from there.
-    let json_start = raw.find('{').unwrap_or(0);
-    let json_end = raw.rfind('}').map(|i| i + 1).unwrap_or(raw.len());
-    let slice = &raw[json_start..json_end];
-
-    let draft: PrDraft = serde_json::from_str(slice).unwrap_or(PrDraft {
-        title: first_line(&raw).to_string(),
-        body: raw,
-    });
+    // Parse the agent's output. The prompt asks for a plain
+    // `<title>\n\n<body>` shape, but historically the helper has been
+    // asked for JSON, so we accept either:
+    //   1. Strict JSON `{"title": "...", "body": "..."}` (legacy).
+    //   2. A markdown-fenced JSON block.
+    //   3. Plain `<title>\n\n<body>` (current preferred shape).
+    //
+    // Anything that looks like a JSON wrapper but fails to parse —
+    // because the agent included raw newlines inside string values,
+    // which is invalid JSON — falls through to the plain-text path
+    // rather than dumping `{"title":...}` into the user's PR body.
+    let draft = parse_pr_draft(&raw);
     Ok(draft)
+}
+
+/// Try increasingly permissive shapes. Returns a clean PrDraft no
+/// matter what — never leaks a raw JSON-looking blob into the body.
+fn parse_pr_draft(raw: &str) -> PrDraft {
+    // 1. Strip a leading "```json" / "```" fence pair if present.
+    let unfenced = strip_code_fences(raw);
+
+    // 2. If the whole thing is a JSON object, try to parse it
+    //    strictly. Only accept if both fields parse to non-empty.
+    if let Some((start, end)) = json_object_bounds(&unfenced) {
+        let slice = &unfenced[start..end];
+        if let Ok(parsed) = serde_json::from_str::<PrDraft>(slice) {
+            if !parsed.title.trim().is_empty() {
+                return PrDraft {
+                    title: parsed.title.trim().to_string(),
+                    body: parsed.body.trim().to_string(),
+                };
+            }
+        }
+    }
+
+    // 3. Plain text path — first non-empty line is the title, the
+    //    rest (after a blank line if present) is the body.
+    let mut lines = unfenced.lines();
+    let title = lines
+        .by_ref()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_string();
+    let body = lines.collect::<Vec<&str>>().join("\n").trim().to_string();
+    PrDraft { title, body }
+}
+
+fn strip_code_fences(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(stripped) = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+    {
+        if let Some(content) = stripped.trim_start().strip_suffix("```") {
+            return content.trim().to_string();
+        }
+        // Has opening fence but no closing — strip just the opener.
+        return stripped.trim().to_string();
+    }
+    trimmed.to_string()
+}
+
+fn json_object_bounds(s: &str) -> Option<(usize, usize)> {
+    let start = s.find('{')?;
+    let end = s.rfind('}').map(|i| i + 1)?;
+    if end > start {
+        Some((start, end))
+    } else {
+        None
+    }
 }
 
 #[tauri::command]
@@ -297,6 +357,3 @@ fn truncate(s: &str, max: usize) -> String {
     head
 }
 
-fn first_line(s: &str) -> &str {
-    s.lines().next().unwrap_or(s)
-}

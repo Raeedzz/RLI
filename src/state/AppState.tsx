@@ -425,7 +425,12 @@ export function reducer(state: AppState, action: AppAction): AppState {
     case "set-pr-dialog":
       return {
         ...state,
-        prDialogOpen: action.worktreeId ? { worktreeId: action.worktreeId } : null,
+        prDialogOpen: action.worktreeId
+          ? {
+              worktreeId: action.worktreeId,
+              mode: action.mode ?? "auto",
+            }
+          : null,
       };
 
     case "set-settings-open":

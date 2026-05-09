@@ -97,7 +97,7 @@ fn mode_preface(mode: HelperMode) -> &'static str {
         HelperMode::CommitMessage => "Write a concise (≤72 char subject + optional body) git commit message for the diff below. Output the message only, no preamble.\n\n",
         HelperMode::Summary => "In one short sentence (≤120 chars), describe what the user is doing right now based on the snippet below. No preamble.\n\n",
         HelperMode::Explain => "Briefly explain the code below in one paragraph. No preamble.\n\n",
-        HelperMode::PrDescription => "Draft a pull request title (one short line) and body (markdown, sections: Summary / Why / Test plan) for the diff below. Output a JSON object {\"title\": string, \"body\": string} only — no other text.\n\n",
+        HelperMode::PrDescription => "Draft a pull request title and body for the diff below.\n\nOutput format — strict, no preamble, no code fences, no JSON:\n  Line 1: the PR title (one short line, ≤72 chars).\n  Line 2: empty.\n  Lines 3+: the PR body in markdown, with sections `## Summary`, `## Why`, `## Test plan`.\n\n",
     }
 }
 

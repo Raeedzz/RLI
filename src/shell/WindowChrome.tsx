@@ -1,7 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentType,
+  type Ref,
+} from "react";
+import { createPortal } from "react-dom";
+import { motion, AnimatePresence } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { SearchIcon } from "@/primitives/Icon";
-import { IconPullRequest } from "@/design/icons";
+import { IconEdit, IconPullRequest, IconSparkles } from "@/design/icons";
 import { useIsFullscreen } from "@/hooks/useIsFullscreen";
 import {
   useActiveWorktree,
@@ -96,14 +106,16 @@ function BranchActionButton({ worktree }: { worktree: Worktree | null }) {
   const state = useAppState();
   const branch = worktree?.branch ?? "";
   const path = worktree?.path ?? "";
-  const onMain = branch === "main" || branch === "master";
-  const eligible = !!worktree && !onMain && branch.length > 0;
 
   const [pr, setPr] = useState<PrStatus | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // The button is always shown and clickable when a worktree is
+  // active. PR-status polling only runs once we have a branch to look
+  // up — querying gh pr view with no branch is pointless.
+  const canQuery = !!worktree && branch.length > 0;
   const refresh = useCallback(async () => {
-    if (!eligible) {
+    if (!canQuery) {
       setPr(null);
       return;
     }
@@ -116,11 +128,11 @@ function BranchActionButton({ worktree }: { worktree: Worktree | null }) {
     } catch {
       setPr(null);
     }
-  }, [eligible, path, branch]);
+  }, [canQuery, path, branch]);
 
   useEffect(() => {
     void refresh();
-    if (!eligible) return;
+    if (!canQuery) return;
     const t = window.setInterval(() => void refresh(), PR_POLL_MS);
     const onGitRefresh = (e: Event) => {
       const detail = (e as CustomEvent<{ cwd?: string }>).detail;
@@ -131,7 +143,7 @@ function BranchActionButton({ worktree }: { worktree: Worktree | null }) {
       window.clearInterval(t);
       window.removeEventListener("rli-git-refresh", onGitRefresh);
     };
-  }, [eligible, refresh, path]);
+  }, [canQuery, refresh, path]);
 
   // Find a terminal-tab PTY to inject a prompt into when delegating
   // conflict resolution to the agent. Falls back to the secondary
@@ -228,21 +240,94 @@ function BranchActionButton({ worktree }: { worktree: Worktree | null }) {
     }
   }, [worktree, path, targetPtyId, refresh, toast]);
 
-  const openCreatePR = () => {
+  const openCreatePR = (m: "manual" | "auto") => {
     if (!worktree) return;
-    dispatch({ type: "set-pr-dialog", worktreeId: worktree.id });
+    dispatch({ type: "set-pr-dialog", worktreeId: worktree.id, mode: m });
   };
+
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(
+    null,
+  );
+  const menuAnchorRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  const toggleMenu = () => {
+    setMenuOpen((prev) => {
+      const next = !prev;
+      if (next && menuAnchorRef.current) {
+        const rect = menuAnchorRef.current.getBoundingClientRect();
+        setMenuPos({
+          top: rect.bottom + 6,
+          right: window.innerWidth - rect.right,
+        });
+      }
+      return next;
+    });
+  };
+
+  // Close on outside click / escape so the popover never gets stuck.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = (e: MouseEvent) => {
+      const target = e.target as Node;
+      const inAnchor =
+        menuAnchorRef.current && menuAnchorRef.current.contains(target);
+      const inMenu = menuRef.current && menuRef.current.contains(target);
+      if (!inAnchor && !inMenu) setMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
 
   // ----- render -----
 
-  if (!eligible) {
+  if (!worktree) {
     return <ActionButton kind="create-pr" disabled onClick={() => {}} />;
   }
   if (busy) {
     return <ActionButton kind="working" disabled onClick={() => {}} />;
   }
   if (!pr || !pr.exists || pr.state === "MERGED" || pr.state === "CLOSED") {
-    return <ActionButton kind="create-pr" onClick={openCreatePR} />;
+    return (
+      <>
+        <div
+          ref={menuAnchorRef}
+          data-tauri-drag-region={false}
+          style={{ position: "relative", display: "inline-flex" }}
+        >
+          <ActionButton
+            kind="create-pr"
+            aria-expanded={menuOpen}
+            onClick={toggleMenu}
+          />
+        </div>
+        {menuPos &&
+          createPortal(
+            <AnimatePresence>
+              {menuOpen && (
+                <CreatePRMenu
+                  ref={menuRef}
+                  top={menuPos.top}
+                  right={menuPos.right}
+                  onPick={(m) => {
+                    setMenuOpen(false);
+                    openCreatePR(m);
+                  }}
+                />
+              )}
+            </AnimatePresence>,
+            document.body,
+          )}
+      </>
+    );
   }
   if (pr.mergeable === "CONFLICTING") {
     return <ActionButton kind="resolve" onClick={resolveConflicts} />;
@@ -252,16 +337,144 @@ function BranchActionButton({ worktree }: { worktree: Worktree | null }) {
   return <ActionButton kind="merge" onClick={merge} />;
 }
 
+function CreatePRMenu({
+  ref,
+  top,
+  right,
+  onPick,
+}: {
+  ref: Ref<HTMLDivElement>;
+  top: number;
+  right: number;
+  onPick: (mode: "manual" | "auto") => void;
+}) {
+  return (
+    <motion.div
+      ref={ref}
+      role="menu"
+      aria-label="Create PR options"
+      data-tauri-drag-region={false}
+      initial={{ opacity: 0, y: -4 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -4 }}
+      transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+      style={{
+        position: "fixed",
+        top,
+        right,
+        minWidth: 220,
+        backgroundColor: "var(--surface-2)",
+        border: "var(--border-1)",
+        borderRadius: "var(--radius-md)",
+        boxShadow:
+          "0 10px 30px -8px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.35)",
+        padding: 4,
+        zIndex: 9999,
+        userSelect: "none",
+      }}
+    >
+      <CreatePRMenuItem
+        Glyph={IconSparkles}
+        label="Create draft PR"
+        sublabel="Auto-write title + body"
+        onClick={() => onPick("auto")}
+      />
+      <CreatePRMenuItem
+        Glyph={IconEdit}
+        label="Draft manually"
+        sublabel="Write title + body yourself"
+        onClick={() => onPick("manual")}
+      />
+    </motion.div>
+  );
+}
+
+function CreatePRMenuItem({
+  Glyph,
+  label,
+  sublabel,
+  onClick,
+}: {
+  Glyph: ComponentType<{ size?: number }>;
+  label: string;
+  sublabel: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        width: "100%",
+        padding: "8px 10px",
+        backgroundColor: "transparent",
+        color: "var(--text-primary)",
+        borderRadius: "var(--radius-sm)",
+        textAlign: "left",
+        cursor: "pointer",
+        transition:
+          "background-color var(--motion-instant) var(--ease-out-quart)",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.backgroundColor = "var(--surface-3)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.backgroundColor = "transparent";
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 24,
+          height: 24,
+          flexShrink: 0,
+          color: "var(--accent-bright)",
+        }}
+      >
+        <Glyph size={14} />
+      </span>
+      <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+        <span
+          style={{
+            fontSize: "var(--text-xs)",
+            fontWeight: "var(--weight-semibold)",
+            color: "var(--text-primary)",
+          }}
+        >
+          {label}
+        </span>
+        <span
+          style={{
+            fontSize: "var(--text-2xs)",
+            color: "var(--text-tertiary)",
+          }}
+        >
+          {sublabel}
+        </span>
+      </span>
+    </button>
+  );
+}
+
 type ButtonKind = "create-pr" | "merge" | "resolve" | "working";
 
 function ActionButton({
   kind,
   onClick,
   disabled,
+  "aria-expanded": ariaExpanded,
 }: {
   kind: ButtonKind;
   onClick: () => void;
   disabled?: boolean;
+  "aria-expanded"?: boolean;
 }) {
   const label =
     kind === "create-pr"
@@ -279,12 +492,11 @@ function ActionButton({
         : kind === "resolve"
           ? "Pull main, send conflicts to your agent"
           : "Working…";
-  // Distinguish the destructive-ish states with intent-based color:
-  //   resolve → warning tint (something is blocking)
-  //   merge   → success tint (one click ships it)
-  //   create-pr → accent tint (default)
+  // One slot, three intents driven by branch state. Outlines do the
+  // talking — blue for "open", green for "ready to ship", red for
+  // "blocked". Backgrounds stay near-flat so the chrome doesn't shout.
   const intent: ButtonIntent =
-    kind === "resolve" ? "warning" : kind === "merge" ? "success" : "accent";
+    kind === "resolve" ? "danger" : kind === "merge" ? "success" : "accent";
 
   return (
     <button
@@ -294,19 +506,20 @@ function ActionButton({
       disabled={disabled}
       title={title}
       aria-label={title}
+      aria-haspopup={ariaExpanded !== undefined ? "menu" : undefined}
+      aria-expanded={ariaExpanded}
       style={{
         height: 22,
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
         padding: "0 10px",
-        backgroundColor: disabled
-          ? "var(--surface-1)"
-          : intentBg(intent),
-        color: disabled ? "var(--text-disabled)" : "var(--text-primary)",
-        border: disabled
-          ? "var(--border-1)"
-          : `1px solid ${intentBorder(intent)}`,
+        margin: "0 2px",
+        backgroundColor: disabled ? "var(--surface-1)" : intentBg(intent),
+        color: disabled ? "var(--text-disabled)" : intentText(intent),
+        border: `1px solid ${
+          disabled ? "var(--border-default)" : intentBorder(intent)
+        }`,
         borderRadius: "var(--radius-sm)",
         fontFamily: "var(--font-sans)",
         fontSize: "var(--text-2xs)",
@@ -332,28 +545,38 @@ function ActionButton({
   );
 }
 
-type ButtonIntent = "accent" | "success" | "warning";
+type ButtonIntent = "accent" | "success" | "danger";
 
 function intentBg(intent: ButtonIntent): string {
   if (intent === "success")
-    return "color-mix(in oklch, var(--surface-2), var(--state-success) 14%)";
-  if (intent === "warning")
-    return "color-mix(in oklch, var(--surface-2), var(--state-warning) 16%)";
-  return "var(--surface-accent-tinted)";
+    return "color-mix(in oklch, var(--surface-2), var(--state-success) 6%)";
+  if (intent === "danger")
+    return "color-mix(in oklch, var(--surface-2), var(--state-error) 8%)";
+  return "color-mix(in oklch, var(--surface-2), var(--accent) 6%)";
 }
 function intentHoverBg(intent: ButtonIntent): string {
   if (intent === "success")
-    return "color-mix(in oklch, var(--surface-2), var(--state-success) 22%)";
-  if (intent === "warning")
-    return "color-mix(in oklch, var(--surface-2), var(--state-warning) 24%)";
-  return "color-mix(in oklch, var(--surface-accent-tinted), var(--accent) 8%)";
+    return "color-mix(in oklch, var(--surface-2), var(--state-success) 14%)";
+  if (intent === "danger")
+    return "color-mix(in oklch, var(--surface-2), var(--state-error) 16%)";
+  return "color-mix(in oklch, var(--surface-2), var(--accent) 14%)";
 }
+// Mute the borders by mixing the intent color into the surface so the
+// outline reads as restrained instrument-glass, not an LED. Pulling
+// the chroma down is the "less bright" the user asked for.
 function intentBorder(intent: ButtonIntent): string {
   if (intent === "success")
-    return "color-mix(in oklch, var(--accent-muted), var(--state-success) 30%)";
-  if (intent === "warning")
-    return "color-mix(in oklch, var(--accent-muted), var(--state-warning) 30%)";
-  return "var(--accent-muted)";
+    return "color-mix(in oklch, var(--surface-3), var(--state-success) 55%)";
+  if (intent === "danger")
+    return "color-mix(in oklch, var(--surface-3), var(--state-error) 55%)";
+  return "color-mix(in oklch, var(--surface-3), var(--accent) 55%)";
+}
+function intentText(intent: ButtonIntent): string {
+  if (intent === "success")
+    return "color-mix(in oklch, var(--text-primary), var(--state-success) 35%)";
+  if (intent === "danger")
+    return "color-mix(in oklch, var(--text-primary), var(--state-error) 35%)";
+  return "color-mix(in oklch, var(--text-primary), var(--accent) 35%)";
 }
 
 function isTerminal(t: Tab): t is Extract<Tab, { kind: "terminal" }> {

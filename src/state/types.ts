@@ -301,7 +301,15 @@ export interface AppState {
   paletteOpen: boolean;
   searchOpen: boolean;
   settingsOpen: boolean;
-  prDialogOpen: { worktreeId: WorktreeId } | null;
+  prDialogOpen: {
+    worktreeId: WorktreeId;
+    /**
+     * "manual" leaves the title/body empty so the user fills them in
+     * themselves; "auto" calls pr_draft to pre-populate via the
+     * worktree's helper-CLI agent.
+     */
+    mode: "manual" | "auto";
+  } | null;
 
   settings: Settings;
   markdownView: "rich" | "source";
@@ -352,7 +360,11 @@ export type AppAction =
   | { type: "set-palette"; open: boolean }
   | { type: "toggle-search" }
   | { type: "set-search"; open: boolean }
-  | { type: "set-pr-dialog"; worktreeId: WorktreeId | null }
+  | {
+      type: "set-pr-dialog";
+      worktreeId: WorktreeId | null;
+      mode?: "manual" | "auto";
+    }
   | { type: "set-settings-open"; open: boolean }
   | { type: "toggle-settings" }
   | { type: "update-settings"; patch: Partial<Settings> }
