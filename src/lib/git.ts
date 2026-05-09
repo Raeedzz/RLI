@@ -64,9 +64,14 @@ export const git = {
   /**
    * Generate a commit message via the helper-agent layer. Reads the
    * staged diff, truncates, and shells out to whichever CLI the
-   * caller specifies (defaults to claude).
+   * caller specifies (defaults to claude). When `model` is set, the
+   * helper passes `--model <model>` through to the CLI.
    */
-  aiCommitMessage: async (cwd: string, cli: AgentCli = "claude") => {
+  aiCommitMessage: async (
+    cwd: string,
+    cli: AgentCli = "claude",
+    model?: string,
+  ) => {
     const diff = await invoke<string>("git_diff", {
       cwd,
       path: undefined,
@@ -77,6 +82,6 @@ export const git = {
       diff.length > 8000
         ? diff.slice(0, 8000) + "\n\n[…truncated…]"
         : diff;
-    return helperRun(cwd, cli, "commit-message", trimmed);
+    return helperRun(cwd, cli, "commit-message", trimmed, model);
   },
 };

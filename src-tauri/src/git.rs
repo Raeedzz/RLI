@@ -75,6 +75,14 @@ pub struct StatusResult {
 
 #[tauri::command]
 pub async fn git_status(cwd: String) -> Result<StatusResult, String> {
+    // Refresh git's stat cache before reading status. After operations
+    // like merge/checkout/commit, files can spuriously appear modified
+    // because the index mtime is stale even though file content is
+    // identical. `update-index --refresh` reconciles the cache without
+    // touching the working tree. Best-effort — non-zero exits are fine
+    // (e.g. when there are real "needs update" entries; the subsequent
+    // status call still returns the correct picture).
+    let _ = run(&cwd, &["update-index", "--refresh"]).await;
     let raw = run(&cwd, &["status", "--porcelain=v2", "--branch"]).await?;
     Ok(parse_status_v2(&raw))
 }

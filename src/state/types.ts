@@ -183,8 +183,26 @@ export interface Settings {
   /**
    * Which CLI to spawn for helper operations (PR drafting, commit
    * messages, AskCard) when the active worktree hasn't detected one.
+   * Acts as the fallback when a per-task override below isn't set
+   * explicitly — kept for backwards compat with v2 saved state.
    */
   defaultHelperCli: AgentCli;
+  /** CLI used to draft commit messages (right-panel "AI draft" button). */
+  helperCliCommit: AgentCli;
+  /**
+   * Optional model name passed to the commit-message CLI via
+   * `--model <name>`. Empty string = let the CLI pick its own default.
+   * Strings are CLI-specific; switching `helperCliCommit` clears this.
+   */
+  helperModelCommit: string;
+  /** CLI used to draft PR titles + bodies in the Create-PR dialog. */
+  helperCliPr: AgentCli;
+  /** Optional `--model <name>` for PR drafting. */
+  helperModelPr: string;
+  /** CLI used by the editor's ⌘L "Ask" overlay to explain selected code. */
+  helperCliExplain: AgentCli;
+  /** Optional `--model <name>` for the explain overlay. */
+  helperModelExplain: string;
   /**
    * Drive the helper-agent–driven tab-summary polling. Off skips the
    * subprocess invocations — the tab subtitle then shows the launch
@@ -224,6 +242,12 @@ export const DEFAULT_SETTINGS: Settings = {
   alwaysShowContextUsage: false,
   caffeinate: true,
   defaultHelperCli: "claude",
+  helperCliCommit: "claude",
+  helperModelCommit: "",
+  helperCliPr: "claude",
+  helperModelPr: "",
+  helperCliExplain: "claude",
+  helperModelExplain: "",
   autoSummarize: true,
   archiveBehavior: "stash",
 };

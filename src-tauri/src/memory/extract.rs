@@ -33,7 +33,7 @@ pub async fn extract_facts(
         PROMPT_PREFIX,
         truncate_tail(transcript, 16_000)
     );
-    let raw = run_inline("", cli, HelperMode::Summary, &prompt).await?;
+    let raw = run_inline("", cli, HelperMode::Summary, &prompt, None).await?;
     Ok(parse_facts(&raw))
 }
 

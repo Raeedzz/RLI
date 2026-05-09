@@ -189,19 +189,34 @@ function FolderGlyph() {
   );
 }
 
+const EMPTY_GIT_INFO: GitInfo = {
+  branch: null,
+  ahead: 0,
+  behind: 0,
+  added: 0,
+  removed: 0,
+  modified: 0,
+};
+
 function useGitInfo(cwd: string): {
   info: GitInfo;
   refresh: () => Promise<void>;
 } {
-  const [info, setInfo] = useState<GitInfo>({
-    branch: null,
-    ahead: 0,
-    behind: 0,
-    added: 0,
-    removed: 0,
-    modified: 0,
+  // Track the cwd alongside the info so we can blank stale data the
+  // moment the prop changes — otherwise the previous worktree's branch
+  // (typically "main") flashes for up to a poll cycle when the user
+  // clicks a different worktree in the sidebar.
+  const [state, setState] = useState<{ cwd: string; info: GitInfo }>({
+    cwd,
+    info: EMPTY_GIT_INFO,
   });
   const [trigger, setTrigger] = useState(0);
+
+  // Synchronous reset on cwd change. This runs during render, before
+  // the post-commit useEffect, so the pill never shows the old branch.
+  if (state.cwd !== cwd) {
+    setState({ cwd, info: EMPTY_GIT_INFO });
+  }
 
   useEffect(() => {
     if (!cwd) return;
@@ -218,23 +233,24 @@ function useGitInfo(cwd: string): {
           else if (e.kind === "deleted") removed++;
           else if (e.kind === "modified" || e.kind === "renamed") modified++;
         }
-        setInfo({
-          branch: status.branch,
-          ahead: status.ahead,
-          behind: status.behind,
-          added,
-          removed,
-          modified,
+        setState({
+          cwd,
+          info: {
+            branch: status.branch,
+            ahead: status.ahead,
+            behind: status.behind,
+            added,
+            removed,
+            modified,
+          },
         });
       } catch {
         if (!cancelled) {
-          setInfo((prev) => ({
-            ...prev,
-            branch: null,
-            added: 0,
-            removed: 0,
-            modified: 0,
-          }));
+          setState((prev) =>
+            prev.cwd === cwd
+              ? { cwd, info: { ...EMPTY_GIT_INFO } }
+              : prev,
+          );
         }
       }
     };
@@ -245,6 +261,8 @@ function useGitInfo(cwd: string): {
       window.clearInterval(id);
     };
   }, [cwd, trigger]);
+
+  const info = state.info;
 
   return {
     info,

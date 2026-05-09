@@ -255,7 +255,7 @@ export function Editor({ path, content, onChange }: Props) {
               backgroundColor: "var(--accent-bright)",
             }}
           />
-          Ask Gemini
+          Ask
           <span
             style={{
               fontFamily: "var(--font-mono)",

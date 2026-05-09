@@ -40,17 +40,40 @@ impl AgentCli {
         }
     }
 
-    /// CLI flags that put the binary in non-interactive one-shot mode.
-    /// Each agent has its own convention.
-    fn one_shot_args(self) -> Vec<&'static str> {
+    /// Construct the full positional args for a one-shot invocation,
+    /// inserting `--model <X>` at the right index per CLI when supplied.
+    fn build_args(self, model: Option<&str>) -> Vec<String> {
+        let m = model.filter(|s| !s.is_empty());
+        let mut out: Vec<String> = Vec::new();
         match self {
-            // Claude Code: --print prompts run non-interactively, output to stdout.
-            AgentCli::Claude => vec!["--print"],
-            // Codex CLI: `exec` is the non-interactive mode.
-            AgentCli::Codex => vec!["exec"],
-            // Gemini CLI: --prompt flag.
-            AgentCli::Gemini => vec!["--prompt"],
+            // Claude Code: `claude --print [--model X]`. Prompt via stdin.
+            AgentCli::Claude => {
+                out.push("--print".into());
+                if let Some(m) = m {
+                    out.push("--model".into());
+                    out.push(m.into());
+                }
+            }
+            // Codex CLI: `codex exec [--model X]`. Prompt via stdin.
+            AgentCli::Codex => {
+                out.push("exec".into());
+                if let Some(m) = m {
+                    out.push("--model".into());
+                    out.push(m.into());
+                }
+            }
+            // Gemini CLI: `gemini [--model X] --prompt PROMPT`. Model
+            // must come before `--prompt` so its value isn't consumed
+            // by the prompt flag.
+            AgentCli::Gemini => {
+                if let Some(m) = m {
+                    out.push("--model".into());
+                    out.push(m.into());
+                }
+                out.push("--prompt".into());
+            }
         }
+        out
     }
 
     /// Whether the CLI consumes the prompt as a CLI argument (true) or
@@ -86,6 +109,7 @@ pub async fn run_inline(
     cli: &str,
     mode: HelperMode,
     prompt: &str,
+    model: Option<&str>,
 ) -> Result<String, String> {
     if !cwd.is_empty() && !Path::new(cwd).exists() {
         return Err(format!("cwd does not exist: {cwd}"));
@@ -95,12 +119,11 @@ pub async fn run_inline(
     let preface = mode_preface(mode);
     let full_prompt = format!("{preface}{prompt}");
 
-    let args = agent.one_shot_args();
+    let mut args = agent.build_args(model);
     if agent.prompt_via_arg() {
-        let mut all_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        all_args.push(full_prompt);
+        args.push(full_prompt);
         let mut command = Command::new(bin);
-        command.args(&all_args);
+        command.args(&args);
         if !cwd.is_empty() {
             command.current_dir(cwd);
         }
@@ -160,8 +183,9 @@ pub async fn helper_run(
     cli: String,
     mode: HelperMode,
     prompt: String,
+    model: Option<String>,
 ) -> Result<String, String> {
-    run_inline(&cwd, &cli, mode, &prompt).await
+    run_inline(&cwd, &cli, mode, &prompt, model.as_deref()).await
 }
 
 /// Static detection — for v1, the frontend already classifies the

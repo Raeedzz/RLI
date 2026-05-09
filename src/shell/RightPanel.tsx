@@ -293,9 +293,20 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
     };
     void poll();
     const t = window.setInterval(poll, 4000);
+    // External nudges from the merge / push paths so the panel doesn't
+    // sit on a stale "uncommitted" row for up to 4s after the user has
+    // already gotten everything onto main.
+    const onRefresh = (e: Event) => {
+      const detail = (e as CustomEvent<{ cwd?: string }>).detail;
+      if (!detail?.cwd || detail.cwd === worktree.path) {
+        void poll();
+      }
+    };
+    window.addEventListener("rli-git-refresh", onRefresh);
     return () => {
       cancelled = true;
       window.clearInterval(t);
+      window.removeEventListener("rli-git-refresh", onRefresh);
     };
   }, [worktree.id, worktree.path, dispatch]);
 
@@ -343,8 +354,15 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
     setBusy("draft");
     try {
       const cli =
-        worktree.agentCli ?? state.settings.defaultHelperCli ?? "claude";
-      const text = await git.aiCommitMessage(worktree.path, cli);
+        worktree.agentCli ?? state.settings.helperCliCommit ?? "claude";
+      // Model only applies when the user hasn't been overridden by the
+      // worktree's running CLI — otherwise we'd pass a Claude model
+      // string to a Codex run, etc.
+      const model =
+        cli === state.settings.helperCliCommit
+          ? state.settings.helperModelCommit
+          : "";
+      const text = await git.aiCommitMessage(worktree.path, cli, model);
       setMessage(text.trim());
     } catch (e) {
       toast.show({ message: `AI draft failed: ${e}` });
@@ -373,6 +391,14 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
       }
       setMessage("");
       await refresh();
+      // Broadcast so any other panel (status pill, change badge,
+      // PR-status poll in WindowChrome) re-reads in sync — without
+      // this they'd lag the local panel by up to 4–12s.
+      window.dispatchEvent(
+        new CustomEvent("rli-git-refresh", {
+          detail: { cwd: worktree.path },
+        }),
+      );
     } catch (e) {
       toast.show({ message: `${push ? "Push" : "Commit"} failed: ${e}` });
     } finally {

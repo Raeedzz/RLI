@@ -18,8 +18,15 @@ export async function helperRun(
   cli: AgentCli,
   mode: HelperMode,
   prompt: string,
+  model?: string,
 ): Promise<string> {
-  return invoke<string>("helper_run", { cwd, cli, mode, prompt });
+  return invoke<string>("helper_run", {
+    cwd,
+    cli,
+    mode,
+    prompt,
+    model: model && model.length > 0 ? model : null,
+  });
 }
 
 export async function detectAgent(command: string): Promise<AgentCli | null> {

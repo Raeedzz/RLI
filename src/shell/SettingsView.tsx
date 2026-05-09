@@ -353,17 +353,46 @@ function GeneralSection({ settings }: { settings: Settings }) {
       <SectionDivider label="Helpers" />
 
       <SettingRow
-        title="Default helper CLI"
-        description="Used by Create-PR, AskCard, and commit-message generation when the active worktree hasn't surfaced its own CLI yet."
+        title="Commit message"
+        description="Which CLI drafts commit messages when you press the AI-draft button in the Changes panel. Run on your machine via the agent's CLI — no API keys."
         control={
-          <SelectChips<AgentCli>
-            value={settings.defaultHelperCli}
-            onChange={(v) => update({ defaultHelperCli: v })}
-            options={[
-              { value: "claude", label: "Claude" },
-              { value: "codex", label: "Codex" },
-              { value: "gemini", label: "Gemini" },
-            ]}
+          <HelperTaskControl
+            cli={settings.helperCliCommit}
+            model={settings.helperModelCommit}
+            onCliChange={(v) =>
+              update({ helperCliCommit: v, helperModelCommit: "" })
+            }
+            onModelChange={(m) => update({ helperModelCommit: m })}
+          />
+        }
+      />
+
+      <SettingRow
+        title="Pull request"
+        description="Which CLI drafts the PR title + body when you open the Create-PR dialog."
+        control={
+          <HelperTaskControl
+            cli={settings.helperCliPr}
+            model={settings.helperModelPr}
+            onCliChange={(v) =>
+              update({ helperCliPr: v, helperModelPr: "" })
+            }
+            onModelChange={(m) => update({ helperModelPr: m })}
+          />
+        }
+      />
+
+      <SettingRow
+        title="Explain (⌘L)"
+        description="Which CLI answers the Ask overlay when you select code in the editor and press ⌘L."
+        control={
+          <HelperTaskControl
+            cli={settings.helperCliExplain}
+            model={settings.helperModelExplain}
+            onCliChange={(v) =>
+              update({ helperCliExplain: v, helperModelExplain: "" })
+            }
+            onModelChange={(m) => update({ helperModelExplain: m })}
           />
         }
       />
@@ -419,6 +448,82 @@ function GeneralSection({ settings }: { settings: Settings }) {
 /* ------------------------------------------------------------------
    Primitives
    ------------------------------------------------------------------ */
+
+const HELPER_CLI_OPTIONS: { value: AgentCli; label: string }[] = [
+  { value: "claude", label: "Claude" },
+  { value: "codex", label: "Codex" },
+  { value: "gemini", label: "Gemini" },
+];
+
+/**
+ * Curated model options per CLI. The empty-string value means "let the
+ * CLI pick its default" — we omit `--model` entirely on the backend.
+ * Users running newer CLI versions with models we don't list here can
+ * stay on Default and get whatever ships as the binary's current
+ * default; we'll add chips as the lineup stabilizes.
+ */
+const HELPER_MODEL_OPTIONS: Record<
+  AgentCli,
+  Array<{ value: string; label: string }>
+> = {
+  claude: [
+    { value: "", label: "Default" },
+    { value: "opus", label: "Opus" },
+    { value: "sonnet", label: "Sonnet" },
+    { value: "haiku", label: "Haiku" },
+  ],
+  codex: [
+    { value: "", label: "Default" },
+    { value: "gpt-5-codex", label: "GPT-5 Codex" },
+    { value: "gpt-5", label: "GPT-5" },
+    { value: "o4-mini", label: "o4-mini" },
+  ],
+  gemini: [
+    { value: "", label: "Default" },
+    { value: "gemini-2.5-pro", label: "2.5 Pro" },
+    { value: "gemini-2.5-flash", label: "2.5 Flash" },
+    { value: "gemini-2.5-flash-lite", label: "Flash Lite" },
+  ],
+};
+
+function HelperTaskControl({
+  cli,
+  model,
+  onCliChange,
+  onModelChange,
+}: {
+  cli: AgentCli;
+  model: string;
+  onCliChange: (v: AgentCli) => void;
+  onModelChange: (v: string) => void;
+}) {
+  const modelOptions = HELPER_MODEL_OPTIONS[cli];
+  // If the persisted model isn't in the curated list for the current
+  // CLI (CLI changed, or list shifted between versions), fall back to
+  // empty so the UI shows a valid selection.
+  const safeModel = modelOptions.some((o) => o.value === model) ? model : "";
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: "var(--space-1-5)",
+        alignItems: "flex-end",
+      }}
+    >
+      <SelectChips<AgentCli>
+        value={cli}
+        onChange={onCliChange}
+        options={HELPER_CLI_OPTIONS}
+      />
+      <SelectChips<string>
+        value={safeModel}
+        onChange={onModelChange}
+        options={modelOptions}
+      />
+    </div>
+  );
+}
 
 function SectionDivider({ label }: { label: string }) {
   return (

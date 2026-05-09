@@ -685,7 +685,7 @@ async fn summarize_with_helper(cli: &str, turns: &[Turn]) -> Result<String, Stri
          quotes. Use an active verb. Be specific about the task — not \
          \"working on code\".",
     );
-    let raw = run_inline("", cli, HelperMode::Summary, &prompt).await?;
+    let raw = run_inline("", cli, HelperMode::Summary, &prompt, None).await?;
     Ok(normalize_summary(&raw))
 }
 

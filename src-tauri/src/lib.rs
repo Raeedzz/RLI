@@ -120,6 +120,9 @@ pub fn run() {
             // Pull request creation
             pr::pr_draft,
             pr::pr_create,
+            pr::pr_status,
+            pr::pr_merge,
+            pr::merge_base_into_branch,
             // Connections (Task #10)
             connections::connections_scan,
             // Search (Task #15)

@@ -30,8 +30,14 @@ export function CreatePRDialog() {
     setDraft({ title: "", body: "" });
     setBusy(true);
     setError(null);
-    const cli = worktree.agentCli ?? state.settings.defaultHelperCli;
-    void invoke<PrDraft>("pr_draft", { cwd: worktree.path, cli })
+    const cli = worktree.agentCli ?? state.settings.helperCliPr;
+    const model =
+      cli === state.settings.helperCliPr ? state.settings.helperModelPr : "";
+    void invoke<PrDraft>("pr_draft", {
+      cwd: worktree.path,
+      cli,
+      model: model && model.length > 0 ? model : null,
+    })
       .then((d) => setDraft(d))
       .catch((err) => setError(String(err)))
       .finally(() => setBusy(false));
@@ -40,7 +46,8 @@ export function CreatePRDialog() {
     worktree?.id,
     worktree?.path,
     worktree?.agentCli,
-    state.settings.defaultHelperCli,
+    state.settings.helperCliPr,
+    state.settings.helperModelPr,
   ]);
 
   const close = () => dispatch({ type: "set-pr-dialog", worktreeId: null });

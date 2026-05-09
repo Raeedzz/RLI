@@ -50,8 +50,10 @@ export function AskCard({
       try {
         const prompt = `${ASK_SYSTEM}\n\n${buildPrompt(selection, context, pathHint)}`;
         const cwd = worktree?.path ?? "";
-        const cli = worktree?.agentCli ?? settings.defaultHelperCli;
-        const out = await helperRun(cwd, cli, "explain", prompt);
+        const cli = worktree?.agentCli ?? settings.helperCliExplain;
+        const model =
+          cli === settings.helperCliExplain ? settings.helperModelExplain : "";
+        const out = await helperRun(cwd, cli, "explain", prompt, model);
         if (cancelled) return;
         setAnswer(out.trim());
       } catch (e) {
@@ -71,7 +73,8 @@ export function AskCard({
     pathHint,
     worktree?.path,
     worktree?.agentCli,
-    settings.defaultHelperCli,
+    settings.helperCliExplain,
+    settings.helperModelExplain,
   ]);
 
   // Esc + click-outside dismiss
@@ -115,7 +118,7 @@ export function AskCard({
       animate="visible"
       exit="exit"
       role="dialog"
-      aria-label="Ask Gemini about this code"
+      aria-label="Ask about this code"
       style={{
         position: "fixed",
         top,
