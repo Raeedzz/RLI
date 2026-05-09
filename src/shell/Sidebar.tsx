@@ -12,7 +12,6 @@ import {
   IconBack,
   IconForward,
   IconHistory,
-  IconFilter,
   IconFolderAdd,
   IconPlus,
   IconBranch,
@@ -194,9 +193,6 @@ function ProjectsHeader() {
     >
       <span>Projects</span>
       <span style={{ flex: 1 }} />
-      <SmallIconButton title="Filter">
-        <IconFilter size={14} />
-      </SmallIconButton>
       <SmallIconButton
         title="Open project (⌘O)"
         onClick={() => void openProjectDialog(dispatch)}

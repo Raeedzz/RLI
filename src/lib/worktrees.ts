@@ -216,44 +216,32 @@ const LANDMARK_NAMES: readonly string[] = [
 ];
 
 /**
- * Compute the next auto-named branch for a project. Picks an unused
- * landmark name; falls back to `landmark-N` when the curated pool is
- * exhausted (~100 worktrees deep). Branch names that already follow
- * the legacy `agent-N` shape still count as "used" so old saved state
- * doesn't clash with new ones.
+ * Compute the next auto-named branch for a project. Picks a random
+ * unused landmark name; falls back to `<landmark>-N` when every name
+ * in the pool is already taken by an active or archived worktree.
+ * Existing branch names (including legacy `agent-N`) still count as
+ * "used" so we don't collide with old saved state.
  */
 export function nextAutoBranch(
   projectId: ProjectId,
   state: Pick<AppState, "worktrees" | "archivedWorktrees">,
 ): string {
+  void projectId;
   const used = new Set<string>();
   for (const w of Object.values(state.worktrees)) {
-    if (w.projectId !== projectId) continue;
     used.add(w.branch.toLowerCase());
   }
   for (const a of state.archivedWorktrees) {
-    if (a.projectId !== projectId) continue;
     used.add(a.branch.toLowerCase());
   }
-  // Walk the landmark list deterministically, but jump to a hashed
-  // start index based on the project id so two projects don't both
-  // open with `eiffel` first.
-  const start = hashStart(projectId, LANDMARK_NAMES.length);
-  for (let i = 0; i < LANDMARK_NAMES.length; i++) {
-    const name = LANDMARK_NAMES[(start + i) % LANDMARK_NAMES.length];
-    if (!used.has(name)) return name;
+  const available = LANDMARK_NAMES.filter((n) => !used.has(n));
+  if (available.length > 0) {
+    return available[Math.floor(Math.random() * available.length)];
   }
-  // Pool exhausted — append a numeric suffix to the first landmark.
+  // Pool exhausted — append a numeric suffix to a random landmark.
+  const base =
+    LANDMARK_NAMES[Math.floor(Math.random() * LANDMARK_NAMES.length)];
   let n = 2;
-  while (used.has(`${LANDMARK_NAMES[0]}-${n}`)) n++;
-  return `${LANDMARK_NAMES[0]}-${n}`;
-}
-
-function hashStart(seed: string, mod: number): number {
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619) >>> 0;
-  }
-  return h % mod;
+  while (used.has(`${base}-${n}`)) n++;
+  return `${base}-${n}`;
 }
