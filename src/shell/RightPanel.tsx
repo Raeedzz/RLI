@@ -876,22 +876,88 @@ function AiDraftButton({
           : "var(--text-tertiary)";
       }}
     >
-      <motion.span
-        animate={busy ? { rotate: 360 } : { rotate: 0 }}
-        transition={
-          busy
-            ? { duration: 1.4, ease: "linear", repeat: Infinity }
-            : { duration: 0.24, ease: [0.25, 1, 0.5, 1] }
-        }
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        <IconSparkles size={14} />
-      </motion.span>
+      <AnimatePresence mode="wait" initial={false}>
+        {busy ? (
+          <motion.span
+            key="spinner"
+            initial={{ opacity: 0, scale: 0.85 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.85 }}
+            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--accent-bright)",
+            }}
+          >
+            <ArcSpinner size={14} />
+          </motion.span>
+        ) : (
+          <motion.span
+            key="wand"
+            initial={{ opacity: 0, scale: 0.85 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.85 }}
+            transition={{ duration: 0.14, ease: [0.25, 1, 0.5, 1] }}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <IconSparkles size={14} />
+          </motion.span>
+        )}
+      </AnimatePresence>
     </button>
+  );
+}
+
+/**
+ * Refined SVG loader — a 3/4 arc tracing over a faint guide circle.
+ * The arc rotates via the existing `rli-loader-spin` keyframe (1.4s
+ * linear infinite, defined in tokens.css), which `prefers-reduced-
+ * motion` already collapses to a static shape — accessibility falls
+ * out for free. Two-tone (active arc + faint base ring) reads as
+ * "progress in flight" the moment it appears, vs. a single rotating
+ * line which can feel like a glitch on first frame.
+ */
+function ArcSpinner({ size }: { size: number }) {
+  return (
+    <span
+      className="rli-loader-spin"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: size,
+        height: size,
+      }}
+    >
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 16 16"
+        fill="none"
+        aria-hidden
+      >
+        <circle
+          cx="8"
+          cy="8"
+          r="6.2"
+          stroke="currentColor"
+          strokeOpacity="0.22"
+          strokeWidth="1.6"
+        />
+        <path
+          d="M8 1.8 A6.2 6.2 0 0 1 14.2 8"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+        />
+      </svg>
+    </span>
   );
 }
 

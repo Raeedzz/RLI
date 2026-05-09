@@ -6,7 +6,11 @@ import {
   useAppState,
 } from "@/state/AppState";
 import { openProjectDialog } from "@/lib/projectDialog";
-import { nextAutoBranch, worktreeCreate } from "@/lib/worktrees";
+import {
+  nextAutoBranch,
+  primaryTerminalTab,
+  worktreeCreate,
+} from "@/lib/worktrees";
 
 /**
  * Match a digit press regardless of modifier-induced char shifting.
@@ -123,6 +127,9 @@ export function useKeyboardShortcuts() {
               branch,
             );
             dispatch({ type: "add-worktree", worktree: w });
+            // Auto-open the primary terminal so the user lands in a
+            // live shell, not an empty main column.
+            dispatch({ type: "open-tab", tab: primaryTerminalTab(w) });
           } catch (err) {
             window.alert(`Worktree creation failed: ${err}`);
           }

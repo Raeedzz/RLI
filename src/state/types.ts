@@ -52,6 +52,13 @@ export interface Project {
   glyph: string;
   /** Resolved at scan time; data URI if found. Null if no icon source. */
   faviconDataUri: string | null;
+  /**
+   * User-picked HugeIcons component name (e.g. `Folder01Icon`,
+   * `BrainIcon`). Renders ahead of `faviconDataUri` and `glyph` when
+   * set. Lives on Project; worktrees inherit this unless they have
+   * their own override.
+   */
+  iconName?: string;
   pinned: boolean;
   /** Sidebar expand-collapse state. */
   expanded: boolean;
@@ -106,6 +113,8 @@ export interface Worktree {
 
   /** User-assigned color tag (sidebar accent). */
   color?: TagId;
+  /** User-picked HugeIcons component name (overrides project's choice). */
+  iconName?: string;
 }
 
 /* ------------------------------------------------------------------
@@ -327,6 +336,13 @@ export type AppAction =
   | { type: "reorder-projects"; ids: ProjectId[] }
   | { type: "set-project-expanded"; id: ProjectId; expanded: boolean }
   | { type: "set-project-color"; id: ProjectId; color: TagId | undefined }
+  | { type: "set-project-icon"; id: ProjectId; iconName: string | undefined }
+  | { type: "update-project"; id: ProjectId; patch: Partial<Project> }
+  | {
+      type: "set-worktree-icon";
+      worktreeId: WorktreeId;
+      iconName: string | undefined;
+    }
 
   // Worktrees
   | { type: "add-worktree"; worktree: Worktree }

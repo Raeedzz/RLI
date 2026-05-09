@@ -1,14 +1,12 @@
 import {
-  useEffect,
-  useRef,
   useState,
   type CSSProperties,
-  type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
 } from "react";
-import { AnimatePresence } from "motion/react";
-import { ColorPicker } from "@/primitives/ColorPicker";
+import { IconPickerDialog } from "@/shell/IconPickerDialog";
+import { ContextMenu, type ContextMenuItem } from "@/shell/ContextMenu";
+import { lookupPickerIcon } from "@/design/picker-icons";
 import {
   IconSidebar,
   IconBack,
@@ -22,7 +20,9 @@ import {
   IconClose,
   IconHelp,
   IconSettings,
+  IconEdit,
 } from "@/design/icons";
+import { Image01Icon, Link01Icon, ViewOffIcon, Delete01Icon } from "hugeicons-react";
 import {
   useActiveWorktree,
   useAppDispatch,
@@ -37,6 +37,7 @@ import { openProjectDialog } from "@/lib/projectDialog";
 import {
   nextAutoBranch,
   worktreeArchive,
+  primaryTerminalTab,
   worktreeCreate,
   worktreeRestore,
 } from "@/lib/worktrees";
@@ -222,6 +223,10 @@ function ProjectGroup({
   const dispatch = useAppDispatch();
   const toast = useToast();
   const [hovering, setHovering] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [menuAnchor, setMenuAnchor] = useState<{ x: number; y: number } | null>(
+    null,
+  );
 
   const state = useAppState();
   const onCreate = async () => {
@@ -234,10 +239,73 @@ function ProjectGroup({
         branch,
       );
       dispatch({ type: "add-worktree", worktree: w });
+      // Auto-open the primary terminal so the new agent lands in a
+      // live shell instead of an empty main column.
+      dispatch({ type: "open-tab", tab: primaryTerminalTab(w) });
     } catch (err) {
       toast.show({ message: `Worktree creation failed: ${err}` });
     }
   };
+
+  const projectMenuItems: ContextMenuItem[] = [
+    {
+      id: "new-worktree",
+      label: "New workspace",
+      Glyph: IconPlus,
+      shortcut: "⌘N",
+      onSelect: () => void onCreate(),
+    },
+    {
+      id: "create-from",
+      label: "Create from…",
+      Glyph: Link01Icon,
+      shortcut: "⌘⇧N",
+      onSelect: () => {
+        // TODO: open a "create from branch" dialog. For now, behave
+        // like New workspace but explicitly mark it as the same flow.
+        void onCreate();
+      },
+    },
+    {
+      id: "settings",
+      label: "Repository settings",
+      Glyph: IconSettings,
+      shortcut: "⌘,",
+      onSelect: () => dispatch({ type: "set-settings-open", open: true }),
+    },
+    {
+      id: "change-icon",
+      label: "Change icon",
+      Glyph: Image01Icon,
+      onSelect: () => setPickerOpen(true),
+    },
+    {
+      id: "hide",
+      label: "Hide repository",
+      Glyph: ViewOffIcon,
+      onSelect: () =>
+        dispatch({
+          type: "set-project-expanded",
+          id: project.id,
+          expanded: false,
+        }),
+    },
+    {
+      id: "remove",
+      label: "Remove repository",
+      Glyph: Delete01Icon,
+      destructive: true,
+      onSelect: () => {
+        if (
+          window.confirm(
+            `Remove ${project.name} from the sidebar? Local files are untouched.`,
+          )
+        ) {
+          dispatch({ type: "remove-project", id: project.id });
+        }
+      },
+    },
+  ];
 
   return (
     <li
@@ -245,15 +313,29 @@ function ProjectGroup({
       onMouseLeave={() => setHovering(false)}
     >
       <div
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setMenuAnchor({ x: e.clientX, y: e.clientY });
+        }}
+        onDoubleClick={(e) => {
+          // Ignore double-clicks landing on the +new-worktree button.
+          const t = e.target as HTMLElement;
+          if (t.closest("button")) return;
+          e.preventDefault();
+          setPickerOpen(true);
+        }}
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 8,
-          height: 30,
+          gap: 10,
+          height: 38,
           padding: "0 var(--space-2)",
           color: "var(--text-primary)",
           fontSize: "var(--text-base)",
-          fontWeight: "var(--weight-medium)",
+          fontWeight: "var(--weight-semibold)",
+          cursor: "default",
+          userSelect: "none",
         }}
       >
         <ProjectGlyph project={project} />
@@ -284,19 +366,81 @@ function ProjectGroup({
           />
         ))}
       </ul>
+
+      <IconPickerDialog
+        open={pickerOpen}
+        targetName={project.name}
+        currentIcon={project.iconName}
+        currentColor={project.color}
+        onSelectIcon={(name) =>
+          dispatch({
+            type: "set-project-icon",
+            id: project.id,
+            iconName: name,
+          })
+        }
+        onSelectColor={(c) =>
+          dispatch({
+            type: "set-project-color",
+            id: project.id,
+            color: c,
+          })
+        }
+        onRename={(newName) =>
+          dispatch({
+            type: "update-project",
+            id: project.id,
+            patch: { name: newName },
+          })
+        }
+        onClose={() => setPickerOpen(false)}
+      />
+
+      <ContextMenu
+        open={!!menuAnchor}
+        anchor={menuAnchor}
+        items={projectMenuItems}
+        onClose={() => setMenuAnchor(null)}
+      />
     </li>
   );
 }
 
 function ProjectGlyph({ project }: { project: Project }) {
+  // Precedence: user-picked HugeIcon → favicon scanned at project add
+  // → first-letter glyph fallback. The HugeIcon path is the user's
+  // explicit override; the favicon path is best-effort auto-detection
+  // (populated by the backend at scan time, may be null).
+  const iconEntry = lookupPickerIcon(project.iconName);
+  if (iconEntry) {
+    const Glyph = iconEntry.Component;
+    return (
+      <span
+        aria-hidden
+        style={{
+          width: 20,
+          height: 20,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: project.color
+            ? `var(--tag-${project.color})`
+            : "var(--text-secondary)",
+          flexShrink: 0,
+        }}
+      >
+        <Glyph size={18} />
+      </span>
+    );
+  }
   if (project.faviconDataUri) {
     return (
       <img
         src={project.faviconDataUri}
         alt=""
-        width={16}
-        height={16}
-        style={{ borderRadius: 3, flexShrink: 0 }}
+        width={20}
+        height={20}
+        style={{ borderRadius: 4, flexShrink: 0 }}
       />
     );
   }
@@ -304,17 +448,19 @@ function ProjectGlyph({ project }: { project: Project }) {
     <span
       aria-hidden
       style={{
-        width: 16,
-        height: 16,
-        borderRadius: 3,
-        backgroundColor: "var(--surface-3)",
+        width: 20,
+        height: 20,
+        borderRadius: 4,
+        backgroundColor: project.color
+          ? `color-mix(in oklch, var(--surface-3), var(--tag-${project.color}) 35%)`
+          : "var(--surface-3)",
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
         fontFamily: "var(--font-mono)",
-        fontSize: 10,
+        fontSize: 11,
         fontWeight: 600,
-        color: "var(--text-secondary)",
+        color: "var(--text-primary)",
         flexShrink: 0,
       }}
     >
@@ -453,11 +599,10 @@ function WorktreeRow({
   const settings = useAppState().settings;
   const toast = useToast();
   const [hovering, setHovering] = useState(false);
-  const [editing, setEditing] = useState(false);
-  const [draftName, setDraftName] = useState(worktree.name);
-  const [colorAnchor, setColorAnchor] = useState<
-    { x: number; y: number } | null
-  >(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [menuAnchor, setMenuAnchor] = useState<{ x: number; y: number } | null>(
+    null,
+  );
   const isRunning = worktree.agentStatus === "running";
 
   const onSelect = () => {
@@ -472,33 +617,15 @@ function WorktreeRow({
   const onDoubleClick = (e: MouseEvent) => {
     // Ignore double-clicks landing on inner buttons (archive ✕, etc.)
     const t = e.target as HTMLElement;
-    if (t.tagName === "BUTTON" && t !== e.currentTarget) return;
+    if (t.closest("button") && t.closest("button") !== e.currentTarget) return;
     e.preventDefault();
-    setDraftName(worktree.name);
-    setEditing(true);
+    setPickerOpen(true);
   };
 
   const onContextMenu = (e: MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    setColorAnchor({ x: e.clientX, y: e.clientY });
-  };
-
-  const commitRename = () => {
-    const trimmed = draftName.trim();
-    if (trimmed && trimmed !== worktree.name) {
-      dispatch({
-        type: "update-worktree",
-        id: worktree.id,
-        patch: { name: trimmed },
-      });
-    }
-    setEditing(false);
-  };
-
-  const cancelRename = () => {
-    setDraftName(worktree.name);
-    setEditing(false);
+    setMenuAnchor({ x: e.clientX, y: e.clientY });
   };
 
   const onArchive = async (e: MouseEvent) => {
@@ -562,10 +689,10 @@ function WorktreeRow({
   const rowStyle: CSSProperties = {
     display: "flex",
     alignItems: "center",
-    gap: 8,
+    gap: 10,
     width: "100%",
-    height: 30,
-    padding: "0 var(--space-2) 0 28px",
+    height: 34,
+    padding: "0 var(--space-2) 0 32px",
     borderRadius: "var(--radius-sm)",
     backgroundColor: startBg,
     color: textColor,
@@ -577,6 +704,9 @@ function WorktreeRow({
       "background-color var(--motion-instant) var(--ease-out-quart)," +
       "color var(--motion-instant) var(--ease-out-quart)",
   };
+
+  // Glyph precedence: user-picked HugeIcon → running spinner → branch.
+  const iconEntry = lookupPickerIcon(worktree.iconName);
 
   return (
     <li
@@ -602,9 +732,15 @@ function WorktreeRow({
             display: "inline-flex",
             alignItems: "center",
             justifyContent: "center",
-            width: 14,
-            height: 14,
-            color: isRunning ? "var(--accent)" : "var(--text-tertiary)",
+            width: 16,
+            height: 16,
+            color: isRunning
+              ? "var(--accent)"
+              : iconEntry
+                ? worktree.color
+                  ? `var(--tag-${worktree.color})`
+                  : "var(--text-secondary)"
+                : "var(--text-tertiary)",
             transition: "color var(--motion-fast) var(--ease-out-quart)",
             flexShrink: 0,
           }}
@@ -615,33 +751,26 @@ function WorktreeRow({
               className="rli-loader-spin"
               style={{ display: "inline-flex" }}
             >
-              <IconRunning size={14} />
+              <IconRunning size={16} />
             </span>
+          ) : iconEntry ? (
+            <iconEntry.Component size={16} />
           ) : (
-            <IconBranch key="idle" size={14} />
+            <IconBranch key="idle" size={16} />
           )}
         </span>
 
-        {editing ? (
-          <RenameInput
-            value={draftName}
-            onChange={setDraftName}
-            onCommit={commitRename}
-            onCancel={cancelRename}
-          />
-        ) : (
-          <span
-            style={{
-              flex: 1,
-              minWidth: 0,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {worktree.name}
-          </span>
-        )}
+        <span
+          style={{
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {worktree.name}
+        </span>
 
         {hovering ? (
           <SmallIconButton title="Archive worktree" onClick={onArchive}>
@@ -661,85 +790,73 @@ function WorktreeRow({
         ) : null}
       </button>
 
-      <AnimatePresence>
-        {colorAnchor && (
-          <ColorPicker
-            anchor={colorAnchor}
-            selected={worktree.color ?? "default"}
-            onSelect={(id) =>
-              dispatch({
-                type: "update-worktree",
-                id: worktree.id,
-                patch: { color: id === "default" ? undefined : id },
-              })
-            }
-            onClose={() => setColorAnchor(null)}
-          />
-        )}
-      </AnimatePresence>
+      <IconPickerDialog
+        open={pickerOpen}
+        targetName={worktree.name}
+        currentIcon={worktree.iconName}
+        currentColor={worktree.color}
+        onSelectIcon={(name) =>
+          dispatch({
+            type: "set-worktree-icon",
+            worktreeId: worktree.id,
+            iconName: name,
+          })
+        }
+        onSelectColor={(c) =>
+          dispatch({
+            type: "update-worktree",
+            id: worktree.id,
+            patch: { color: c },
+          })
+        }
+        onRename={(newName) =>
+          dispatch({
+            type: "update-worktree",
+            id: worktree.id,
+            patch: { name: newName },
+          })
+        }
+        onClose={() => setPickerOpen(false)}
+      />
+
+      <ContextMenu
+        open={!!menuAnchor}
+        anchor={menuAnchor}
+        items={[
+          {
+            id: "rename",
+            label: "Rename worktree",
+            Glyph: IconEdit,
+            onSelect: () => setPickerOpen(true),
+          },
+          {
+            id: "icon",
+            label: "Change icon",
+            Glyph: Image01Icon,
+            onSelect: () => setPickerOpen(true),
+          },
+          {
+            id: "color",
+            label: "Change color",
+            Glyph: Link01Icon,
+            onSelect: () => setPickerOpen(true),
+          },
+          {
+            id: "archive",
+            label: "Archive worktree",
+            Glyph: Delete01Icon,
+            destructive: true,
+            onSelect: () => {
+              const e = {
+                stopPropagation: () => undefined,
+              } as unknown as MouseEvent;
+              void onArchive(e);
+            },
+          },
+        ]}
+        onClose={() => setMenuAnchor(null)}
+      />
     </li>
-  );
-}
-
-/**
- * Inline rename input — shown when the user double-clicks a card.
- * Enter commits, Esc cancels, blur commits. Auto-focuses + selects all
- * on mount so the user can either replace or extend the name.
- */
-function RenameInput({
-  value,
-  onChange,
-  onCommit,
-  onCancel,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  onCommit: () => void;
-  onCancel: () => void;
-}) {
-  const ref = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    ref.current?.focus();
-    ref.current?.select();
-  }, []);
-
-  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      onCommit();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      onCancel();
-    }
-  };
-
-  return (
-    <input
-      ref={ref}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      onKeyDown={onKeyDown}
-      onBlur={onCommit}
-      onClick={(e) => e.stopPropagation()}
-      onDoubleClick={(e) => e.stopPropagation()}
-      className="allow-select"
-      spellCheck={false}
-      style={{
-        width: "100%",
-        height: 20,
-        padding: "0 6px",
-        margin: "-2px -6px",
-        backgroundColor: "var(--surface-1)",
-        border: "1px solid var(--accent-muted)",
-        borderRadius: "var(--radius-xs)",
-        color: "var(--text-primary)",
-        fontFamily: "var(--font-sans)",
-        fontSize: "var(--text-base)",
-        fontWeight: "var(--weight-medium)",
-        outline: "none",
-      }}
-    />
   );
 }
 

@@ -177,6 +177,32 @@ export function reducer(state: AppState, action: AppAction): AppState {
         },
       };
 
+    case "set-project-icon":
+      return {
+        ...state,
+        projects: {
+          ...state.projects,
+          [action.id]: { ...state.projects[action.id], iconName: action.iconName },
+        },
+      };
+
+    case "update-project": {
+      const cur = state.projects[action.id];
+      if (!cur) return state;
+      return {
+        ...state,
+        projects: {
+          ...state.projects,
+          [action.id]: { ...cur, ...action.patch },
+        },
+      };
+    }
+
+    case "set-worktree-icon":
+      return updateWorktree(state, action.worktreeId, () => ({
+        iconName: action.iconName,
+      }));
+
     /* Worktrees --------------------------------------------------- */
 
     case "add-worktree": {
