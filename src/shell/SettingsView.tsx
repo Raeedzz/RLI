@@ -15,10 +15,20 @@ import type {
   AgentCli,
   ArchiveBehavior,
   CompletionSound,
+  ProjectId,
   Settings,
 } from "@/state/types";
+import { RepositorySettingsView } from "./RepositorySettingsView";
 
-type Section = "general" | "repository";
+/**
+ * Which page is showing in the main pane. `"general"` = global RLI
+ * settings; `{ kind: "repository", id }` = per-repo settings for the
+ * project of that id, rendered via the same component the in-tab
+ * Repository Settings page uses.
+ */
+type Section =
+  | { kind: "general" }
+  | { kind: "repository"; id: ProjectId };
 
 /**
  * Full-window settings overlay. Replaces the 3-column shell while open.
@@ -29,9 +39,13 @@ export function SettingsView() {
   const state = useAppState();
   const dispatch = useAppDispatch();
   const open = state.settingsOpen;
-  const [section, setSection] = useState<Section>("general");
+  const [section, setSection] = useState<Section>({ kind: "general" });
 
   const close = () => dispatch({ type: "set-settings-open", open: false });
+  const projects = state.projectOrder
+    .map((id) => state.projects[id])
+    .filter(Boolean)
+    .map((p) => ({ id: p!.id, name: p!.name }));
 
   return (
     <AnimatePresence>
@@ -56,10 +70,7 @@ export function SettingsView() {
             current={section}
             onPick={setSection}
             onClose={close}
-            projectNames={state.projectOrder
-              .map((id) => state.projects[id])
-              .filter(Boolean)
-              .map((p) => p!.name)}
+            projects={projects}
           />
           <SettingsMain section={section} settings={state.settings} />
         </motion.div>
@@ -76,12 +87,12 @@ function SettingsSidebar({
   current,
   onPick,
   onClose,
-  projectNames,
+  projects,
 }: {
   current: Section;
   onPick: (s: Section) => void;
   onClose: () => void;
-  projectNames: string[];
+  projects: { id: ProjectId; name: string }[];
 }) {
   return (
     <aside
@@ -91,7 +102,10 @@ function SettingsSidebar({
         borderRight: "var(--border-1)",
         display: "grid",
         gridTemplateRows: "auto auto 1fr auto",
-        padding: "var(--space-3) 0",
+        // Top padding clears macOS traffic lights (~y=20). Without
+        // this, "Back to app" rides the same horizontal band as the
+        // close/min/zoom controls.
+        padding: "44px 0 var(--space-3)",
       }}
     >
       <button
@@ -129,20 +143,26 @@ function SettingsSidebar({
         }}
       >
         <NavItem
-          active={current === "general"}
+          active={current.kind === "general"}
           icon={<IconSettings size={14} />}
           label="General"
-          onClick={() => onPick("general")}
+          onClick={() => onPick({ kind: "general" })}
         />
         <NavItem
           active={false}
           icon={<IconBranch size={14} />}
           label="Helpers"
-          onClick={() => onPick("general")}
+          onClick={() => onPick({ kind: "general" })}
         />
       </nav>
 
-      <div style={{ padding: "var(--space-4) var(--space-3) var(--space-2)" }}>
+      <div
+        style={{
+          padding: "var(--space-4) var(--space-2) var(--space-2)",
+          overflow: "auto",
+          minHeight: 0,
+        }}
+      >
         <span
           style={{
             display: "block",
@@ -151,36 +171,68 @@ function SettingsSidebar({
             textTransform: "uppercase",
             color: "var(--text-tertiary)",
             marginBottom: "var(--space-1)",
+            padding: "0 var(--space-1)",
           }}
         >
           Repositories
         </span>
         <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
-          {projectNames.map((name) => (
-            <li
-              key={name}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                height: 26,
-                padding: "0 var(--space-2)",
-                color: "var(--text-secondary)",
-                fontSize: "var(--text-xs)",
-              }}
-            >
-              <IconFolder size={12} />
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-                {name}
-              </span>
-            </li>
-          ))}
-          {projectNames.length === 0 && (
+          {projects.map((p) => {
+            const active = current.kind === "repository" && current.id === p.id;
+            return (
+              <li key={p.id}>
+                <button
+                  type="button"
+                  onClick={() => onPick({ kind: "repository", id: p.id })}
+                  style={{
+                    width: "100%",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    height: 30,
+                    padding: "0 var(--space-2)",
+                    borderRadius: "var(--radius-sm)",
+                    backgroundColor: active ? "var(--surface-3)" : "transparent",
+                    color: active ? "var(--text-primary)" : "var(--text-secondary)",
+                    fontSize: "var(--text-sm)",
+                    textAlign: "left",
+                    cursor: "pointer",
+                    border: "none",
+                    transition:
+                      "background-color var(--motion-instant) var(--ease-out-quart)",
+                  }}
+                  onMouseOver={(e) => {
+                    if (!active)
+                      e.currentTarget.style.backgroundColor = "var(--surface-2)";
+                  }}
+                  onMouseOut={(e) => {
+                    if (!active)
+                      e.currentTarget.style.backgroundColor = "transparent";
+                  }}
+                >
+                  <IconFolder
+                    size={12}
+                    style={{ color: "var(--text-tertiary)" }}
+                  />
+                  <span
+                    style={{
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {p.name}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+          {projects.length === 0 && (
             <li
               style={{
                 fontSize: "var(--text-xs)",
                 color: "var(--text-tertiary)",
-                padding: "0 var(--space-2)",
+                padding: "var(--space-1) var(--space-2)",
               }}
             >
               No projects yet
@@ -267,13 +319,30 @@ function SettingsMain({
   section: Section;
   settings: Settings;
 }) {
+  if (section.kind === "repository") {
+    return (
+      <main
+        style={{
+          height: "100%",
+          position: "relative",
+          backgroundColor: "var(--surface-0)",
+          // Same top inset as the sidebar so the repo header lines up
+          // with "Back to app" instead of disappearing under the
+          // traffic lights.
+          paddingTop: 32,
+        }}
+      >
+        <RepositorySettingsView projectId={section.id} />
+      </main>
+    );
+  }
   return (
     <main
       style={{
         height: "100%",
         overflow: "auto",
         backgroundColor: "var(--surface-0)",
-        padding: "var(--space-8) max(var(--space-12), 8vw)",
+        padding: "calc(var(--space-8) + 32px) max(var(--space-12), 8vw) var(--space-8)",
       }}
     >
       <h1
@@ -287,7 +356,7 @@ function SettingsMain({
           color: "var(--text-primary)",
         }}
       >
-        {section === "general" ? "General" : "Repositories"}
+        General
       </h1>
       <GeneralSection settings={settings} />
     </main>

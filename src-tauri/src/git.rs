@@ -308,6 +308,18 @@ pub async fn git_push(
    Branches & worktrees (Task #9 builds on these)
    ------------------------------------------------------------------ */
 
+/// List configured remotes for the repo at `cwd`. Used by the
+/// Repository settings page to populate the "Remote origin" dropdown.
+#[tauri::command]
+pub async fn git_remotes(cwd: String) -> Result<Vec<String>, String> {
+    let raw = run(&cwd, &["remote"]).await?;
+    Ok(raw
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
 #[tauri::command]
 pub async fn git_branch_current(cwd: String) -> Result<String, String> {
     run(&cwd, &["rev-parse", "--abbrev-ref", "HEAD"])

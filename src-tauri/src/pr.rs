@@ -39,11 +39,17 @@ pub struct ConflictResult {
     pub already_up_to_date: bool,
 }
 
+/// Draft a PR title + body for the working-tree diff.
+///
+/// `extras` carries free-form custom instructions concatenated from
+/// the repo's `general` + `createPR` preferences. Empty / None = no
+/// extras.
 #[tauri::command]
 pub async fn pr_draft(
     cwd: String,
     cli: String,
     model: Option<String>,
+    extras: Option<String>,
 ) -> Result<PrDraft, String> {
     if !Path::new(&cwd).exists() {
         return Err(format!("cwd does not exist: {cwd}"));
@@ -56,6 +62,14 @@ pub async fn pr_draft(
     let log = run_git(&cwd, &["log", "-n", "10", "--pretty=format:%s"]).await?;
 
     let mut prompt = String::new();
+    if let Some(extras) = extras.as_deref() {
+        let trimmed = extras.trim();
+        if !trimmed.is_empty() {
+            prompt.push_str("Custom instructions from this repo:\n");
+            prompt.push_str(trimmed);
+            prompt.push_str("\n\n");
+        }
+    }
     prompt.push_str("Recent commit subjects:\n");
     prompt.push_str(&log);
     prompt.push_str("\n\nStaged diff:\n");

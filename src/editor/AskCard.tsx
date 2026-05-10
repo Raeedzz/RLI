@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { marginCardVariants } from "@/design/motion";
 import { helperRun } from "@/lib/helper-agent";
 import { useActiveWorktree, useAppState } from "@/state/AppState";
+import { projectSettings } from "@/state/types";
 
 interface Props {
   selection: string;
@@ -42,13 +43,22 @@ export function AskCard({
   const [loading, setLoading] = useState(true);
   const ref = useRef<HTMLDivElement>(null);
   const worktree = useActiveWorktree();
-  const { settings } = useAppState();
+  const state = useAppState();
+  const { settings } = state;
 
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
       try {
-        const prompt = `${ASK_SYSTEM}\n\n${buildPrompt(selection, context, pathHint)}`;
+        const project = worktree
+          ? state.projects[worktree.projectId]
+          : null;
+        const prefs = projectSettings(project).prefs;
+        const extras = prefs.general.trim();
+        const preface = extras
+          ? `Custom instructions from this repo:\n${extras}\n\n`
+          : "";
+        const prompt = `${ASK_SYSTEM}\n\n${preface}${buildPrompt(selection, context, pathHint)}`;
         const cwd = worktree?.path ?? "";
         const cli = worktree?.agentCli ?? settings.helperCliExplain;
         const model =

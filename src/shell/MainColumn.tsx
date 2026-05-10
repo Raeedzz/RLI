@@ -19,6 +19,7 @@ import { BlockTerminal } from "@/terminal/BlockTerminal";
 import { DiffView } from "@/git/DiffView";
 import { Editor } from "@/editor/Editor";
 import { fs } from "@/lib/fs";
+import { RepositorySettingsView } from "./RepositorySettingsView";
 
 /**
  * Center column. Top row: breadcrumb + workspace selector. Then the
@@ -274,6 +275,9 @@ function tabLabel(tab: Tab): string {
   if (tab.kind === "terminal") {
     return tab.detectedCli ?? tab.title ?? "shell";
   }
+  if (tab.kind === "project-settings") {
+    return tab.title || "Settings";
+  }
   // diff / markdown — show the filename basename.
   return tab.filePath.split("/").pop() ?? tab.title;
 }
@@ -293,6 +297,7 @@ function TabKindGlyph({ tab }: { tab: Tab }) {
   );
   if (tab.kind === "terminal") return dot("var(--text-tertiary)");
   if (tab.kind === "diff") return dot("var(--state-info)");
+  if (tab.kind === "project-settings") return dot("var(--accent)");
   return dot("var(--state-warning)");
 }
 
@@ -336,6 +341,8 @@ function TabContent({
             filePath={tab.filePath}
             staged={tab.staged}
           />
+        ) : tab.kind === "project-settings" ? (
+          <RepositorySettingsView projectId={tab.projectId} />
         ) : (
           <MarkdownTabContent tab={tab} />
         )}

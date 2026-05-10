@@ -9,7 +9,7 @@
 //!   1. `RLI_CHROME_PATH` env var (escape hatch for unusual installs).
 //!   2. /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
 //!   3. /Applications/Chromium.app/Contents/MacOS/Chromium
-//!   4. ~/Library/Application Support/RLI/chrome/<arch>/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing
+//!   4. ~/Library/Application Support/dev.raeedz.gli/chrome/<arch>/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing
 //!   5. None → download CFT from googlechromelabs.github.io
 //!
 //! Progress events are emitted on `browser://download/progress` so the

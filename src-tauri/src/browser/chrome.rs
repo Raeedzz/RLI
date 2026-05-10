@@ -94,7 +94,7 @@ impl ChromeSession {
         let chrome_path = ensure_chrome(app).await?;
 
         // Per-PID user-data-dir keeps a crashed previous session from
-        // colliding with this one. Inside ~/Library/Application Support/RLI/.
+        // colliding with this one. Inside ~/Library/Application Support/dev.raeedz.gli/.
         let pid = std::process::id();
         let data_root = dirs::data_dir()
             .ok_or_else(|| "no home directory".to_string())?

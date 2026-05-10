@@ -1,4 +1,4 @@
-//! RLI memory layer.
+//! GLI memory layer.
 //!
 //! SQLite (bundled) + FTS5 for keyword search and recency for "what
 //! happened recently here." Embedding column reserved as a BLOB so we
@@ -12,7 +12,7 @@
 //! latency on writes, no cold-start cost. Upgrade when we feel the
 //! limits.
 //!
-//! Storage: `~/Library/Application Support/RLI/rli.db` on macOS.
+//! Storage: `~/Library/Application Support/dev.raeedz.gli/gli.db` on macOS.
 //!
 //! Stores three kinds of entries:
 //!   - `transcript`: rolling agent PTY scrollback summaries (Task #13)
@@ -101,7 +101,22 @@ pub struct Memory {
 fn db_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&app_data).map_err(|e| e.to_string())?;
-    Ok(app_data.join("rli.db"))
+    let new = app_data.join("gli.db");
+    let old = app_data.join("rli.db");
+    // One-time rename of the legacy file. WAL/SHM siblings come along
+    // for the ride so SQLite picks them up cleanly under the new name.
+    if old.exists() && !new.exists() {
+        let _ = std::fs::rename(&old, &new);
+        let _ = std::fs::rename(
+            app_data.join("rli.db-wal"),
+            app_data.join("gli.db-wal"),
+        );
+        let _ = std::fs::rename(
+            app_data.join("rli.db-shm"),
+            app_data.join("gli.db-shm"),
+        );
+    }
+    Ok(new)
 }
 
 fn now_ms() -> i64 {

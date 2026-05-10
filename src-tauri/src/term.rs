@@ -81,7 +81,7 @@ struct Session {
    We forward only what the frontend actually does something with.
    ------------------------------------------------------------------ */
 
-// Locked to `Wry` (Tauri's desktop runtime). RLI is macOS-desktop-only,
+// Locked to `Wry` (Tauri's desktop runtime). GLI is macOS-desktop-only,
 // so we trade the generics for a much simpler `Session` type definition
 // — `Session` doesn't have to thread `R` through every field.
 #[derive(Clone)]
@@ -688,22 +688,22 @@ fn diff_rows(prev: &[RowSnapshot], next: &[RowSnapshot]) -> Vec<DirtyRow> {
    prompt that duplicated our breadcrumb pill bar.
    ------------------------------------------------------------------ */
 
-const ZSH_INTEGRATION: &str = r#"# RLI shell integration — auto-generated, do not edit.
+const ZSH_INTEGRATION: &str = r#"# GLI shell integration — auto-generated, do not edit.
 # Sources the user's real configuration first, then installs OSC 133
 # semantic-prompt markers + OSC 7 cwd reporting + an empty PROMPT.
-# The empty PROMPT is intentional: RLI's chrome already shows folder
+# The empty PROMPT is intentional: GLI's chrome already shows folder
 # / branch / diff in a pill row above the input, so the shell's own
 # host@machine cwd % line would just duplicate that and eat vertical
 # space inside every closed block.
 
 # Save the integration ZDOTDIR before any user config can clobber it.
-RLI_INTEGRATION_DIR="$ZDOTDIR"
+GLI_INTEGRATION_DIR="$ZDOTDIR"
 
 # Restore the original ZDOTDIR (or fall back to HOME) so the user's
 # real .zshrc and the rest of zsh's config files (.zlogin, .zprofile,
 # etc.) load from where the user keeps them.
-if [ -n "$RLI_USER_ZDOTDIR" ]; then
-    export ZDOTDIR="$RLI_USER_ZDOTDIR"
+if [ -n "$GLI_USER_ZDOTDIR" ]; then
+    export ZDOTDIR="$GLI_USER_ZDOTDIR"
 elif [ -n "$ZDOTDIR" ]; then
     unset ZDOTDIR
 fi
@@ -875,7 +875,11 @@ pub fn term_start(
     // `claude` would reach for its `claude-in-chrome` MCP server (which
     // drives the user's real Chrome — not what we want for app testing).
     // The daemon binds 4000 by default; if it landed elsewhere it also
-    // writes the chosen port to ~/Library/Application Support/RLI/browser-port.
+    // writes the chosen port to ~/Library/Application Support/dev.raeedz.gli/browser-port.
+    // Both GLI_* (current) and RLI_* (legacy) names are exported so
+    // user-side tooling that hardcodes either spelling keeps working
+    // through the rename window.
+    cmd.env("GLI_BROWSER_URL", "http://127.0.0.1:4000");
     cmd.env("RLI_BROWSER_URL", "http://127.0.0.1:4000");
 
     // Memory daemon discovery: the daemon picks a port at startup
@@ -884,16 +888,20 @@ pub fn term_start(
     // /memory/{add,recall,extract} without parsing the port file.
     if let Some(port_state) = app.try_state::<crate::memory::daemon::MemoryDaemonPort>() {
         if let Some(port) = port_state.get() {
-            cmd.env("RLI_MEMORY_URL", format!("http://127.0.0.1:{port}"));
+            let url = format!("http://127.0.0.1:{port}");
+            cmd.env("GLI_MEMORY_URL", &url);
+            cmd.env("RLI_MEMORY_URL", &url);
         }
     }
     // Per-pane scoping: in-pane agents (claude, codex) and the
-    // rli-memory CLI read these to scope add/recall to the right
+    // gli-memory CLI read these to scope add/recall to the right
     // project + session without the user passing flags by hand.
     if let Some(pid) = args.project_id.as_deref() {
+        cmd.env("GLI_PROJECT_ID", pid);
         cmd.env("RLI_PROJECT_ID", pid);
     }
     if let Some(sid) = args.session_id.as_deref() {
+        cmd.env("GLI_SESSION_ID", sid);
         cmd.env("RLI_SESSION_ID", sid);
     }
 
@@ -906,7 +914,7 @@ pub fn term_start(
             // Stash the user's existing ZDOTDIR (if any) so the
             // integration script can chain-source from there.
             if let Ok(prev) = std::env::var("ZDOTDIR") {
-                cmd.env("RLI_USER_ZDOTDIR", prev);
+                cmd.env("GLI_USER_ZDOTDIR", prev);
             }
             cmd.env("ZDOTDIR", dir.to_string_lossy().into_owned());
         }

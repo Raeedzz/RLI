@@ -1,4 +1,4 @@
-/// RLI Tauri entry point.
+/// GLI Tauri entry point.
 ///
 /// Plugin set is the minimum needed for v1 features:
 ///   - shell:   spawn `git`, `rg`, `ast-grep`, etc. from the frontend
@@ -58,7 +58,7 @@ pub fn run() {
 
             // Memory daemon: serves /memory/{add,search,extract} on
             // 5555..5599. Discoverable via the memory-port file or via
-            // RLI_MEMORY_URL injected into each PTY's env (term.rs).
+            // GLI_MEMORY_URL injected into each PTY's env (term.rs).
             // Any agent in any pane can curl the routes through the
             // bash wrapper — that's how mem0-style "CLI-wide" reach
             // is actually achieved.
@@ -70,12 +70,14 @@ pub fn run() {
                 }
             });
 
-            // One-time `~/.local/bin/rli-memory` install. Drops the
-            // bundled bash wrapper so users (and agents inside RLI
-            // panes) can invoke `rli-memory add/recall/extract` from
+            // One-time `~/.local/bin/gli-memory` install. Drops the
+            // bundled bash wrapper so users (and agents inside GLI
+            // panes) can invoke `gli-memory add/recall/extract` from
             // anywhere on PATH. No-op if the file is already present
-            // and matches the bundled version.
+            // and matches the bundled version. Best-effort prunes the
+            // legacy `~/.local/bin/rli-memory` from prior installs.
             install_memory_cli();
+            migrate_legacy_app_data();
             Ok(())
         });
 
@@ -106,6 +108,7 @@ pub fn run() {
             git::git_push,
             git::git_branch_current,
             git::git_branch_list,
+            git::git_remotes,
             git::git_checkout,
             git::git_branch_create,
             git::git_worktree_add,
@@ -136,6 +139,7 @@ pub fn run() {
             fs::fs_read_text_file,
             fs::fs_write_text_file,
             fs::fs_cwd,
+            fs::system_home_dir,
             fs::system_open,
             fs::system_open_with,
             // State persistence
@@ -144,19 +148,20 @@ pub fn run() {
             state::state_clear,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running RLI");
+        .expect("error while running GLI");
 }
 
-/// Bundled `rli-memory` CLI script. Embedded at compile-time so we
+/// Bundled `gli-memory` CLI script. Embedded at compile-time so we
 /// don't have to ship the `scripts/` dir alongside the .app — a single
 /// `cargo build` produces a self-contained binary that knows how to
 /// install its own CLI helper.
-const RLI_MEMORY_SCRIPT: &str = include_str!("../../scripts/rli-memory");
+const GLI_MEMORY_SCRIPT: &str = include_str!("../../scripts/gli-memory");
 
-/// First-launch install of `rli-memory` to `~/.local/bin/rli-memory`.
+/// First-launch install of `gli-memory` to `~/.local/bin/gli-memory`.
 /// No-op if the file is already present and matches the bundled
 /// content; otherwise overwrites + chmods +x. Failures are logged to
-/// stderr only — they should never block app startup.
+/// stderr only — they should never block app startup. Also removes
+/// the legacy `~/.local/bin/rli-memory` from previous installs.
 #[cfg(target_os = "macos")]
 fn install_memory_cli() {
     let Some(home) = dirs::home_dir() else {
@@ -168,13 +173,13 @@ fn install_memory_cli() {
         eprintln!("[memory cli] could not create {}: {e}", bin.display());
         return;
     }
-    let dest = bin.join("rli-memory");
+    let dest = bin.join("gli-memory");
     let needs_write = match std::fs::read_to_string(&dest) {
-        Ok(existing) => existing != RLI_MEMORY_SCRIPT,
+        Ok(existing) => existing != GLI_MEMORY_SCRIPT,
         Err(_) => true,
     };
     if needs_write {
-        if let Err(e) = std::fs::write(&dest, RLI_MEMORY_SCRIPT) {
+        if let Err(e) = std::fs::write(&dest, GLI_MEMORY_SCRIPT) {
             eprintln!("[memory cli] write failed: {e}");
             return;
         }
@@ -190,13 +195,19 @@ fn install_memory_cli() {
         eprintln!("[memory cli] installed → {}", dest.display());
     }
 
+    // Sweep up the legacy install from prior `rli-memory` releases.
+    let legacy = bin.join("rli-memory");
+    if legacy.exists() {
+        let _ = std::fs::remove_file(&legacy);
+    }
+
     // Friendly nudge if ~/.local/bin isn't on PATH. We don't try to
     // mutate the user's shell rc — that's their territory.
     let path = std::env::var("PATH").unwrap_or_default();
     let needle = bin.to_string_lossy();
     if !path.split(':').any(|p| p == needle) {
         eprintln!(
-            "[memory cli] note: {} is not on $PATH. Add it (e.g. `export PATH=\"$HOME/.local/bin:$PATH\"` in your ~/.zshrc) so `rli-memory` is callable from any shell.",
+            "[memory cli] note: {} is not on $PATH. Add it (e.g. `export PATH=\"$HOME/.local/bin:$PATH\"` in your ~/.zshrc) so `gli-memory` is callable from any shell.",
             needle
         );
     }
@@ -204,3 +215,36 @@ fn install_memory_cli() {
 
 #[cfg(not(target_os = "macos"))]
 fn install_memory_cli() {}
+
+/// One-shot migration of the previous `dev.raeedz.rli` Application
+/// Support directory to the new `dev.raeedz.gli` location. Tauri's
+/// `app_data_dir()` resolves off the bundle identifier, so a rename
+/// of the identifier orphans state.json, the worktrees archive, and
+/// the memory-port file. We move the old tree across once on first
+/// launch under the new identifier — no-op afterwards.
+#[cfg(target_os = "macos")]
+fn migrate_legacy_app_data() {
+    let Some(home) = dirs::home_dir() else { return };
+    let support = home.join("Library").join("Application Support");
+    let old = support.join("dev.raeedz.rli");
+    let new = support.join("dev.raeedz.gli");
+    if !old.exists() || new.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::rename(&old, &new) {
+        eprintln!(
+            "[migrate] couldn't rename {} → {}: {e}",
+            old.display(),
+            new.display()
+        );
+    } else {
+        eprintln!(
+            "[migrate] moved app data {} → {}",
+            old.display(),
+            new.display()
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn migrate_legacy_app_data() {}

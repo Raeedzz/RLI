@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppDispatch, useAppState } from "@/state/AppState";
+import { projectSettings } from "@/state/types";
 import { useToast } from "@/primitives/Toast";
 
 interface PrDraft {
@@ -43,10 +44,17 @@ export function CreatePRDialog() {
     const cli = worktree.agentCli ?? state.settings.helperCliPr;
     const model =
       cli === state.settings.helperCliPr ? state.settings.helperModelPr : "";
+    const project = state.projects[worktree.projectId];
+    const cfg = projectSettings(project);
+    const extras = [cfg.prefs.general, cfg.prefs.createPR]
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .join("\n\n");
     void invoke<PrDraft>("pr_draft", {
       cwd: worktree.path,
       cli,
       model: model && model.length > 0 ? model : null,
+      extras: extras.length > 0 ? extras : null,
     })
       .then((d) => setDraft(d))
       .catch((err) => setError(String(err)))

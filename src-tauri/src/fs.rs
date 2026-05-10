@@ -1,7 +1,7 @@
 //! Filesystem + shell-out commands.
 //!
 //! tauri-plugin-fs exists but is capability-scoped — every path the
-//! frontend touches has to be in an allowlist. For RLI's "open any
+//! frontend touches has to be in an allowlist. For GLI's "open any
 //! folder you point at" model that's the wrong shape, so we expose
 //! direct read commands instead.
 //!
@@ -99,6 +99,13 @@ pub fn fs_cwd() -> Result<String, String> {
     std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn system_home_dir() -> Result<String, String> {
+    dirs::home_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok_or_else(|| "no home dir".to_string())
 }
 
 #[tauri::command]

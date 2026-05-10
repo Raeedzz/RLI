@@ -22,6 +22,7 @@ import {
   RIGHT_DEFAULT,
   clampSidebar,
   clampRight,
+  projectSettings,
 } from "./types";
 import { loadState, saveState } from "../lib/persistence";
 
@@ -194,6 +195,33 @@ export function reducer(state: AppState, action: AppAction): AppState {
         projects: {
           ...state.projects,
           [action.id]: { ...cur, ...action.patch },
+        },
+      };
+    }
+
+    case "update-project-settings": {
+      const cur = state.projects[action.id];
+      if (!cur) return state;
+      const merged = { ...projectSettings(cur), ...action.patch };
+      return {
+        ...state,
+        projects: {
+          ...state.projects,
+          [action.id]: { ...cur, settings: merged },
+        },
+      };
+    }
+
+    case "update-project-prefs": {
+      const cur = state.projects[action.id];
+      if (!cur) return state;
+      const base = projectSettings(cur);
+      const merged = { ...base, prefs: { ...base.prefs, ...action.patch } };
+      return {
+        ...state,
+        projects: {
+          ...state.projects,
+          [action.id]: { ...cur, settings: merged },
         },
       };
     }

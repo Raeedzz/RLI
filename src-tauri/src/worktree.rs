@@ -91,13 +91,27 @@ fn output_to_string(out: Output) -> Result<String, String> {
     }
 }
 
-fn worktrees_root(app: &AppHandle, project_id: &str) -> Result<PathBuf, String> {
-    let base = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app_data_dir: {e}"))?;
-    let dir = base.join("worktrees").join(project_id);
-    fs::create_dir_all(&dir).map_err(|e| format!("create worktree root: {e}"))?;
+/// Root of the per-project workspaces directory.
+///
+/// Layout (conductor-style — visible to the user, not buried in
+/// Library/Application Support):
+///
+///   `~/GLI/workspaces/<project-basename>/<worktree-id>`
+///
+/// `<project-basename>` is the last path segment of the project's
+/// repo root (e.g. `OG-E_case_comp` for `/Users/raeedz/Developer/OG-E_case_comp`).
+/// We fall back to the project id only if the path has no readable
+/// last segment.
+fn worktrees_root(project_path: &str, project_id: &str) -> Result<PathBuf, String> {
+    let basename = Path::new(project_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| project_id.to_string());
+    let home = dirs::home_dir().ok_or_else(|| "no home dir".to_string())?;
+    let dir = home.join("GLI").join("workspaces").join(&basename);
+    fs::create_dir_all(&dir).map_err(|e| format!("create workspaces root: {e}"))?;
     Ok(dir)
 }
 
@@ -170,32 +184,65 @@ pub async fn worktree_list(project_path: String) -> Result<Vec<WorktreeRow>, Str
     Ok(rows)
 }
 
+/// Create a new git worktree under `<app_data>/worktrees/<projectId>/<id>`.
+///
+/// - `base_ref` — optional ref to branch off of (e.g. `origin/main`).
+///   When None or empty, falls back to the project's current HEAD.
+/// - `files_to_copy` — glob patterns to copy from `project_path` into
+///   the new worktree after `git worktree add`. Supports trailing `*`
+///   wildcards (e.g. `.env*`) and exact filenames.
+/// - `setup_script` — shell snippet to run in the new worktree dir
+///   after creation. Errors are logged, never aborting the create.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn worktree_create(
     app: AppHandle,
     project_id: String,
     project_path: String,
     branch: String,
     label: String,
+    base_ref: Option<String>,
+    files_to_copy: Option<Vec<String>>,
+    setup_script: Option<String>,
 ) -> Result<WorktreeRow, String> {
     let id = format!("w_{}", Uuid::new_v4().simple());
-    let root = worktrees_root(&app, &project_id)?;
+    let root = worktrees_root(&project_path, &project_id)?;
     let path = root.join(&id);
     let path_str = path.to_string_lossy().into_owned();
+    // `app` is only kept for the archive flow below — silence unused
+    // warning when the function compiles without referencing it.
+    let _ = &app;
 
-    // Try with -b (creates new branch). If branch already exists, fall back to
-    // adding the existing branch.
-    let result = git(
-        &project_path,
-        &["worktree", "add", "-b", &branch, &path_str],
-    )
-    .await;
-    if result.is_err() {
+    // Branch off the configured base ref when provided, otherwise the
+    // project's current HEAD. If the branch already exists, fall back
+    // to adding the existing branch.
+    let base = base_ref.as_deref().unwrap_or("").trim();
+    let result = if base.is_empty() {
         git(
             &project_path,
-            &["worktree", "add", &path_str, &branch],
+            &["worktree", "add", "-b", &branch, &path_str],
         )
-        .await?;
+        .await
+    } else {
+        git(
+            &project_path,
+            &["worktree", "add", "-b", &branch, &path_str, base],
+        )
+        .await
+    };
+    if result.is_err() {
+        git(&project_path, &["worktree", "add", &path_str, &branch]).await?;
+    }
+
+    if let Some(patterns) = files_to_copy.as_ref() {
+        copy_matching_files(&project_path, &path_str, patterns);
+    }
+
+    if let Some(script) = setup_script.as_deref() {
+        let trimmed = script.trim();
+        if !trimmed.is_empty() {
+            run_shell_script(&path_str, trimmed).await;
+        }
     }
 
     let primary_tab = format!("t_{}", Uuid::new_v4().simple());
@@ -220,6 +267,111 @@ pub async fn worktree_create(
     })
 }
 
+/// Copy files matching any of `patterns` from `src_root` into
+/// `dst_root`, preserving relative paths. Supports `*` wildcards in
+/// the final path segment only (Conductor's behavior); other patterns
+/// are treated as exact paths. Best-effort: errors are logged and do
+/// not fail worktree creation.
+fn copy_matching_files(src_root: &str, dst_root: &str, patterns: &[String]) {
+    let src = Path::new(src_root);
+    let dst = Path::new(dst_root);
+    for raw in patterns {
+        let pat = raw.trim();
+        if pat.is_empty() || pat.starts_with('#') {
+            continue;
+        }
+        match expand_pattern(src, pat) {
+            Ok(matches) => {
+                for rel in matches {
+                    let from = src.join(&rel);
+                    let to = dst.join(&rel);
+                    if let Some(parent) = to.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    if let Err(e) = fs::copy(&from, &to) {
+                        eprintln!(
+                            "[worktree] copy {} → {}: {e}",
+                            from.display(),
+                            to.display()
+                        );
+                    }
+                }
+            }
+            Err(e) => eprintln!("[worktree] expand pattern '{pat}': {e}"),
+        }
+    }
+}
+
+/// Resolve a copy pattern into one or more relative paths. The last
+/// path segment may contain a single `*` wildcard.
+fn expand_pattern(src_root: &Path, pat: &str) -> Result<Vec<PathBuf>, String> {
+    let trimmed = pat.trim_start_matches("./");
+    let path = Path::new(trimmed);
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let file_name = match path.file_name().and_then(|s| s.to_str()) {
+        Some(n) => n,
+        None => return Ok(vec![]),
+    };
+    if !file_name.contains('*') {
+        let abs = src_root.join(trimmed);
+        return Ok(if abs.exists() {
+            vec![PathBuf::from(trimmed)]
+        } else {
+            vec![]
+        });
+    }
+    let dir = src_root.join(parent);
+    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    let mut out: Vec<PathBuf> = Vec::new();
+    let (prefix, suffix) = split_glob(file_name);
+    for entry in entries.flatten() {
+        let name = match entry.file_name().into_string() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        if name.starts_with(&prefix) && name.ends_with(&suffix) && name.len() >= prefix.len() + suffix.len() {
+            out.push(parent.join(&name));
+        }
+    }
+    Ok(out)
+}
+
+fn split_glob(s: &str) -> (String, String) {
+    if let Some(idx) = s.find('*') {
+        (s[..idx].to_string(), s[idx + 1..].to_string())
+    } else {
+        (s.to_string(), String::new())
+    }
+}
+
+/// Spawn `bash -lc <script>` in `cwd`. Output is logged to stderr;
+/// failures do not abort the calling flow because users may write
+/// scripts with non-zero exits (e.g. `bun install || true`).
+async fn run_shell_script(cwd: &str, script: &str) {
+    let res = Command::new("bash")
+        .arg("-lc")
+        .arg(script)
+        .current_dir(cwd)
+        .output()
+        .await;
+    match res {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !stdout.is_empty() {
+                eprintln!("[worktree script stdout]\n{stdout}");
+            }
+            if !stderr.is_empty() {
+                eprintln!("[worktree script stderr]\n{stderr}");
+            }
+        }
+        Err(e) => eprintln!("[worktree script] spawn bash: {e}"),
+    }
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn worktree_archive(
@@ -236,7 +388,14 @@ pub async fn worktree_archive(
     stash: bool,
     force: bool,
     delete_branch: bool,
+    archive_script: Option<String>,
 ) -> Result<ArchiveRecord, String> {
+    if let Some(script) = archive_script.as_deref() {
+        let trimmed = script.trim();
+        if !trimmed.is_empty() {
+            run_shell_script(&path, trimmed).await;
+        }
+    }
     let mut stash_ref = None;
     if stash {
         let msg = format!("rli-archive-{}", worktree_id);

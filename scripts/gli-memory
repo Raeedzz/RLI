@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# rli-memory — local CLI wrapper for RLI's per-project memory daemon.
+# gli-memory — local CLI wrapper for GLI's per-project memory daemon.
 #
 # Usage:
-#   rli-memory add <text>          Store a fact (deduped on insert)
-#   rli-memory recall <query>      Search facts in this project
-#   rli-memory extract <file>      LLM-extract facts from a transcript file
-#   rli-memory status              Check whether the memory daemon is up
-#   rli-memory --help
+#   gli-memory add <text>          Store a fact (deduped on insert)
+#   gli-memory recall <query>      Search facts in this project
+#   gli-memory extract <file>      LLM-extract facts from a transcript file
+#   gli-memory status              Check whether the memory daemon is up
+#   gli-memory --help
 #
 # Auto-scoping:
-#   When invoked from inside an RLI terminal pane, RLI_PROJECT_ID and
-#   RLI_SESSION_ID are injected into the env and used for project/session
-#   scoping. Outside RLI, you must pass `--project <id>` or set
-#   RLI_PROJECT_ID yourself; otherwise scope is empty (all-project search).
+#   When invoked from inside a GLI terminal pane, GLI_PROJECT_ID and
+#   GLI_SESSION_ID are injected into the env and used for project/session
+#   scoping. Outside GLI, you must pass `--project <id>` or set
+#   GLI_PROJECT_ID yourself; otherwise scope is empty (all-project search).
 #
 # Daemon discovery:
-#   RLI_MEMORY_URL (set by RLI on PTY launch) takes precedence. Otherwise
-#   we read the chosen port from `~/Library/Application Support/RLI/memory-port`.
+#   GLI_MEMORY_URL (set by GLI on PTY launch) takes precedence. Otherwise
+#   we read the chosen port from `~/Library/Application Support/dev.raeedz.gli/memory-port`.
 #   Fallback is 127.0.0.1:5555 (the daemon's first-choice port).
 
 set -euo pipefail
@@ -25,11 +25,11 @@ set -euo pipefail
 # Resolve daemon URL
 # ---------------------------------------------------------------------
 resolve_url() {
-    if [ -n "${RLI_MEMORY_URL:-}" ]; then
-        echo "$RLI_MEMORY_URL"
+    if [ -n "${GLI_MEMORY_URL:-}" ]; then
+        echo "$GLI_MEMORY_URL"
         return
     fi
-    local port_file="$HOME/Library/Application Support/RLI/memory-port"
+    local port_file="$HOME/Library/Application Support/dev.raeedz.gli/memory-port"
     if [ -r "$port_file" ]; then
         local port
         port=$(tr -d '[:space:]' < "$port_file")
@@ -69,7 +69,7 @@ cmd_status() {
         exit 0
     fi
     echo "rli memory daemon unreachable at $url" >&2
-    echo "is RLI running?" >&2
+    echo "is GLI running?" >&2
     exit 1
 }
 
@@ -92,12 +92,12 @@ json_escape() {
 # ---------------------------------------------------------------------
 cmd_add() {
     if [ $# -lt 1 ]; then
-        echo "usage: rli-memory add <text>" >&2
+        echo "usage: gli-memory add <text>" >&2
         exit 2
     fi
     local content="$*"
-    local project_id="${RLI_PROJECT_ID:-}"
-    local session_id="${RLI_SESSION_ID:-}"
+    local project_id="${GLI_PROJECT_ID:-}"
+    local session_id="${GLI_SESSION_ID:-}"
 
     local body
     body=$(printf '{"content":"%s","kind":"fact","project_id":"%s","session_id":"%s"}' \
@@ -117,11 +117,11 @@ cmd_add() {
 # ---------------------------------------------------------------------
 cmd_recall() {
     if [ $# -lt 1 ]; then
-        echo "usage: rli-memory recall <query>" >&2
+        echo "usage: gli-memory recall <query>" >&2
         exit 2
     fi
     local query="$*"
-    local project_id="${RLI_PROJECT_ID:-}"
+    local project_id="${GLI_PROJECT_ID:-}"
     local url
     url=$(resolve_url)
 
@@ -147,17 +147,17 @@ cmd_recall() {
 # ---------------------------------------------------------------------
 cmd_extract() {
     if [ $# -lt 1 ]; then
-        echo "usage: rli-memory extract <file>" >&2
+        echo "usage: gli-memory extract <file>" >&2
         exit 2
     fi
     local file="$1"
     if [ ! -r "$file" ]; then
-        echo "rli-memory: cannot read $file" >&2
+        echo "gli-memory: cannot read $file" >&2
         exit 2
     fi
     local transcript
     transcript=$(cat "$file")
-    local project_id="${RLI_PROJECT_ID:-}"
+    local project_id="${GLI_PROJECT_ID:-}"
     local body
     body=$(printf '{"transcript":"%s","project_id":"%s"}' \
         "$(json_escape "$transcript")" \
@@ -175,22 +175,22 @@ cmd_extract() {
 # ---------------------------------------------------------------------
 cmd_help() {
     cat <<'HELP'
-rli-memory — per-project persistent memory for CLI agents.
+gli-memory — per-project persistent memory for CLI agents.
 
 Usage:
-  rli-memory add <text>          Store a fact (deduped on insert)
-  rli-memory recall <query>      Search this project's facts
-  rli-memory extract <file>      LLM-extract facts from a transcript
-  rli-memory status              Check that the memory daemon is up
-  rli-memory --help              This message
+  gli-memory add <text>          Store a fact (deduped on insert)
+  gli-memory recall <query>      Search this project's facts
+  gli-memory extract <file>      LLM-extract facts from a transcript
+  gli-memory status              Check that the memory daemon is up
+  gli-memory --help              This message
 
 Auto-scoping:
-  Inside an RLI terminal pane, RLI_PROJECT_ID and RLI_SESSION_ID are
+  Inside a GLI terminal pane, GLI_PROJECT_ID and GLI_SESSION_ID are
   set automatically and scope your add/recall/extract calls to the
-  active project. Outside RLI, set them yourself or expect empty scope.
+  active project. Outside GLI, set them yourself or expect empty scope.
 
 Daemon discovery:
-  RLI_MEMORY_URL > ~/Library/Application Support/RLI/memory-port > :5555
+  GLI_MEMORY_URL > ~/Library/Application Support/dev.raeedz.gli/memory-port > :5555
 HELP
 }
 
@@ -211,8 +211,8 @@ case "$cmd" in
     status)     cmd_status ;;
     --help|-h|help) cmd_help ;;
     *)
-        echo "rli-memory: unknown subcommand '$cmd'" >&2
-        echo "try: rli-memory --help" >&2
+        echo "gli-memory: unknown subcommand '$cmd'" >&2
+        echo "try: gli-memory --help" >&2
         exit 2
         ;;
 esac

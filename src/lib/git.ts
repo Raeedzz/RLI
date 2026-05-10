@@ -51,6 +51,7 @@ export const git = {
     invoke<string>("git_branch_current", { cwd }),
   branchList: (cwd: string) =>
     invoke<BranchEntry[]>("git_branch_list", { cwd }),
+  remotes: (cwd: string) => invoke<string[]>("git_remotes", { cwd }),
   checkout: (cwd: string, branch: string) =>
     invoke<void>("git_checkout", { cwd, branch }),
   branchCreate: (cwd: string, name: string, from?: string) =>
@@ -65,12 +66,14 @@ export const git = {
    * Generate a commit message via the helper-agent layer. Reads the
    * staged diff, truncates, and shells out to whichever CLI the
    * caller specifies (defaults to claude). When `model` is set, the
-   * helper passes `--model <model>` through to the CLI.
+   * helper passes `--model <model>` through to the CLI. `extras`
+   * carries free-form repo prefs to prepend to the prompt.
    */
   aiCommitMessage: async (
     cwd: string,
     cli: AgentCli = "claude",
     model?: string,
+    extras?: string,
   ) => {
     const diff = await invoke<string>("git_diff", {
       cwd,
@@ -82,6 +85,10 @@ export const git = {
       diff.length > 8000
         ? diff.slice(0, 8000) + "\n\n[…truncated…]"
         : diff;
-    return helperRun(cwd, cli, "commit-message", trimmed, model);
+    const preface =
+      extras && extras.trim().length > 0
+        ? `Custom instructions from this repo:\n${extras.trim()}\n\n`
+        : "";
+    return helperRun(cwd, cli, "commit-message", preface + trimmed, model);
   },
 };

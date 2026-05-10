@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { AnimatePresence, motion } from "motion/react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   IconCheck,
   IconChevronDown,
@@ -14,7 +15,12 @@ import {
   useAppDispatch,
   useAppState,
 } from "@/state/AppState";
-import type { RightPanelTab, SecondaryTab, Worktree } from "@/state/types";
+import {
+  projectSettings,
+  type RightPanelTab,
+  type SecondaryTab,
+  type Worktree,
+} from "@/state/types";
 import { fs } from "@/lib/fs";
 import { git, type StatusEntry } from "@/lib/git";
 import { FileTree } from "@/files/FileTree";
@@ -368,7 +374,15 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
         cli === state.settings.helperCliCommit
           ? state.settings.helperModelCommit
           : "";
-      const text = await git.aiCommitMessage(worktree.path, cli, model);
+      const project = state.projects[worktree.projectId];
+      const cfgPrefs = projectSettings(project).prefs;
+      const extras = cfgPrefs.general.trim();
+      const text = await git.aiCommitMessage(
+        worktree.path,
+        cli,
+        model,
+        extras || undefined,
+      );
       setMessage(text.trim());
     } catch (e) {
       toast.show({ message: `AI draft failed: ${e}` });
@@ -1251,6 +1265,7 @@ function SecondaryPanel({
           <IconPlus size={14} />
         </button>
         <span style={{ flex: 1 }} />
+        <PreviewUrlButton worktree={worktree} />
       </div>
       <AnimatePresence initial={false}>
         {!collapsed && (
@@ -1269,7 +1284,7 @@ function SecondaryPanel({
             {worktree.secondaryTab === "terminal" ? (
               <SecondaryTerminals worktree={worktree} />
             ) : (
-              <EmptyRunOrSetup />
+              <ScriptPanel worktree={worktree} kind={worktree.secondaryTab} />
             )}
           </motion.div>
         )}
@@ -1499,46 +1514,218 @@ function SecondaryTerminals({ worktree }: { worktree: Worktree }) {
   );
 }
 
-function EmptyRunOrSetup() {
+function PreviewUrlButton({ worktree }: { worktree: Worktree }) {
+  const state = useAppState();
+  const project = state.projects[worktree.projectId];
+  const cfg = projectSettings(project);
+  const url = cfg.previewUrl.trim();
+  if (!url) return null;
+  // Accept both $GLI_* (current) and $RLI_* (legacy) placeholder names
+  // so existing previewUrl values keep working after the rename.
+  const resolved = url
+    .replace(/\$(?:GLI|RLI)_WORKTREE_NAME/g, worktree.name)
+    .replace(/\$(?:GLI|RLI)_PROJECT_ID/g, worktree.projectId)
+    .replace(/\$(?:GLI|RLI)_PORT/g, "3000");
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void invoke("system_open", { path: resolved }).catch(() => {});
+      }}
+      title={`Open ${resolved}`}
+      style={{
+        height: 22,
+        padding: "0 8px",
+        marginRight: 4,
+        backgroundColor: "transparent",
+        color: "var(--text-secondary)",
+        border: "var(--border-1)",
+        borderRadius: "var(--radius-sm)",
+        fontFamily: "var(--font-sans)",
+        fontSize: "var(--text-2xs)",
+        fontWeight: "var(--weight-medium)",
+        cursor: "pointer",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.color = "var(--text-primary)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.color = "var(--text-secondary)";
+      }}
+    >
+      Open ↗
+    </button>
+  );
+}
+
+function ScriptPanel({
+  worktree,
+  kind,
+}: {
+  worktree: Worktree;
+  kind: "setup" | "run";
+}) {
+  const state = useAppState();
+  const dispatch = useAppDispatch();
+  const project = state.projects[worktree.projectId];
+  const cfg = projectSettings(project);
+  const script = (kind === "run" ? cfg.runScript : cfg.setupScript).trim();
+
+  const openSettings = () => {
+    if (!project) return;
+    dispatch({ type: "set-active-project", id: project.id });
+    dispatch({
+      type: "set-active-worktree",
+      projectId: project.id,
+      worktreeId: worktree.id,
+    });
+    dispatch({
+      type: "open-tab",
+      tab: {
+        id: `t_settings_${project.id}`,
+        worktreeId: worktree.id,
+        kind: "project-settings",
+        projectId: project.id,
+        title: "Settings",
+        summary: project.path,
+        summaryUpdatedAt: Date.now(),
+      },
+    });
+  };
+
+  const playInTerminal = async () => {
+    if (!script) return;
+    const ptyId =
+      worktree.secondaryActiveTerminalId ??
+      worktree.secondaryTerminals?.[0] ??
+      worktree.secondaryPtyId;
+    if (!ptyId) return;
+    dispatch({ type: "set-secondary-tab", worktreeId: worktree.id, tab: "terminal" });
+    const bytes = Array.from(new TextEncoder().encode(script + "\n"));
+    await invoke("term_input", { id: ptyId, data: bytes }).catch(() => {});
+  };
+
+  if (!script) {
+    return (
+      <div
+        style={{
+          height: "100%",
+          display: "grid",
+          placeItems: "center",
+          padding: "var(--space-4)",
+        }}
+      >
+        <div
+          style={{
+            width: 280,
+            padding: "var(--space-4)",
+            border: "1px dashed var(--border-default)",
+            borderRadius: "var(--radius-md)",
+            color: "var(--text-tertiary)",
+            fontSize: "var(--text-xs)",
+            textAlign: "center",
+            display: "grid",
+            gap: 8,
+          }}
+        >
+          <button
+            type="button"
+            onClick={openSettings}
+            style={{
+              padding: "8px 12px",
+              backgroundColor: "var(--surface-3)",
+              color: "var(--text-primary)",
+              borderRadius: "var(--radius-sm)",
+              fontSize: "var(--text-sm)",
+              fontWeight: "var(--weight-medium)",
+              border: "var(--border-1)",
+              justifySelf: "center",
+              cursor: "pointer",
+            }}
+          >
+            Add {kind} script
+          </button>
+          <span>
+            {kind === "run"
+              ? "Run tests or a dev server to verify changes in this workspace"
+              : "Bootstrap a fresh workspace (install deps, prep env, etc.)"}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       style={{
         height: "100%",
         display: "grid",
-        placeItems: "center",
-        padding: "var(--space-4)",
+        gridTemplateRows: "auto 1fr",
+        minHeight: 0,
       }}
     >
       <div
         style={{
-          width: 280,
-          padding: "var(--space-4)",
-          border: "1px dashed var(--border-default)",
-          borderRadius: "var(--radius-md)",
-          color: "var(--text-tertiary)",
-          fontSize: "var(--text-xs)",
-          textAlign: "center",
-          display: "grid",
+          display: "flex",
+          alignItems: "center",
           gap: 8,
+          padding: "var(--space-2) var(--space-3)",
+          borderBottom: "var(--border-1)",
         }}
       >
         <button
           type="button"
+          onClick={() => void playInTerminal()}
           style={{
-            padding: "8px 12px",
-            backgroundColor: "var(--surface-3)",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            height: 24,
+            padding: "0 10px",
+            backgroundColor: "var(--accent-press)",
             color: "var(--text-primary)",
             borderRadius: "var(--radius-sm)",
-            fontSize: "var(--text-sm)",
+            fontFamily: "var(--font-sans)",
+            fontSize: "var(--text-xs)",
             fontWeight: "var(--weight-medium)",
-            border: "var(--border-1)",
-            justifySelf: "center",
+            cursor: "pointer",
+            border: "none",
+          }}
+          title={`Run ${kind} script in the active terminal`}
+        >
+          ▶ Run
+        </button>
+        <span style={{ flex: 1 }} />
+        <button
+          type="button"
+          onClick={openSettings}
+          style={{
+            background: "transparent",
+            border: "none",
+            color: "var(--text-tertiary)",
+            fontFamily: "var(--font-sans)",
+            fontSize: "var(--text-2xs)",
+            cursor: "pointer",
           }}
         >
-          Add run script
+          edit
         </button>
-        <span>Run tests or a development server to test changes in this worktree</span>
       </div>
+      <pre
+        style={{
+          margin: 0,
+          padding: "var(--space-3)",
+          fontFamily: "var(--font-mono)",
+          fontSize: "var(--text-sm)",
+          color: "var(--text-primary)",
+          lineHeight: "var(--leading-md)",
+          whiteSpace: "pre-wrap",
+          overflow: "auto",
+          backgroundColor: "var(--surface-1)",
+        }}
+      >
+        {script}
+      </pre>
     </div>
   );
 }

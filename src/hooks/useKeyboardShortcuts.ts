@@ -11,6 +11,7 @@ import {
   primaryTerminalTab,
   worktreeCreate,
 } from "@/lib/worktrees";
+import { projectSettings } from "@/state/types";
 
 /**
  * Match a digit press regardless of modifier-induced char shifting.
@@ -113,11 +114,12 @@ export function useKeyboardShortcuts() {
       }
 
       // ⌘N — auto-create a new worktree in the active project. No
-      // prompt: the branch is named `agent-N` (next free index).
+      // prompt: the branch is named via the random landmark pool.
       if (cmd && !shift && e.key.toLowerCase() === "n" && project) {
         e.preventDefault();
         const branch = nextAutoBranch(project.id, state);
         const proj = project;
+        const cfg = projectSettings(proj);
         void (async () => {
           try {
             const w = await worktreeCreate(
@@ -125,10 +127,13 @@ export function useKeyboardShortcuts() {
               proj.path,
               branch,
               branch,
+              {
+                baseRef: cfg.baseBranch,
+                filesToCopy: cfg.filesToCopy,
+                setupScript: cfg.setupScript,
+              },
             );
             dispatch({ type: "add-worktree", worktree: w });
-            // Auto-open the primary terminal so the user lands in a
-            // live shell, not an empty main column.
             dispatch({ type: "open-tab", tab: primaryTerminalTab(w) });
           } catch (err) {
             window.alert(`Worktree creation failed: ${err}`);

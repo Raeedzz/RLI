@@ -64,6 +64,95 @@ export interface Project {
   expanded: boolean;
   /** User-assigned color tag. */
   color?: TagId;
+  /**
+   * Per-repo configuration surfaced via the Repository settings tab.
+   * Optional so existing persisted projects rehydrate cleanly; the
+   * settings tab and helper code use {@link projectSettings} to read
+   * with defaults filled in.
+   */
+  settings?: ProjectSettings;
+}
+
+/* ------------------------------------------------------------------
+   Per-repo settings — surfaced via the Repository settings tab.
+   ------------------------------------------------------------------ */
+
+/**
+ * Custom-instruction strings appended to helper-agent prompts when
+ * the corresponding chrome action fires. Empty string = no extras.
+ *
+ * - `general`     — prepended to *every* helper-agent call
+ * - `createPR`    — appended to PR draft prompts
+ * - `review`      — appended to code-review prompts (Review button)
+ * - `fixErrors`   — appended to fix-errors prompts (Fix errors button)
+ * - `resolveConflicts` — appended to merge-conflict resolution prompts
+ * - `branchRename` — appended to branch-rename prompts
+ */
+export interface RepoPreferences {
+  general: string;
+  createPR: string;
+  review: string;
+  fixErrors: string;
+  resolveConflicts: string;
+  branchRename: string;
+}
+
+export interface ProjectSettings {
+  /** Branch new worktrees off of, e.g. `origin/main`. */
+  baseBranch: string;
+  /** Remote name used for push/pull/PR (default `origin`). */
+  remote: string;
+  /**
+   * Optional override for the secondary panel's "Open" button. Supports
+   * `$RLI_WORKTREE_NAME`, `$RLI_PORT`, `$RLI_PROJECT_ID` placeholders;
+   * empty string falls through to auto-detection from terminal output.
+   */
+  previewUrl: string;
+  /**
+   * Glob patterns (one per line) of files to copy from the repo root
+   * into newly-created worktree checkouts. Used for `.env*`, secrets,
+   * and other gitignored files the agent needs to run.
+   */
+  filesToCopy: string[];
+  /** Shell snippet run after `git worktree add` completes. */
+  setupScript: string;
+  /** Shell snippet executed when the user clicks the play button. */
+  runScript: string;
+  /** Shell snippet run before `git worktree remove` archives the dir. */
+  archiveScript: string;
+  prefs: RepoPreferences;
+}
+
+export const DEFAULT_REPO_PREFERENCES: RepoPreferences = {
+  general: "",
+  createPR: "",
+  review: "",
+  fixErrors: "",
+  resolveConflicts: "",
+  branchRename: "",
+};
+
+export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
+  baseBranch: "origin/main",
+  remote: "origin",
+  previewUrl: "",
+  filesToCopy: [".env*"],
+  setupScript: "",
+  runScript: "",
+  archiveScript: "",
+  prefs: DEFAULT_REPO_PREFERENCES,
+};
+
+/** Read a project's settings with defaults filled in. */
+export function projectSettings(project: Project | null | undefined): ProjectSettings {
+  return {
+    ...DEFAULT_PROJECT_SETTINGS,
+    ...(project?.settings ?? {}),
+    prefs: {
+      ...DEFAULT_REPO_PREFERENCES,
+      ...(project?.settings?.prefs ?? {}),
+    },
+  };
 }
 
 /* ------------------------------------------------------------------
@@ -157,7 +246,13 @@ export interface MarkdownTab extends TabBase {
   content: string | null;
 }
 
-export type Tab = TerminalTab | DiffTab | MarkdownTab;
+/** Tab variant rendering the per-repo Repository Settings page. */
+export interface ProjectSettingsTab extends TabBase {
+  kind: "project-settings";
+  projectId: ProjectId;
+}
+
+export type Tab = TerminalTab | DiffTab | MarkdownTab | ProjectSettingsTab;
 
 /* ------------------------------------------------------------------
    Archive — a previously-active worktree, persisted on close.
@@ -338,6 +433,16 @@ export type AppAction =
   | { type: "set-project-color"; id: ProjectId; color: TagId | undefined }
   | { type: "set-project-icon"; id: ProjectId; iconName: string | undefined }
   | { type: "update-project"; id: ProjectId; patch: Partial<Project> }
+  | {
+      type: "update-project-settings";
+      id: ProjectId;
+      patch: Partial<ProjectSettings>;
+    }
+  | {
+      type: "update-project-prefs";
+      id: ProjectId;
+      patch: Partial<RepoPreferences>;
+    }
   | {
       type: "set-worktree-icon";
       worktreeId: WorktreeId;

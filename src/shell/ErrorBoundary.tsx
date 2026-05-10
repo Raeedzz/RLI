@@ -159,7 +159,7 @@ export class ErrorBoundary extends Component<Props, State> {
               lineHeight: 1.5,
             }}
           >
-            RLI hit an unrecoverable render error. Reloading usually clears it.
+            GLI hit an unrecoverable render error. Reloading usually clears it.
             Full details are in the developer console.
           </div>
           <pre

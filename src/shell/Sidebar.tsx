@@ -27,10 +27,11 @@ import {
   useAppDispatch,
   useAppState,
 } from "@/state/AppState";
-import type {
-  ArchiveRecord,
-  Project,
-  Worktree,
+import {
+  projectSettings,
+  type ArchiveRecord,
+  type Project,
+  type Worktree,
 } from "@/state/types";
 import { openProjectDialog } from "@/lib/projectDialog";
 import {
@@ -227,20 +228,82 @@ function ProjectGroup({
   const state = useAppState();
   const onCreate = async () => {
     const branch = nextAutoBranch(project.id, state);
+    const cfg = projectSettings(project);
     try {
       const w = await worktreeCreate(
         project.id,
         project.path,
         branch,
         branch,
+        {
+          baseRef: cfg.baseBranch,
+          filesToCopy: cfg.filesToCopy,
+          setupScript: cfg.setupScript,
+        },
       );
       dispatch({ type: "add-worktree", worktree: w });
-      // Auto-open the primary terminal so the new agent lands in a
-      // live shell instead of an empty main column.
       dispatch({ type: "open-tab", tab: primaryTerminalTab(w) });
     } catch (err) {
       toast.show({ message: `Worktree creation failed: ${err}` });
     }
+  };
+
+  const onOpenSettings = async () => {
+    const tabId = `t_settings_${project.id}`;
+    // The settings tab is per-project but Tabs are scoped to a
+    // worktree, so we attach it to whichever worktree is currently
+    // active for this project (or the first one). When the project
+    // has no worktrees we mint one on the fly so the user is never
+    // stuck in a dead end.
+    let wt: Worktree | null =
+      (state.activeWorktreeByProject[project.id] &&
+        state.worktrees[state.activeWorktreeByProject[project.id]!]) ||
+      Object.values(state.worktrees).find((w) => w.projectId === project.id) ||
+      null;
+    if (!wt) {
+      try {
+        const branch = nextAutoBranch(project.id, state);
+        const cfg = projectSettings(project);
+        const created = await worktreeCreate(
+          project.id,
+          project.path,
+          branch,
+          branch,
+          {
+            baseRef: cfg.baseBranch,
+            filesToCopy: cfg.filesToCopy,
+            setupScript: cfg.setupScript,
+          },
+        );
+        dispatch({ type: "add-worktree", worktree: created });
+        wt = created;
+      } catch (err) {
+        toast.show({ message: `Could not open settings: ${err}` });
+        return;
+      }
+    }
+    // Switch the user's view so the tab they just opened is what they
+    // actually see. Without these the tab is added to a worktree that
+    // isn't the active one, so MainColumn keeps rendering the previous
+    // surface.
+    dispatch({ type: "set-active-project", id: project.id });
+    dispatch({
+      type: "set-active-worktree",
+      projectId: project.id,
+      worktreeId: wt.id,
+    });
+    dispatch({
+      type: "open-tab",
+      tab: {
+        id: tabId,
+        worktreeId: wt.id,
+        kind: "project-settings",
+        projectId: project.id,
+        title: "Settings",
+        summary: project.path,
+        summaryUpdatedAt: Date.now(),
+      },
+    });
   };
 
   const projectMenuItems: ContextMenuItem[] = [
@@ -267,7 +330,7 @@ function ProjectGroup({
       label: "Repository settings",
       Glyph: IconSettings,
       shortcut: "⌘,",
-      onSelect: () => dispatch({ type: "set-settings-open", open: true }),
+      onSelect: onOpenSettings,
     },
     {
       id: "change-icon",
@@ -637,10 +700,12 @@ function WorktreeRow({
       force = false;
     }
     try {
+      const cfg = projectSettings(project);
       const record = await worktreeArchive(worktree, {
         stash,
         force,
         deleteBranch: false,
+        archiveScript: cfg.archiveScript,
       });
       dispatch({ type: "archive-worktree", id: worktree.id, record });
       toast.show({

@@ -19,7 +19,7 @@ import {
   useAppState,
 } from "@/state/AppState";
 import { useToast } from "@/primitives/Toast";
-import type { Tab, Worktree } from "@/state/types";
+import { projectSettings, type Tab, type Worktree } from "@/state/types";
 
 const TRAFFIC_LIGHT_GUTTER = 78;
 const HEIGHT = 28;
@@ -213,12 +213,19 @@ function BranchActionButton({ worktree }: { worktree: Worktree | null }) {
       // agent via PTY injection — user sees the agent work in real
       // time, which beats a one-shot helperRun for a multi-file edit.
       const fileList = result.files.slice(0, 24).join(", ");
+      const project = state.projects[worktree.projectId];
+      const cfg = projectSettings(project);
+      const extras = [cfg.prefs.general, cfg.prefs.resolveConflicts]
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .join("\n\n");
       const prompt =
         `Merge conflicts after pulling main into this branch. ` +
         `Files: ${fileList}. ` +
         `Read each conflicted file, resolve the <<<<<<<, =======, >>>>>>> markers ` +
         `keeping the correct intent, then run \`git add <files>\`, \`git commit --no-edit\`, ` +
-        `and \`git push\`. Don't ask for confirmation between files — just resolve them all.`;
+        `and \`git push\`. Don't ask for confirmation between files — just resolve them all.` +
+        (extras ? `\n\n${extras}` : "");
       if (targetPtyId) {
         const bytes = stringToUtf8Bytes(prompt + "\n");
         await invoke("term_input", { id: targetPtyId, data: bytes }).catch(

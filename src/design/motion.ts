@@ -1,5 +1,5 @@
 /**
- * RLI motion language — Motion (Framer Motion v12+) variants & transitions.
+ * GLI motion language — Motion (Framer Motion v12+) variants & transitions.
  *
  * See design-system/motion.md for the rationale and choreography spec.
  *

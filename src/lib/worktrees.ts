@@ -17,17 +17,30 @@ export async function worktreeList(projectPath: string): Promise<Worktree[]> {
   return invoke<Worktree[]>("worktree_list", { projectPath });
 }
 
+export interface WorktreeCreateOptions {
+  /** Ref to branch off of (e.g. `origin/main`). Empty string = HEAD. */
+  baseRef?: string;
+  /** Glob patterns to copy from the repo root into the new checkout. */
+  filesToCopy?: string[];
+  /** Shell snippet run in the new worktree dir after `git worktree add`. */
+  setupScript?: string;
+}
+
 export async function worktreeCreate(
   projectId: string,
   projectPath: string,
   branch: string,
   label: string,
+  options: WorktreeCreateOptions = {},
 ): Promise<Worktree> {
   return invoke<Worktree>("worktree_create", {
     projectId,
     projectPath,
     branch,
     label,
+    baseRef: options.baseRef ?? null,
+    filesToCopy: options.filesToCopy ?? null,
+    setupScript: options.setupScript ?? null,
   });
 }
 
@@ -38,6 +51,8 @@ export interface ArchiveOptions {
   force: boolean;
   /** Delete the local branch after removing. */
   deleteBranch: boolean;
+  /** Shell snippet run in the worktree dir before stash/remove. */
+  archiveScript?: string;
 }
 
 export async function worktreeArchive(
@@ -57,6 +72,7 @@ export async function worktreeArchive(
     stash: opts.stash,
     force: opts.force,
     deleteBranch: opts.deleteBranch,
+    archiveScript: opts.archiveScript ?? null,
   });
 }
 

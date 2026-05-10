@@ -2,9 +2,9 @@
 //!
 //! Mirrors the browser daemon pattern (`src-tauri/src/browser/daemon.rs`):
 //! axum on a fixed port range, port file written under
-//! `~/Library/Application Support/RLI/memory-port` so cross-pane callers
-//! can discover us. The `rli-memory` shell wrapper hits these routes
-//! directly so any agent (claude, codex, aider) running inside any RLI
+//! `~/Library/Application Support/dev.raeedz.gli/memory-port` so cross-pane callers
+//! can discover us. The `gli-memory` shell wrapper hits these routes
+//! directly so any agent (claude, codex, aider) running inside any GLI
 //! terminal pane can read/write the project's memory.
 //!
 //! Routes:

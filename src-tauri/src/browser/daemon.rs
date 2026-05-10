@@ -16,8 +16,8 @@
 //! ```
 //!
 //! Bind preference: 4000, falling back through 4001..4099 if taken.
-//! Chosen port is written to `~/Library/Application Support/RLI/browser-port`
-//! so other tools (a `claude` running in an RLI terminal pane, hand-
+//! Chosen port is written to `~/Library/Application Support/dev.raeedz.gli/browser-port`
+//! so other tools (a `claude` running in a GLI terminal pane, hand-
 //! rolled scripts, etc.) can discover it programmatically.
 
 use std::sync::Arc;
