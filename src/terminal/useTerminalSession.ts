@@ -36,12 +36,11 @@ interface Args {
   cols: number;
   /**
    * Active project id, forwarded to term_start so the PTY's env gets
-   * `RLI_PROJECT_ID` set. In-pane agents (claude, codex) and the
-   * `rli-memory` CLI use this to scope memory operations to the
-   * current project without the user passing flags. Optional.
+   * `GLI_PROJECT_ID` / `RLI_PROJECT_ID` set. In-pane agents (claude,
+   * codex, gemini) read this to identify which project they're in.
    */
   projectId?: string;
-  /** Active session id. Mirrors `RLI_SESSION_ID` injection in PTY env. */
+  /** Active session id. Mirrors `GLI_SESSION_ID` / `RLI_SESSION_ID` in PTY env. */
   sessionId?: string;
 }
 

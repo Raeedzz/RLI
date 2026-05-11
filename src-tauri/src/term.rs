@@ -792,14 +792,12 @@ pub struct StartArgs {
     pub rows: u16,
     pub cols: u16,
     /// Active project id (e.g. `p_rli_l2k4j`). Injected into the PTY's
-    /// env as `RLI_PROJECT_ID` so in-pane agents and the `rli-memory`
-    /// CLI can scope memory operations correctly. Optional only because
-    /// older callers may not pass it; pass `None` and memory writes
-    /// default to unscoped.
+    /// env as `GLI_PROJECT_ID` / `RLI_PROJECT_ID` so in-pane agents
+    /// can identify which project they're running in.
     #[serde(default)]
     pub project_id: Option<String>,
-    /// Active session id. Injected as `RLI_SESSION_ID`. Same intent as
-    /// `project_id` but scoped one level finer.
+    /// Active session id. Injected as `GLI_SESSION_ID` / `RLI_SESSION_ID`.
+    /// Same intent as `project_id` but scoped one level finer.
     #[serde(default)]
     pub session_id: Option<String>,
 }
@@ -882,20 +880,10 @@ pub fn term_start(
     cmd.env("GLI_BROWSER_URL", "http://127.0.0.1:4000");
     cmd.env("RLI_BROWSER_URL", "http://127.0.0.1:4000");
 
-    // Memory daemon discovery: the daemon picks a port at startup
-    // (5555..5599) and writes it to `~/Library/.../memory-port`. We
-    // also inject the URL directly so agents in this PTY can hit
-    // /memory/{add,recall,extract} without parsing the port file.
-    if let Some(port_state) = app.try_state::<crate::memory::daemon::MemoryDaemonPort>() {
-        if let Some(port) = port_state.get() {
-            let url = format!("http://127.0.0.1:{port}");
-            cmd.env("GLI_MEMORY_URL", &url);
-            cmd.env("RLI_MEMORY_URL", &url);
-        }
-    }
-    // Per-pane scoping: in-pane agents (claude, codex) and the
-    // gli-memory CLI read these to scope add/recall to the right
-    // project + session without the user passing flags by hand.
+    // Per-pane scoping: in-pane agents (claude, codex, gemini) read
+    // these env vars to scope their behavior to the project + session
+    // they're running in. Not memory-specific — kept as generic
+    // session metadata after the memory subsystem was removed.
     if let Some(pid) = args.project_id.as_deref() {
         cmd.env("GLI_PROJECT_ID", pid);
         cmd.env("RLI_PROJECT_ID", pid);

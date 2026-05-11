@@ -131,17 +131,19 @@ export async function loadState(): Promise<Partial<AppState> | null> {
     // Migrate older v2 worktrees that predate `secondaryTerminals` —
     // seed it from the legacy single-pty id so existing saved state
     // gets a one-tab terminal strip rather than an empty one. Also
-    // remap the deprecated rightPanel = "checks" to "browser" — the
-    // Checks slot was replaced by the Browser tab and the union no
-    // longer includes "checks". Also filter out any tabIds pointing
-    // at the project-settings tabs we just stripped.
+    // remap deprecated rightPanel values: "checks" → "browser" (the
+    // Checks slot was replaced by the Browser tab) and "memory" →
+    // "files" (the Memory tab + claude-mem graph have been removed
+    // from the app entirely). Also filter out any tabIds pointing at
+    // the project-settings tabs we just stripped.
     const migratedWorktrees: AppState["worktrees"] = {};
     for (const id of Object.keys(worktrees)) {
       let w = worktrees[id];
-      if (
-        (w as { rightPanel?: unknown }).rightPanel === "checks"
-      ) {
+      const legacyPanel = (w as { rightPanel?: unknown }).rightPanel;
+      if (legacyPanel === "checks") {
         w = { ...w, rightPanel: "browser" };
+      } else if (legacyPanel === "memory") {
+        w = { ...w, rightPanel: "files" };
       }
       // Drop any tabIds pointing at the project-settings tabs we
       // stripped above so the worktree's strip doesn't reference a

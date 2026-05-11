@@ -74,14 +74,11 @@ interface Props {
   autoSummarize?: boolean;
   /**
    * Active project id. Forwarded to term_start so the PTY's env has
-   * `RLI_PROJECT_ID` set — that's how the `rli-memory` CLI (and any
-   * agent inside the PTY) knows which project to scope its memory
-   * operations to. Optional only because legacy callers may not pass
-   * it; null/undefined means no auto-scoping (memory writes are
-   * unscoped, recall searches all projects).
+   * `GLI_PROJECT_ID` / `RLI_PROJECT_ID` set — agents inside the PTY
+   * read this to identify which project they're running in.
    */
   projectId?: string;
-  /** Active session id, mirrors `RLI_SESSION_ID` in PTY env. */
+  /** Active session id, mirrors `GLI_SESSION_ID` / `RLI_SESSION_ID` in PTY env. */
   sessionId?: string;
   /**
    * Fires once when Claude is first detected in this pane's PTY

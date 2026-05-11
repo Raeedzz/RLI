@@ -24,7 +24,6 @@ import {
 import { fs } from "@/lib/fs";
 import { git, type StatusEntry } from "@/lib/git";
 import { FileTree } from "@/files/FileTree";
-import { GraphView } from "@/graph/GraphView";
 import { BlockTerminal } from "@/terminal/BlockTerminal";
 import { useToast } from "@/primitives/Toast";
 import { Loader } from "@/primitives/Loader";
@@ -109,12 +108,6 @@ function UpperPanel({ worktree }: { worktree: Worktree }) {
           tab="browser"
           active={worktree.rightPanel === "browser"}
         />
-        <PanelTab
-          worktreeId={worktree.id}
-          label="Memory"
-          tab="memory"
-          active={worktree.rightPanel === "memory"}
-        />
         <span style={{ flex: 1 }} />
         <button
           type="button"
@@ -136,7 +129,7 @@ function UpperPanel({ worktree }: { worktree: Worktree }) {
           <FilesView worktree={worktree} />
         ) : worktree.rightPanel === "changes" ? (
           <ChangesView worktree={worktree} />
-        ) : worktree.rightPanel === "browser" ? (
+        ) : (
           // BrowserPane drives the in-house Chrome daemon at
           // $RLI_BROWSER_URL. Rendered embedded so it fills the panel
           // instead of floating as its old standalone overlay. The
@@ -152,8 +145,6 @@ function UpperPanel({ worktree }: { worktree: Worktree }) {
               })
             }
           />
-        ) : (
-          <MemoryView />
         )}
       </div>
 
@@ -1136,25 +1127,6 @@ function ChecksView() {
     >
       No checks configured.
     </div>
-  );
-}
-
-/* ------------------------------------------------------------------
-   Memory view — embeds GraphView. Click a node opens its source .md as
-   a markdown tab in the main column. (GraphView already exposes
-   onSelect via context; for v1 we just embed the visualization.)
-   ------------------------------------------------------------------ */
-
-function MemoryView() {
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
-      style={{ height: "100%", minHeight: 0, position: "relative" }}
-    >
-      <GraphView />
-    </motion.div>
   );
 }
 
