@@ -30,7 +30,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob: asset: http://asset.localhost http://127.0.0.1:*; media-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* https://generativelanguage.googleapis.com",
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob: asset: http://asset.localhost http://127.0.0.1:*; media-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* https://generativelanguage.googleapis.com https://github.com https://*.githubusercontent.com https://api.github.com",
       "assetProtocol": {
         "enable": true,
         "scope": ["**"]
@@ -40,6 +40,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["dmg", "app"],
     "icon": ["icons/icon.icns", "icons/icon.png"],
     "externalBin": ["binaries/rg"],
@@ -52,5 +53,13 @@
     "category": "public.app-category.developer-tools",
     "shortDescription": "Workspace for running CLI coding agents.",
     "longDescription": "GLI is a confident dark instrument for spawning, organizing, and orchestrating CLI coding agents like Claude Code and Codex. macOS only."
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Raeedzz/RLI/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_WITH_BASE64_UPDATER_PUBKEY"
+    }
   }
 }

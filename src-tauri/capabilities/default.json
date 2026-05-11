@@ -14,6 +14,7 @@
     "fs:default",
     "dialog:default",
     "os:default",
-    "process:default"
+    "process:default",
+    "updater:default"
   ]
 }

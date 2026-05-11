@@ -5,6 +5,7 @@ import { MainColumn } from "./MainColumn";
 import { RightPanel } from "./RightPanel";
 import { CreatePRDialog } from "./CreatePRDialog";
 import { SettingsView } from "./SettingsView";
+import { UpdaterToast } from "./UpdaterToast";
 import { SearchOverlay } from "@/palette/SearchOverlay";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useSpatialNavigation } from "@/hooks/useSpatialNavigation";
@@ -138,6 +139,7 @@ export function AppShell() {
       <SearchOverlay />
       <CreatePRDialog />
       <SettingsView />
+      <UpdaterToast />
     </div>
   );
 }

@@ -6,6 +6,7 @@
 ///   - dialog:  "Open Folder" picker
 ///   - os:      platform queries (we're macOS-only v1, but used for paths)
 ///   - process: required for the auto-update plugin's restart hook
+///   - updater: pulls signed updates from GitHub Releases on a check
 ///
 /// Per-feature plumbing lives in `crate::*` modules — registered below.
 #[cfg(target_os = "macos")]
@@ -36,6 +37,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(TerminalState::default())
         .manage(MemoryState::default())
         .manage(memory::daemon::MemoryDaemonPort::default());

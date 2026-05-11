@@ -28,14 +28,15 @@ interface Node {
 }
 
 const INDENT = 12;
-// Icons match the 16px scale used everywhere else in the app's
-// chrome (sidebar worktree icons, IconButton glyphs, settings gear,
-// etc.) so the file tree reads as one consistent surface with the
-// rail to its left. The 28px row holds a 16px icon with 6px of
-// breathing room above and below, keeping the vertical rhythm
-// from feeling cramped at the larger glyph size.
-const ROW_HEIGHT = 28;
-const ICON_SIZE = 16;
+// Icons match the 12px text so glyph + filename read at the same
+// visual weight. The 24px row gives 6px of breathing room around
+// the 12px icon — tight, but the file tree's signal-density (one
+// glance, dozens of files) wants compactness over airiness.
+// Chevron column and file-type-icon column share `width: ICON_SIZE`,
+// so the icon column lines up vertically regardless of which row
+// is a folder vs. a file.
+const ROW_HEIGHT = 24;
+const ICON_SIZE = 12;
 // Matches the panel header's `padding: 0 var(--space-2)`. Both the
 // "FILES" caption and the row content sit on the same vertical axis
 // at 8px from the panel's left edge.
@@ -255,16 +256,16 @@ function Row({
         paddingRight: 8,
         gap: 8,
         fontFamily: "var(--font-sans)",
-        // Row font size locked to 13px and line-height to 1 so the
+        // Row font size locked to 12px and line-height to 1 so the
         // text's bounding box matches its glyph height. Without
         // lineHeight: 1, the inherited line-height (~1.4-1.5)
-        // inflates the text's flex item to ~18-19px while the icon
-        // sits at exactly 14px — visually the text floats above the
+        // inflates the text's flex item while the icon sits at
+        // exactly 14px — visually the text would float above the
         // icon's optical center even though alignItems: center
         // matches their bounding-box centers. Pinning lineHeight: 1
         // collapses the text box to its glyph dimensions so both
         // items center on the same axis.
-        fontSize: 13,
+        fontSize: 12,
         lineHeight: 1,
         color: active
           ? "var(--text-primary)"
