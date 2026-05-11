@@ -279,8 +279,13 @@ function Row({
           "background-color var(--motion-instant) var(--ease-out-quart)",
       }}
       onMouseEnter={(e) => {
+        // --surface-3 sits one step brighter than the active row's
+        // --surface-2 — hover reads as a transient, slightly louder
+        // signal vs. the calmer "this is the currently-open file"
+        // tint. The prior --surface-2 hover blended into the active
+        // row's tint and felt invisible on rows that weren't active.
         if (!active)
-          e.currentTarget.style.backgroundColor = "var(--surface-2)";
+          e.currentTarget.style.backgroundColor = "var(--surface-3)";
       }}
       onMouseLeave={(e) => {
         if (!active)

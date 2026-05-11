@@ -70,6 +70,15 @@ function UpperPanel({ worktree }: { worktree: Worktree }) {
   const dispatch = useAppDispatch();
   const state = useAppState();
 
+  // Keep `worktree.changeCount` (the badge on the Changes tab + the
+  // sidebar's `+N` indicator) fresh whether or not the Changes view
+  // is currently visible. ChangesView still runs its own poll for the
+  // entries list, but its dispatch only fires while that view is
+  // mounted — without this hook the badge sits stale on any tab the
+  // user hasn't visited recently. Running here in UpperPanel covers
+  // every tab the user could be looking at for the active worktree.
+  useChangeCountPolling(worktree.id, worktree.path);
+
   return (
     <div
       style={{
@@ -167,45 +176,116 @@ function PanelTab({
   badge?: number;
 }) {
   const dispatch = useAppDispatch();
-  const baseStyle: CSSProperties = {
-    height: 28,
-    padding: "0 var(--space-2)",
-    color: active ? "var(--text-primary)" : "var(--text-secondary)",
-    fontSize: "var(--text-sm)",
-    fontWeight: active ? "var(--weight-medium)" : "var(--weight-regular)",
-    borderRadius: "var(--radius-xs)",
-    backgroundColor: active ? "var(--surface-3)" : "transparent",
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 4,
-    transition: "background-color var(--motion-instant) var(--ease-out-quart)",
-  };
+  const [hover, setHover] = useState(false);
+  // Two stacked highlights, both absolutely positioned behind the
+  // label so the click target stays one cohesive rect:
+  //
+  //   - The *active* highlight is a motion.span with a shared
+  //     `layoutId` scoped to this worktree's tab strip. When the
+  //     active prop flips, the span unmounts from the old tab and
+  //     mounts on the new one — motion sees the layoutId match and
+  //     interpolates the transform between the two bounding rects.
+  //     That's the "slide" effect: a single rect glides from Files
+  //     → Changes → Browser instead of disappearing and reappearing.
+  //   - The *hover* highlight is a plain span — fades in on enter,
+  //     out on leave. Only renders when the tab is inactive; the
+  //     active highlight already covers the surface treatment.
+  //
+  // Active tab fades its hover highlight away (covered by the active
+  // rect anyway) so the two never visually overlap.
   return (
     <button
       type="button"
       onClick={() => dispatch({ type: "set-right-panel", worktreeId, panel: tab })}
-      style={baseStyle}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        position: "relative",
+        height: 28,
+        padding: "0 var(--space-2)",
+        backgroundColor: "transparent",
+        color: active ? "var(--text-primary)" : "var(--text-secondary)",
+        fontSize: "var(--text-sm)",
+        fontWeight: active ? "var(--weight-medium)" : "var(--weight-regular)",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        cursor: "default",
+        transition: "color var(--motion-fast) var(--ease-out-quart)",
+      }}
     >
-      {label}
-      {badge !== undefined && (
-        <span
-          className="tabular"
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            minWidth: 18,
-            height: 16,
-            padding: "0 4px",
-            borderRadius: "var(--radius-pill)",
-            fontSize: "var(--text-2xs)",
-            color: "var(--text-tertiary)",
-            backgroundColor: "var(--surface-4)",
+      {active && (
+        <motion.span
+          layoutId={`right-panel-tab-active-${worktreeId}`}
+          transition={{
+            // Tween with ease-out-quart — same curve as the rest of
+            // the chrome's punctuation animations. 240ms reads as
+            // "considered" without feeling slow; the rectangle has
+            // real distance to cover when jumping tab-to-tab so we
+            // want enough duration to convey continuity.
+            duration: 0.24,
+            ease: [0.25, 1, 0.5, 1],
           }}
-        >
-          {badge}
-        </span>
+          style={{
+            position: "absolute",
+            inset: 0,
+            borderRadius: "var(--radius-xs)",
+            backgroundColor: "var(--surface-3)",
+            zIndex: 0,
+          }}
+          aria-hidden
+        />
       )}
+      {!active && (
+        <span
+          style={{
+            position: "absolute",
+            inset: 0,
+            borderRadius: "var(--radius-xs)",
+            // --surface-3 (same as the active rect). The previous
+            // --surface-2 sat only ~3% lightness above the panel
+            // background, which read as "no highlight at all" on
+            // near-black. Matching the active rect makes the hover
+            // a preview of the would-be-active state.
+            backgroundColor: "var(--surface-3)",
+            opacity: hover ? 1 : 0,
+            transition: "opacity var(--motion-fast) var(--ease-out-quart)",
+            zIndex: 0,
+            pointerEvents: "none",
+          }}
+          aria-hidden
+        />
+      )}
+      <span
+        style={{
+          position: "relative",
+          zIndex: 1,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+        }}
+      >
+        {label}
+        {badge !== undefined && (
+          <span
+            className="tabular"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              minWidth: 18,
+              height: 16,
+              padding: "0 4px",
+              borderRadius: "var(--radius-pill)",
+              fontSize: "var(--text-2xs)",
+              color: "var(--text-tertiary)",
+              backgroundColor: "var(--surface-4)",
+            }}
+          >
+            {badge}
+          </span>
+        )}
+      </span>
     </button>
   );
 }
@@ -263,6 +343,59 @@ function relPath(abs: string, root: string): string {
   return abs;
 }
 
+/**
+ * Polls `git status` for a worktree and pushes the entry count into
+ * `worktree.changeCount` so the Changes-tab badge and sidebar `+N`
+ * indicator stay current.
+ *
+ * Two trigger paths:
+ *  - 4-second polling — bounded cadence so the badge tracks ambient
+ *    edits the user makes outside of GLI (e.g. via VS Code).
+ *  - `rli-git-refresh` window event — emitted by the commit / push /
+ *    merge paths so the count updates within ~50ms instead of waiting
+ *    for the next tick.
+ *
+ * Mounted at the `UpperPanel` level (always live for the active
+ * worktree) rather than inside `ChangesView` (only mounts while the
+ * user is on that tab). ChangesView still runs its own poll for the
+ * entries list, but doesn't need to drive the count anymore.
+ */
+function useChangeCountPolling(worktreeId: string, worktreePath: string) {
+  const dispatch = useAppDispatch();
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const result = await git.status(worktreePath);
+        if (cancelled) return;
+        dispatch({
+          type: "set-change-count",
+          worktreeId,
+          count: result.entries.length,
+        });
+      } catch {
+        // Swallow — the next tick or refresh nudge will retry. A
+        // failing git status (e.g. mid-rebase, locked index) shouldn't
+        // bubble into the chrome.
+      }
+    };
+    void poll();
+    const t = window.setInterval(poll, 4000);
+    const onRefresh = (e: Event) => {
+      const detail = (e as CustomEvent<{ cwd?: string }>).detail;
+      if (!detail?.cwd || detail.cwd === worktreePath) {
+        void poll();
+      }
+    };
+    window.addEventListener("rli-git-refresh", onRefresh);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+      window.removeEventListener("rli-git-refresh", onRefresh);
+    };
+  }, [worktreeId, worktreePath, dispatch]);
+}
+
 /* ------------------------------------------------------------------
    Changes view — git status + click → open diff tab in main column.
    ------------------------------------------------------------------ */
@@ -283,15 +416,12 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
       setEntries(result.entries);
       setAhead(result.ahead);
       setError(null);
-      dispatch({
-        type: "set-change-count",
-        worktreeId: worktree.id,
-        count: result.entries.length,
-      });
+      // changeCount is dispatched by `useChangeCountPolling` in the
+      // parent UpperPanel — running it here too would just race.
     } catch (e) {
       setError(String(e));
     }
-  }, [worktree.id, worktree.path, dispatch]);
+  }, [worktree.path]);
 
   useEffect(() => {
     let cancelled = false;
@@ -302,11 +432,6 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
         setEntries(result.entries);
         setAhead(result.ahead);
         setError(null);
-        dispatch({
-          type: "set-change-count",
-          worktreeId: worktree.id,
-          count: result.entries.length,
-        });
       } catch (e) {
         if (!cancelled) setError(String(e));
       }
