@@ -95,11 +95,49 @@ export function keyToBytes(
 
 /**
  * Returns true if the keystroke is a global app chord that we must
- * NOT intercept (⌘K, ⌘B, ⌘N, ⌘W, ⌘O, etc.) — let it bubble to the
- * window-level keybinding handler.
+ * NOT intercept — let it bubble to the window-level keybinding
+ * handler in useKeyboardShortcuts.
+ *
+ * Mirrors the chord set declared there:
+ *   ⌘K / ⌘F      — search overlay
+ *   ⌘⇧F          — search overlay (alias)
+ *   ⌘,           — settings
+ *   ⌘B           — toggle sidebar
+ *   ⌘\           — toggle right panel
+ *   ⌘O           — open project
+ *   ⌘T           — new terminal tab
+ *   ⌘N           — new worktree
+ *   ⌘W           — close active tab
+ *   ⌘1..9        — switch to nth worktree (flat sidebar order)
+ *   ⌘⇧1..9 / ⌘⌥1..9 — switch to nth project
+ *
+ * Digit support matters because keyToBytes doesn't encode ⌘+digit
+ * today (it falls through and returns null, so the event bubbles by
+ * accident). Listing digits here makes that bubble-through explicit —
+ * a future PTY-side ⌘+digit binding wouldn't silently eat worktree
+ * switching.
+ *
+ * ⌘⇧/⌘⌥ digits are also bubbled even though they fail the early
+ * `!e.altKey` guard for plain meta-only chords. The `digit ||` branch
+ * sees them through regardless of alt/shift state.
  */
 export function isGlobalChord(e: KeyboardEvent<HTMLTextAreaElement>): boolean {
-  if (e.altKey) return false;
   if (!(e.metaKey || e.ctrlKey)) return false;
-  return ["k", "b", "n", "w", "o"].includes(e.key.toLowerCase());
+  // Digits: ⌘1..9 (and the ⌘⇧/⌘⌥ variants for project switch). Read
+  // from e.code so modifier-induced char shifts (⌘⇧1 → "!") don't
+  // mask the chord.
+  if (/^Digit[1-9]$/.test(e.code)) return true;
+  if (e.altKey) return false;
+  const k = e.key.toLowerCase();
+  return (
+    k === "k" ||
+    k === "f" ||
+    k === "b" ||
+    k === "n" ||
+    k === "w" ||
+    k === "o" ||
+    k === "t" ||
+    k === "," ||
+    k === "\\"
+  );
 }

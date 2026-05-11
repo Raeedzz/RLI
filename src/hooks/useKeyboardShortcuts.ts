@@ -32,7 +32,7 @@ function digitKey(e: KeyboardEvent): number | null {
  *   ⌘O           — open project
  *   ⌘N           — new worktree (prompt for branch via sidebar UI)
  *   ⌘W           — close active tab
- *   ⌘1..9        — switch to nth worktree of active project
+ *   ⌘1..9        — switch to nth worktree in sidebar order (flat across projects)
  *   ⌘⇧1..9       — switch to nth project
  *   ⌘⌥1..9       — same as ⌘⇧, kept for muscle memory
  *   ⌘B           — toggle sidebar
@@ -166,20 +166,39 @@ export function useKeyboardShortcuts() {
         }
       }
 
-      // Worktree switch: ⌘1..9 within active project
+      // Worktree switch: ⌘1..9 across the flat sidebar order.
+      //
+      // Previously this only addressed worktrees within the currently-active
+      // project, which meant the chord did nothing when no project was active
+      // and silently disagreed with what the user sees in the rail once they
+      // had >1 project. Now we walk projectOrder × that project's worktrees
+      // in the exact order the Sidebar renders them, so ⌘N always lands on
+      // the Nth worktree as counted from the top of the rail — crossing
+      // project boundaries when needed and activating the owning project as
+      // a side effect.
       if (cmd && !shift && !e.altKey) {
         const n = digitKey(e);
-        if (n !== null && project) {
+        if (n !== null) {
           e.preventDefault();
-          const projectWorktrees = Object.values(worktrees).filter(
-            (w) => w.projectId === project.id,
-          );
-          const target = projectWorktrees[n - 1];
+          const flat: { projectId: string; worktreeId: string }[] = [];
+          for (const pid of projectOrder) {
+            for (const w of Object.values(worktrees)) {
+              if (w.projectId === pid) {
+                flat.push({ projectId: pid, worktreeId: w.id });
+              }
+            }
+          }
+          const target = flat[n - 1];
           if (target) {
+            // Switch project first so the main column re-reads the right
+            // worktree map before render. Both dispatches collapse into a
+            // single React commit anyway, but the order keeps reducer
+            // intent obvious.
+            dispatch({ type: "set-active-project", id: target.projectId });
             dispatch({
               type: "set-active-worktree",
-              projectId: project.id,
-              worktreeId: target.id,
+              projectId: target.projectId,
+              worktreeId: target.worktreeId,
             });
           }
           return;

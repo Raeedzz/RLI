@@ -340,10 +340,29 @@ function tabSummary(tab: Tab): string {
 }
 
 /** Bare label for a tab — bare names only (no path, no subtitle).
- *  Terminal tabs that have detected an agent show the CLI name. */
+ *  Terminal tabs only surface the CLI badge ("claude" / "codex" /
+ *  "gemini") while the agent is actively running. Once it exits the
+ *  tab reverts to its session title (or "shell" by default) so the
+ *  strip doesn't keep showing a long-dead agent's name. detectedCli
+ *  alone is unreliable for this: the exit-debounce in BlockTerminal
+ *  can be cancelled if the user switches tabs mid-flight, leaving the
+ *  CLI field stale until the user navigates back. Anding it with
+ *  agentStatus closes the gap. */
 function tabLabel(tab: Tab): string {
   if (tab.kind === "terminal") {
-    return tab.detectedCli ?? tab.title ?? "shell";
+    if (tab.agentStatus === "running" && tab.detectedCli) {
+      return tab.detectedCli;
+    }
+    // Once the agent is gone the tab reverts to "shell", period.
+    // We deliberately don't fall back to tab.title here — the title
+    // can hold residue from the just-exited agent (e.g. "claude"
+    // becomes the derived title when activity summary was just the
+    // launch command), and the user wants the tab to read as the
+    // base shell state, not a stale agent name. The longer activity
+    // summary still surfaces in the 11px tertiary line under the
+    // tab title (rendered by TabLabelStack), so meaningful session
+    // context isn't lost — only the badge resets.
+    return "shell";
   }
   if (tab.kind === "project-settings") {
     return tab.title || "Settings";
@@ -404,17 +423,27 @@ function TabContent({
     <div style={{ minHeight: 0, position: "relative", overflow: "hidden" }}>
       <ErrorBoundary>
         {tab.kind === "terminal" ? (
-          <TerminalTabContent worktree={worktree} tab={tab} />
+          // `key={tab.id}` forces a fresh BlockTerminal per tab. Without it,
+          // React reuses the same instance across tab switches and the
+          // child's local state (`foregroundIsAgent`, `activeCommand`,
+          // `altScreen`, …) leaks from the previous tab — which is how a
+          // new tab opened while another tab is running claude inherits
+          // `foregroundIsAgent=true` and the PromptInput never renders.
+          // The PTY itself survives unmount (useTerminalSession explicitly
+          // skips `term_close` on teardown), so the cost of remounting is
+          // a `term_start` re-emit of the cached grid — cheap and idempotent.
+          <TerminalTabContent key={tab.id} worktree={worktree} tab={tab} />
         ) : tab.kind === "diff" ? (
           <DiffTabContent
+            key={tab.id}
             projectPath={projectPath}
             filePath={tab.filePath}
             staged={tab.staged}
           />
         ) : tab.kind === "project-settings" ? (
-          <RepositorySettingsView projectId={tab.projectId} />
+          <RepositorySettingsView key={tab.id} projectId={tab.projectId} />
         ) : (
-          <MarkdownTabContent tab={tab} />
+          <MarkdownTabContent key={tab.id} tab={tab} />
         )}
       </ErrorBoundary>
     </div>
@@ -482,7 +511,18 @@ function TerminalTabContent({
             .slice(0, 5)
             .join(" ")
             .slice(0, 40);
-          if (derived) {
+          // Skip the bare-launch-command case: when the activity
+          // source is just "claude" / "codex" / "gemini" (the user
+          // typed the agent's name and the AI summarizer hasn't
+          // produced a real activity line yet), promoting that into
+          // tab.title pollutes the title with the agent's name. The
+          // tab strip already shows the CLI badge via tabLabel while
+          // the agent runs, so we don't need it duplicated in the
+          // underlying title — and once the agent exits we'd be
+          // stuck with "claude" as the persistent title forever.
+          const looksLikeBareCli =
+            /^(claude(-code)?|codex(-cli)?|gemini(-cli)?|aider)$/i.test(derived);
+          if (derived && !looksLikeBareCli) {
             dispatch({
               type: "update-tab",
               id: tab.id,

@@ -1,9 +1,13 @@
 import {
+  useEffect,
+  useRef,
   useState,
   type CSSProperties,
   type MouseEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
+import { AnimatePresence, motion } from "motion/react";
 import { IconPickerDialog } from "@/shell/IconPickerDialog";
 import { ContextMenu, type ContextMenuItem } from "@/shell/ContextMenu";
 import { lookupPickerIcon } from "@/design/picker-icons";
@@ -20,6 +24,7 @@ import {
   IconHelp,
   IconSettings,
   IconEdit,
+  IconPullRequest,
 } from "@/design/icons";
 import { Image01Icon, Link01Icon, ViewOffIcon, Delete01Icon } from "hugeicons-react";
 import {
@@ -31,6 +36,8 @@ import {
   projectSettings,
   type ArchiveRecord,
   type Project,
+  type Tab,
+  type TabId,
   type Worktree,
 } from "@/state/types";
 import { openProjectDialog } from "@/lib/projectDialog";
@@ -561,12 +568,16 @@ function HistorySection({ records }: { records: ArchiveRecord[] }) {
           alignItems: "center",
           gap: 12,
           height: 42,
-          width: "calc(100% - 8px)",
-          margin: "0 4px",
-          padding: "0 var(--space-3)",
+          // History anchors the top-left "tab" of the sidebar — its hover
+          // surface fills the row edge-to-edge instead of inset like the
+          // worktree rows below. Padding compensates so the icon sits at
+          // the same x as the inset rows' content.
+          width: "100%",
+          margin: 0,
+          padding: "0 var(--space-3) 0 calc(var(--space-3) + 4px)",
           color: "var(--text-secondary)",
           backgroundColor: "transparent",
-          borderRadius: "var(--radius-sm)",
+          borderRadius: 0,
           border: "none",
           textAlign: "left",
           cursor: "default",
@@ -684,13 +695,76 @@ function WorktreeRow({
 }) {
   const dispatch = useAppDispatch();
   const settings = useAppState().settings;
+  const tabs = useAppState().tabs;
   const toast = useToast();
   const [hovering, setHovering] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [menuAnchor, setMenuAnchor] = useState<{ x: number; y: number } | null>(
     null,
   );
+  // Hover-card anchor. Null = card hidden. Holds a DOMRect snapshot of
+  // the row so the card can portal to <body> and still align with the
+  // sidebar entry it describes — even across scroll/resize, where we
+  // re-snapshot on intent rather than tracking continuously.
+  const [cardAnchor, setCardAnchor] = useState<DOMRect | null>(null);
+  const rowRef = useRef<HTMLLIElement>(null);
+  const showTimerRef = useRef<number | null>(null);
+  const hideTimerRef = useRef<number | null>(null);
   const isRunning = worktree.agentStatus === "running";
+
+  // Cancel any pending show/hide timers when the row unmounts. Without
+  // this a fast scroll-then-mount could fire a setState into a dead
+  // component (harmless in dev, noisy in prod).
+  useEffect(() => {
+    return () => {
+      if (showTimerRef.current) window.clearTimeout(showTimerRef.current);
+      if (hideTimerRef.current) window.clearTimeout(hideTimerRef.current);
+    };
+  }, []);
+
+  // 500ms intent delay: long enough that a casual mouse-over scrolling
+  // past the rail doesn't pop cards everywhere; short enough that a
+  // deliberate hover feels responsive. The cross-fade onto a sibling
+  // row (mouse moves to the next worktree before this card mounts)
+  // simply cancels the timer — never blinks a card the user didn't
+  // ask for.
+  const HOVER_INTENT_MS = 500;
+  // 120ms grace on close so the cursor can travel from row → card
+  // without the card unmounting mid-flight.
+  const HOVER_GRACE_MS = 120;
+
+  const cancelTimers = () => {
+    if (showTimerRef.current) {
+      window.clearTimeout(showTimerRef.current);
+      showTimerRef.current = null;
+    }
+    if (hideTimerRef.current) {
+      window.clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+  };
+
+  const openCard = () => {
+    if (cardAnchor || showTimerRef.current) return;
+    showTimerRef.current = window.setTimeout(() => {
+      showTimerRef.current = null;
+      if (rowRef.current) {
+        setCardAnchor(rowRef.current.getBoundingClientRect());
+      }
+    }, HOVER_INTENT_MS);
+  };
+
+  const scheduleClose = () => {
+    if (showTimerRef.current) {
+      window.clearTimeout(showTimerRef.current);
+      showTimerRef.current = null;
+    }
+    if (hideTimerRef.current) return;
+    hideTimerRef.current = window.setTimeout(() => {
+      hideTimerRef.current = null;
+      setCardAnchor(null);
+    }, HOVER_GRACE_MS);
+  };
 
   const onSelect = () => {
     dispatch({ type: "set-active-project", id: project.id });
@@ -806,8 +880,15 @@ function WorktreeRow({
 
   return (
     <li
-      onMouseEnter={() => setHovering(true)}
-      onMouseLeave={() => setHovering(false)}
+      ref={rowRef}
+      onMouseEnter={() => {
+        setHovering(true);
+        openCard();
+      }}
+      onMouseLeave={() => {
+        setHovering(false);
+        scheduleClose();
+      }}
     >
       <button
         type="button"
@@ -957,8 +1038,412 @@ function WorktreeRow({
         ]}
         onClose={() => setMenuAnchor(null)}
       />
+
+      <AnimatePresence>
+        {cardAnchor && (
+          <WorktreeHoverCard
+            key={worktree.id}
+            worktree={worktree}
+            project={project}
+            tabs={tabs}
+            anchor={cardAnchor}
+            onMouseEnter={cancelTimers}
+            onMouseLeave={scheduleClose}
+            onCreatePR={() => {
+              cancelTimers();
+              setCardAnchor(null);
+              dispatch({ type: "set-active-project", id: project.id });
+              dispatch({
+                type: "set-active-worktree",
+                projectId: project.id,
+                worktreeId: worktree.id,
+              });
+              dispatch({
+                type: "set-pr-dialog",
+                worktreeId: worktree.id,
+                mode: "auto",
+              });
+            }}
+          />
+        )}
+      </AnimatePresence>
     </li>
   );
+}
+
+/* ------------------------------------------------------------------
+   Worktree hover card
+   ------------------------------------------------------------------ */
+
+/**
+ * Floating card that appears to the right of a worktree row after the
+ * user dwells on it for ~500ms. Mirrors conductor.build's worktree
+ * peek: branch + change count + status, the worktree name, the most
+ * recent activity line, a Create-PR shortcut, and a relative
+ * "last-touched" timestamp.
+ *
+ * Portaled to <body> so it escapes the sidebar's scroll/clip context
+ * and can overlap the main column. Anchored to a one-shot DOMRect
+ * snapshot — re-snapping on every scroll/resize would be wasted work
+ * for a transient surface; if the row moves the user is already moving
+ * the cursor too, which closes the card.
+ */
+function WorktreeHoverCard({
+  worktree,
+  project,
+  tabs,
+  anchor,
+  onMouseEnter,
+  onMouseLeave,
+  onCreatePR,
+}: {
+  worktree: Worktree;
+  project: Project;
+  tabs: Record<TabId, Tab>;
+  anchor: DOMRect;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
+  onCreatePR: () => void;
+}) {
+  // Pick the most recently active tab — its derived title is the
+  // 3-5 word distillation the user wants in the bold slot, its full
+  // summary is the longer line beneath.
+  const bestTab: Tab | null = (() => {
+    let best: Tab | null = null;
+    for (const id of worktree.tabIds) {
+      const t = tabs[id];
+      if (!t) continue;
+      if (!best || t.summaryUpdatedAt > best.summaryUpdatedAt) best = t;
+    }
+    return best;
+  })();
+
+  // Strip placeholders so we don't surface "ready", "shell", or the
+  // worktree's own branch/name as if they were real activity. Returns
+  // null when the string carries no information beyond the chrome.
+  const clean = (s: string | null | undefined): string | null => {
+    if (!s) return null;
+    const c = s.replace(/\s+/g, " ").trim();
+    if (!c) return null;
+    const lc = c.toLowerCase();
+    if (lc === "ready" || lc === "untitled" || lc === "shell" || lc === "main")
+      return null;
+    if (lc === worktree.branch.toLowerCase()) return null;
+    if (lc === worktree.name.toLowerCase()) return null;
+    return c;
+  };
+  // Fallback: if for some reason tab.title is still the original full
+  // summary (e.g. the placeholder path in MainColumn didn't fire), do
+  // our own first-5-words truncation. Keeps the bold slot bounded.
+  const toShort = (s: string): string => {
+    const words = s.split(" ").filter(Boolean);
+    return words.length <= 5 ? s : words.slice(0, 5).join(" ");
+  };
+
+  const tabTitle = clean(bestTab?.title);
+  const tabSummary = clean(bestTab?.summary);
+  // The bold "what's happening" slot. Prefer tab.title since
+  // MainColumn already shortened it to first 5 words on the
+  // placeholder→derived transition. Fall back to a truncated summary
+  // when the title slot is empty. Finally fall back to the worktree's
+  // own name so the card always has a non-empty headline.
+  const headline =
+    tabTitle ?? (tabSummary ? toShort(tabSummary) : null) ?? worktree.name;
+  // The longer activity line under the headline. Suppress it when it
+  // would just repeat the headline verbatim — once is plenty.
+  const activityLine =
+    tabSummary && tabSummary !== headline ? tabSummary : null;
+
+  // Use the latest tab summary's timestamp when present — that's the
+  // "last touched" moment a user actually cares about. Fall back to the
+  // worktree's createdAt for never-touched worktrees.
+  const lastTouched = bestTab
+    ? Math.max(worktree.createdAt, bestTab.summaryUpdatedAt)
+    : worktree.createdAt;
+
+  const CARD_WIDTH = 320;
+  // Position to the right of the sidebar row with an 8px gap. If the
+  // card would clip the viewport's right edge, flip it to the LEFT of
+  // the row — but the sidebar lives at x=0, so realistically we only
+  // need the right-side placement. Vertical: align the card's top with
+  // the row's top so the eye doesn't have to track up/down on appear.
+  const left = anchor.right + 8;
+  const top = Math.max(8, anchor.top);
+
+  // worktree.agentStatus is set by whichever tab's BlockTerminal last
+  // reported. Once the user switches away from a running tab the
+  // BlockTerminal unmounts and worktree.agentStatus can read stale
+  // until they come back, so OR it with per-tab status — covers
+  // background-running agents and concurrent agents in sibling tabs.
+  const isRunning =
+    worktree.agentStatus === "running" ||
+    worktree.tabIds.some((id) => {
+      const t = tabs[id];
+      return t?.kind === "terminal" && t.agentStatus === "running";
+    });
+
+  return createPortal(
+    <motion.div
+      role="dialog"
+      aria-label={`${worktree.name} details`}
+      initial={{ opacity: 0, x: -6, scale: 0.985 }}
+      animate={{ opacity: 1, x: 0, scale: 1 }}
+      exit={{ opacity: 0, x: -4, scale: 0.99, transition: { duration: 0.14 } }}
+      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+      style={{
+        position: "fixed",
+        left,
+        top,
+        width: CARD_WIDTH,
+        // Card chrome: surface-2 (one step above sidebar surface-1)
+        // with a strong-enough border to read against the main column
+        // without resorting to a glow. Shadow is soft and short — Linear
+        // / Superhuman elevation, not glassmorphism.
+        backgroundColor: "var(--surface-2)",
+        border: "1px solid var(--border-strong)",
+        borderRadius: "var(--radius-md)",
+        boxShadow:
+          "0 4px 12px oklch(0% 0 0 / 0.30), 0 1px 2px oklch(0% 0 0 / 0.4)",
+        padding: "14px 16px 12px",
+        zIndex: 1000,
+        // Prevent the card itself from being a click-through target on
+        // the row underneath when the cursor crosses into it.
+        pointerEvents: "auto",
+        // The Verlet-grade easing on the inner stagger needs `transform`
+        // hints; keep the GPU layer for the whole card so children's
+        // motion stays jitter-free at 60fps.
+        willChange: "transform, opacity",
+      }}
+    >
+      {/* Top row: branch · +N · status dot */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginBottom: 6,
+        }}
+      >
+        <span
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: "var(--text-xs)",
+            color: "var(--text-secondary)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            minWidth: 0,
+            maxWidth: 160,
+          }}
+          title={worktree.branch}
+        >
+          {worktree.branch}
+        </span>
+        {worktree.changeCount > 0 && (
+          <span
+            className="tabular"
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: "var(--text-xs)",
+              color: "var(--state-success)",
+            }}
+          >
+            +{worktree.changeCount}
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        <HoverCardStatusDot running={isRunning} />
+      </div>
+
+      {/* Headline — 3-5 word distillation of what the tab is doing.
+          Sourced from the most-recently-touched tab's `title`, which
+          MainColumn shapes from the first ~5 words of the live agent
+          summary on the placeholder→derived transition. */}
+      <div
+        style={{
+          fontSize: "var(--text-lg)",
+          fontWeight: "var(--weight-semibold)",
+          color: "var(--text-primary)",
+          letterSpacing: "var(--tracking-tight)",
+          lineHeight: 1.2,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+        title={headline}
+      >
+        {headline}
+      </div>
+
+      {/* Activity line — full summary under the headline. Hidden when
+          it would simply repeat the headline. */}
+      {activityLine && (
+        <motion.div
+          initial={{ opacity: 0, y: 3 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{
+            duration: 0.24,
+            ease: [0.22, 1, 0.36, 1],
+            delay: 0.06,
+          }}
+          style={{
+            marginTop: 4,
+            fontSize: "var(--text-sm)",
+            color: "var(--text-tertiary)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={activityLine}
+        >
+          {activityLine}
+        </motion.div>
+      )}
+
+      {/* Bottom row: Create PR · relative time */}
+      <motion.div
+        initial={{ opacity: 0, y: 4 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{
+          duration: 0.24,
+          ease: [0.22, 1, 0.36, 1],
+          delay: 0.1,
+        }}
+        style={{
+          marginTop: 14,
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+        }}
+      >
+        <CreatePRButton onClick={onCreatePR} disabled={!project} />
+        <span style={{ flex: 1 }} />
+        <span
+          className="tabular"
+          style={{
+            fontSize: "var(--text-xs)",
+            color: "var(--text-tertiary)",
+            fontFamily: "var(--font-mono)",
+          }}
+          title={new Date(lastTouched).toLocaleString()}
+        >
+          {formatRelativeTime(lastTouched)}
+        </span>
+      </motion.div>
+    </motion.div>,
+    document.body,
+  );
+}
+
+/**
+ * Status dot for the hover card. While running, paints a pulsing
+ * accent ring (one-cell `border-radius:50%` so the spinning arc reads
+ * as motion, not noise). Idle, a dashed ring — present so the slot
+ * doesn't reflow when the agent kicks off, but quiet enough that it
+ * disappears against `--surface-2`.
+ */
+function HoverCardStatusDot({ running }: { running: boolean }) {
+  return (
+    <span
+      aria-hidden
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 14,
+        height: 14,
+        flexShrink: 0,
+      }}
+    >
+      {running ? (
+        <span className="rli-loader-spin" style={{ display: "inline-flex" }}>
+          <IconRunning size={14} />
+        </span>
+      ) : (
+        <span
+          style={{
+            display: "inline-block",
+            width: 10,
+            height: 10,
+            border: "1px dashed var(--text-tertiary)",
+            borderRadius: "50%",
+            opacity: 0.6,
+          }}
+        />
+      )}
+    </span>
+  );
+}
+
+/**
+ * The card's Create-PR shortcut. Pressed scale punctuates the click,
+ * the hover background lift signals interactivity, the icon nudges
+ * 1px on hover — micro-motion that costs nothing at 60fps but makes
+ * the affordance feel alive.
+ */
+function CreatePRButton({
+  onClick,
+  disabled,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <motion.button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      whileHover={{ backgroundColor: "var(--surface-4)" }}
+      whileTap={{ scale: 0.97 }}
+      transition={{ duration: 0.12, ease: [0.25, 1, 0.5, 1] }}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        height: 28,
+        padding: "0 12px",
+        backgroundColor: "var(--surface-3)",
+        color: "var(--text-primary)",
+        border: "1px solid var(--border-default)",
+        borderRadius: "var(--radius-sm)",
+        fontFamily: "var(--font-sans)",
+        fontSize: "var(--text-xs)",
+        fontWeight: "var(--weight-medium)",
+        cursor: disabled ? "default" : "pointer",
+        opacity: disabled ? 0.5 : 1,
+      }}
+    >
+      <IconPullRequest size={13} />
+      <span>Create PR</span>
+    </motion.button>
+  );
+}
+
+/**
+ * Compact "Xd ago" formatter. The card is a glance surface, so we
+ * trade resolution for terseness: anything under a minute is "now",
+ * minutes/hours/days/weeks otherwise. Reaches for years only when the
+ * worktree is genuinely ancient — a rare-enough case that scaling the
+ * label by 2 chars isn't worth a special case.
+ */
+function formatRelativeTime(ts: number): string {
+  if (!ts || !Number.isFinite(ts)) return "—";
+  const diff = Math.max(0, Date.now() - ts);
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return "now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}d ago`;
+  const w = Math.floor(d / 7);
+  if (w < 5) return `${w}w ago`;
+  const mo = Math.floor(d / 30);
+  if (mo < 12) return `${mo}mo ago`;
+  return `${Math.floor(d / 365)}y ago`;
 }
 
 /* ------------------------------------------------------------------

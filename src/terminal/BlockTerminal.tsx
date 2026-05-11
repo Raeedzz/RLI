@@ -421,8 +421,8 @@ export function BlockTerminal({
   // of the agent's own input. Used only as a fallback — the
   // activeCommand-based foregrounding effect below covers the common
   // case (user typed "claude" / "codex" / "aider" at the shell).
-  // Sniffing remains useful for wrappers, aliases, and direct-launch
-  // panes whose initial frames pre-date this state being wired up.
+  // Sniffing remains useful for direct-launch panes whose initial
+  // frames pre-date this state being wired up.
   //
   // CRITICAL: only sniff while a command is actively running. After
   // Ctrl+C kills an agent the alacritty grid still holds the agent's
@@ -430,6 +430,17 @@ export function BlockTerminal({
   // command_running=false transition would re-detect claude from
   // those leftover bytes and flip foregroundIsAgent back to true,
   // pinning PromptInput off-screen forever.
+  //
+  // AND: skip the sniff entirely once we know what command is running
+  // and it isn't an agent. The live frame contains the full grid (per
+  // useTerminalSession's allDirty re-emit), so claude's banner from
+  // the previous run is still painted above the shell prompt when the
+  // user types `ls`. Without this gate, that stale banner trips
+  // detectClaude on the next `command_running=true` transition,
+  // re-arms agent mode, and the prompt input vanishes mid-typing —
+  // exactly the bug the user reported. activeCommand-classification
+  // (line below) already covers the case where the new command IS an
+  // agent, so suppressing the sniff here loses nothing.
   //
   // Scans the full grid (claude's banner paints near the top of the
   // initial draw, so a tail-only scan misses it). Bails on the first
@@ -439,6 +450,7 @@ export function BlockTerminal({
     if (foregroundIsAgent) return;
     if (!liveFrame) return;
     if (!liveFrame.command_running) return;
+    if (activeCommand.length > 0 && !commandLineIsAgent(activeCommand)) return;
     let text = "";
     for (const dr of liveFrame.dirty) {
       const spans = dr.spans;
@@ -458,7 +470,7 @@ export function BlockTerminal({
       }
       sniffBufferRef.current = "";
     }
-  }, [liveFrame, foregroundIsAgent, claudeDetectedLocal]);
+  }, [liveFrame, foregroundIsAgent, claudeDetectedLocal, activeCommand]);
 
   // Foreground the agent the moment the user runs one from the shell.
   // The Claude-only banner sniff above is a slow path that doesn't
