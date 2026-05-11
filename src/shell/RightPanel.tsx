@@ -569,6 +569,54 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
     }
   };
 
+  // Combined commit + push for the "staged changes AND branch is
+  // already ahead" case. Sequential so the button label can morph
+  // through `Committing → Pushing → idle`, giving the user real
+  // progress feedback rather than one opaque "working" state.
+  // Errors from either phase abort and surface a toast; the partial
+  // state (e.g. commit succeeded but push failed) is fine — the user
+  // can hit Push again from the resulting "Push 1" state.
+  const commitPush = async () => {
+    if (stagedCount === 0) {
+      toast.show({ message: "Nothing staged to commit." });
+      return;
+    }
+    if (!message.trim()) {
+      toast.show({ message: "Write a commit message first." });
+      return;
+    }
+    setBusy("commit");
+    try {
+      await git.commit(worktree.path, message.trim());
+      setMessage("");
+      await refresh();
+      window.dispatchEvent(
+        new CustomEvent("rli-git-refresh", {
+          detail: { cwd: worktree.path },
+        }),
+      );
+    } catch (e) {
+      toast.show({ message: `Commit failed: ${e}` });
+      setBusy(null);
+      return;
+    }
+    setBusy("push");
+    try {
+      await git.push(worktree.path);
+      toast.show({ message: "Committed & pushed." });
+      await refresh();
+      window.dispatchEvent(
+        new CustomEvent("rli-git-refresh", {
+          detail: { cwd: worktree.path },
+        }),
+      );
+    } catch (e) {
+      toast.show({ message: `Commit ok, push failed: ${e}` });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const openDiff = (entry: StatusEntry) => {
     const id = `t_diff_${Date.now().toString(36)}`;
     dispatch({
@@ -622,6 +670,7 @@ function ChangesView({ worktree }: { worktree: Worktree }) {
         onDraft={draftMessage}
         onCommit={commit}
         onPush={push}
+        onCommitPush={commitPush}
         busy={busy}
         stagedCount={stagedCount}
         ahead={ahead}
@@ -880,6 +929,7 @@ function CommitComposer({
   onDraft,
   onCommit,
   onPush,
+  onCommitPush,
   busy,
   stagedCount,
   ahead,
@@ -889,22 +939,45 @@ function CommitComposer({
   onDraft: () => void;
   onCommit: () => void;
   onPush: () => void;
+  onCommitPush: () => void;
   busy: null | "stage" | "unstage" | "commit" | "push" | "draft";
   stagedCount: number;
   ahead: number;
 }) {
-  // Mode picker. Commit takes priority when there are staged changes
-  // — the user is mid-edit; pushing existing commits can wait. Push
-  // appears once the working tree is settled.
-  const canCommit = stagedCount > 0 && message.trim().length > 0;
-  const mode: "commit" | "push" | "idle" =
-    canCommit ? "commit" : ahead > 0 ? "push" : "idle";
-  const disabled = busy !== null || mode === "idle";
+  // Mode picker. Three live states + idle:
+  //   - commit-push : staged changes AND branch is already ahead. The
+  //                   single button now commits then pushes in one
+  //                   click — matches the user's mental model that
+  //                   staging "rolls the pending push forward" rather
+  //                   than replacing the action with "Push".
+  //   - commit      : staged changes, branch is up to date with origin
+  //   - push        : nothing staged, branch is ahead of origin
+  //   - idle        : nothing to do
+  //
+  // Whether the action is *enabled* depends on the message too: both
+  // commit and commit-push need a non-empty message before they can
+  // fire. Push doesn't (it ships already-committed work).
+  const hasStaged = stagedCount > 0;
+  const hasAhead = ahead > 0;
+  const hasMessage = message.trim().length > 0;
+  const mode: "commit-push" | "commit" | "push" | "idle" =
+    hasStaged && hasAhead
+      ? "commit-push"
+      : hasStaged
+        ? "commit"
+        : hasAhead
+          ? "push"
+          : "idle";
+  const disabled =
+    busy !== null ||
+    mode === "idle" ||
+    ((mode === "commit" || mode === "commit-push") && !hasMessage);
 
   const onAction = () => {
     if (disabled) return;
     if (mode === "commit") onCommit();
     else if (mode === "push") onPush();
+    else if (mode === "commit-push") onCommitPush();
   };
 
   return (
@@ -920,11 +993,13 @@ function CommitComposer({
         value={message}
         onChange={(e) => onChange(e.target.value)}
         placeholder={
-          stagedCount > 0
-            ? "Describe the change…"
-            : ahead > 0
-              ? "Push to share — message optional for next commit"
-              : "Stage changes to commit"
+          hasStaged && hasAhead
+            ? "Describe the change — commit & push together"
+            : hasStaged
+              ? "Describe the change…"
+              : hasAhead
+                ? "Push to share — message optional for next commit"
+                : "Stage changes to commit"
         }
         rows={4}
         style={{
@@ -968,6 +1043,7 @@ function CommitComposer({
         busy={busy}
         disabled={disabled}
         onClick={onAction}
+        ahead={ahead}
       />
     </div>
   );
@@ -1078,26 +1154,46 @@ function ComposerActionButton({
   busy,
   disabled,
   onClick,
+  ahead,
 }: {
-  mode: "commit" | "push" | "idle";
+  mode: "commit-push" | "commit" | "push" | "idle";
   busy: null | "stage" | "unstage" | "commit" | "push" | "draft";
   disabled: boolean;
   onClick: () => void;
+  ahead: number;
 }) {
-  const isWorking = busy === "commit" || busy === "push";
-  const labelKey = isWorking ? `working-${busy}` : mode;
+  // Working states ride the same crossfade as the four mode states —
+  // they all keep distinct `labelKey`s so AnimatePresence treats each
+  // as a separate motion span. Result: a single coordinated fade-up
+  // when the action transitions through Commit → Committing → Pushing
+  // → idle (Push count) on a "commit-push" click.
+  const labelKey = busy === "commit"
+    ? "working-commit"
+    : busy === "push"
+      ? "working-push"
+      : mode;
   const label =
     busy === "commit"
       ? "Committing"
       : busy === "push"
         ? "Pushing"
-        : mode === "push"
-          ? "Push"
-          : mode === "idle"
-            ? "Commit"
+        : mode === "commit-push"
+          ? "Commit & push"
+          : mode === "push"
+            ? "Push"
             : "Commit";
+  // Push glyph any time push is involved (commit-push, push, or the
+  // push working state). Commit glyph otherwise. The crossfade hides
+  // the swap inside the same span the label lives in.
   const Glyph =
-    mode === "push" || busy === "push" ? IconPush : IconCheck;
+    mode === "push" || mode === "commit-push" || busy === "push"
+      ? IconPush
+      : IconCheck;
+  // Show the ahead-count next to the label only on pure push state.
+  // In commit-push, the count would be misleading (it'll be `ahead+1`
+  // after the commit lands), and in commit/idle there's nothing to
+  // push yet. The count badge crossfades in/out with the label.
+  const showCount = mode === "push" && ahead > 0 && busy === null;
 
   return (
     <button
@@ -1105,11 +1201,13 @@ function ComposerActionButton({
       onClick={onClick}
       disabled={disabled}
       title={
-        mode === "push"
-          ? "Push (⌘↵)"
-          : mode === "idle"
-            ? "Stage changes and write a message to commit"
-            : "Commit (⌘↵)"
+        mode === "commit-push"
+          ? "Commit & push (⌘↵)"
+          : mode === "push"
+            ? `Push ${ahead > 1 ? `${ahead} commits` : "1 commit"} (⌘↵)`
+            : mode === "idle"
+              ? "Stage changes and write a message to commit"
+              : "Commit (⌘↵)"
       }
       aria-label={label}
       style={{
@@ -1151,7 +1249,6 @@ function ComposerActionButton({
           "var(--surface-accent-tinted)";
       }}
     >
-      <Glyph size={12} />
       <AnimatePresence mode="wait" initial={false}>
         <motion.span
           key={labelKey}
@@ -1159,9 +1256,36 @@ function ComposerActionButton({
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -4 }}
           transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-          style={{ display: "inline-block" }}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+          }}
         >
-          {label}
+          <Glyph size={12} />
+          <span>{label}</span>
+          {showCount && (
+            <span
+              className="tabular"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                minWidth: 16,
+                height: 14,
+                padding: "0 4px",
+                marginLeft: -1,
+                borderRadius: "var(--radius-pill)",
+                fontSize: "var(--text-2xs)",
+                fontWeight: "var(--weight-semibold)",
+                color: "var(--text-primary)",
+                backgroundColor: "oklch(0% 0 0 / 0.32)",
+                letterSpacing: 0,
+              }}
+            >
+              {ahead}
+            </span>
+          )}
         </motion.span>
       </AnimatePresence>
     </button>
