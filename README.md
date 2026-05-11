@@ -66,43 +66,24 @@ Scoping is automatic: each PTY is launched with `RLI_PROJECT_ID` / `RLI_SESSION_
 > v1 keymap is fixed. No remapping yet.
 
 ### Sessions & projects
-| Chord | Action |
-|---|---|
-| `⌘O` | Open project |
-| `⌘N` | New session in active project |
-| `⌘W` | Close active session |
-| `⌘1`–`⌘9` | Switch to nth session in active project |
-| `⌘⌥1`–`⌘⌥9` | Jump directly to nth project |
-| `⌘⇧1`–`⌘⇧9` | Jump directly to nth project (alternate binding) |
+
+ChordAction`⌘O`Open project`⌘N`New session in active project`⌘W`Close active session`⌘1`–`⌘9`Switch to nth session in active project`⌘⌥1`–`⌘⌥9`Jump directly to nth project`⌘⇧1`–`⌘⇧9`Jump directly to nth project (alternate binding)
 
 ### Workspace panels
-| Chord | Action |
-|---|---|
-| `⌘K` | Command palette |
-| `⌘⇧F` | Search (`rg` / `ast-grep`) |
-| `⌘⌥F` | Files panel |
-| `⌘⌥G` | Source-control panel (commit / push / diff) |
-| `⌘⌥S` | Skills & MCP panel |
-| `⌘⇧B` | Toggle browser pane |
+
+ChordAction`⌘K`Command palette`⌘⇧F`Search (`rg` / `ast-grep`)`⌘⌥F`Files panel`⌘⌥G`Source-control panel (commit / push / diff)`⌘⌥S`Skills & MCP panel`⌘⇧B`Toggle browser pane
 
 ### Pane chords (new)
 
 Press the prefix, then an arrow to choose which side the new pane lands on. The arrow is what fires the split — the prefix alone does nothing.
 
-| Chord | Action |
-|---|---|
-| `⌘B` `←` `→` `↑` `↓` | Split active pane and open a **browser** on that side |
-| `⌘E` `←` `→` `↑` `↓` | Split active pane and open an **editor** on that side |
-| `⌘T` `←` `→` `↑` `↓` | Split active pane and open a **terminal** on that side |
+ChordAction`⌘B` `←` `→` `↑` `↓`Split active pane and open a **browser** on that side`⌘E` `←` `→` `↑` `↓`Split active pane and open an **editor** on that side`⌘T` `←` `→` `↑` `↓`Split active pane and open a **terminal** on that side
 
-`←`/`→` create a horizontal split (side-by-side); `↑`/`↓` create a vertical split (stacked). The chord expires after ~1.5s if no arrow follows.
+`←`/`→` create a horizontal split (side-by-side); `↑`/`↓` create a vertical split (stacked). The chord expires after \~1.5s if no arrow follows.
 
 ### AI / git
-| Chord | Action |
-|---|---|
-| `⌘L` | Highlight code → ask Flash-Lite |
-| `⌘⏎` | Commit with AI-generated message (preview required) |
-| `⌘⇧⏎` | Push (explicit only — never auto) |
+
+ChordAction`⌘L`Highlight code → ask Flash-Lite`⌘⏎`Commit with AI-generated message (preview required)`⌘⇧⏎`Push (explicit only — never auto)
 
 ---
 
@@ -114,7 +95,7 @@ Press the prefix, then an arrow to choose which side the new pane lands on. The 
 - **State:** All durable state in Rust + SQLite, surfaced via Tauri commands. No state hidden in components.
 - **AI:** Single model — `gemini-3.1-flash-lite-preview` — for commit messages, highlight-and-ask, tab summaries, session naming. Gemini Embedding API for memory vectors. No local models.
 
-See [`CONTEXT.md`](CONTEXT.md) for the full spec, including the locked v1 feature matrix.
+See `CONTEXT.md` for the full spec, including the locked v1 feature matrix.
 
 ---
 

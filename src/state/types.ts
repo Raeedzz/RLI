@@ -266,8 +266,15 @@ export interface MarkdownTab extends TabBase {
   kind: "markdown";
   filePath: string;
   mode: MarkdownMode;
-  /** In-memory cache of file content; written on edit, persisted by autosave. */
+  /** In-memory cache of file content. Updated on every keystroke. */
   content: string | null;
+  /**
+   * The content as it currently exists on disk (last successful
+   * read or write). The tab is "dirty" — unsaved edits — exactly
+   * when `content !== savedContent`. Null until the file has been
+   * read from disk.
+   */
+  savedContent: string | null;
 }
 
 /** Tab variant rendering the per-repo Repository Settings page. */

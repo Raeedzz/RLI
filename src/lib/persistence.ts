@@ -47,7 +47,12 @@ export function pickPersistent(state: AppState): PersistedState {
     if (t.kind === "terminal") {
       tabs[id] = { ...t, agentStatus: "idle", detectedCli: null };
     } else if (t.kind === "markdown") {
-      tabs[id] = { ...t, content: null };
+      // Drop both fields: the file is re-read from disk on next open,
+      // and savedContent gets repopulated from that fresh read. Keeping
+      // a stale savedContent across launches would cause the dirty
+      // dot to show red after a relaunch if the file changed
+      // externally in the meantime.
+      tabs[id] = { ...t, content: null, savedContent: null };
     }
   }
   const worktrees = { ...state.worktrees };

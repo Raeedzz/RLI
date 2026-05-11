@@ -117,6 +117,9 @@ function SearchInner({ onClose }: { onClose: () => void }) {
           filePath: hit.path,
           mode: "edit",
           content,
+          // Search-overlay opens land with content already read from
+          // disk, so the tab starts in-sync (savedContent === content).
+          savedContent: content,
           title: hit.path.split("/").pop() ?? hit.path,
           summary: hit.path,
           summaryUpdatedAt: Date.now(),

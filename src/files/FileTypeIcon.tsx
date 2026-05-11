@@ -180,6 +180,16 @@ function Chip({
  * other component that accepts `size` / `color`) into a fixed
  * inline-flex box so width/height are stable across all variants.
  */
+/** Optical scale factor — hugeicons paths span ~76% of their
+ *  viewBox; scaling the rendered glyph up by this amount makes the
+ *  visible ink match the filled chips painted at full container
+ *  size. The stroke weight is divided by the same factor so the
+ *  visual stroke stays at the intended `strokeWidth` after scaling.
+ *  The wrapper's bounding box is unchanged, so flex alignment is
+ *  identical to chips and the box-to-box positions across rows
+ *  line up to the pixel. */
+const LINE_ICON_SCALE = 1.3;
+
 function LineIcon({
   size,
   color,
@@ -208,12 +218,28 @@ function LineIcon({
         color,
       }}
     >
-      <Component size={size} color={color} strokeWidth={strokeWidth} />
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          transform: `scale(${LINE_ICON_SCALE})`,
+          transformOrigin: "center",
+        }}
+      >
+        <Component
+          size={size}
+          color={color}
+          strokeWidth={strokeWidth / LINE_ICON_SCALE}
+        />
+      </span>
     </span>
   );
 }
 
-/** Docker whale silhouette. Simplified, single-color fill. */
+/** Docker whale silhouette. Simplified, single-color fill. Scaled
+ *  uniformly with the rest of the SVG icons so its visible glyph
+ *  matches the chip's filled area. */
 function DockerWhale({ size, color }: { size: number; color: string }) {
   return (
     <span
@@ -232,7 +258,7 @@ function DockerWhale({ size, color }: { size: number; color: string }) {
         height={size}
         viewBox="0 0 24 24"
         fill={color}
-        style={{ display: "block" }}
+        style={{ display: "block", transform: `scale(${LINE_ICON_SCALE})` }}
       >
         <rect x="3" y="9" width="3" height="3" rx="0.4" />
         <rect x="6.6" y="9" width="3" height="3" rx="0.4" />
@@ -732,18 +758,18 @@ function DocumentOutline({
         height={size}
         viewBox="0 0 16 16"
         fill="none"
-        style={{ display: "block" }}
+        style={{ display: "block", transform: `scale(${LINE_ICON_SCALE})` }}
       >
         <path
           d="M3.5 2.5h5.6L12.5 5.9V12.5a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1Z"
           stroke="currentColor"
-          strokeWidth="1.2"
+          strokeWidth={1.2 / LINE_ICON_SCALE}
           opacity="0.75"
         />
         <path
           d="M9 2.5V6h3.5"
           stroke="currentColor"
-          strokeWidth="1.2"
+          strokeWidth={1.2 / LINE_ICON_SCALE}
           opacity="0.55"
         />
       </svg>
@@ -779,7 +805,7 @@ function FolderGlyph({
         height={size}
         viewBox="0 0 16 16"
         fill="none"
-        style={{ display: "block" }}
+        style={{ display: "block", transform: `scale(${LINE_ICON_SCALE})` }}
       >
         {open ? (
           <path

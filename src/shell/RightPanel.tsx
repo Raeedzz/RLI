@@ -237,6 +237,7 @@ function FilesView({ worktree }: { worktree: Worktree }) {
         filePath: path,
         mode: "edit",
         content: null,
+        savedContent: null,
         title: path.split("/").pop() ?? path,
         summary: relPath(path, worktree.path),
         summaryUpdatedAt: Date.now(),

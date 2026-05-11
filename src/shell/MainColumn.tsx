@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   IconPlus,
@@ -18,6 +18,7 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { BlockTerminal } from "@/terminal/BlockTerminal";
 import { DiffView } from "@/git/DiffView";
 import { Editor } from "@/editor/Editor";
+import { MarkdownView } from "@/editor/MarkdownView";
 import { fs } from "@/lib/fs";
 import { RepositorySettingsView } from "./RepositorySettingsView";
 
@@ -31,6 +32,11 @@ export function MainColumn() {
   const worktree = useActiveWorktree();
   const tabs = useWorktreeTabs(worktree?.id ?? null);
   const activeTab = useActiveTab();
+  const dispatch = useAppDispatch();
+  // Dirty-close confirmation: when the user clicks ✕ on a tab whose
+  // file has unsaved edits, we hold the tab in this state and render
+  // the modal. Clean tabs close immediately and never set this.
+  const [pendingClose, setPendingClose] = useState<Tab | null>(null);
 
   if (!project || !worktree) {
     return (
@@ -48,6 +54,14 @@ export function MainColumn() {
     );
   }
 
+  const requestCloseTab = (tab: Tab) => {
+    if (isTabDirty(tab)) {
+      setPendingClose(tab);
+      return;
+    }
+    dispatch({ type: "close-tab", id: tab.id });
+  };
+
   return (
     <div
       style={{
@@ -57,11 +71,50 @@ export function MainColumn() {
         backgroundColor: "var(--surface-2)",
       }}
     >
-      <TabStrip tabs={tabs} activeTabId={activeTab?.id ?? null} worktreeId={worktree.id} />
+      <TabStrip
+        tabs={tabs}
+        activeTabId={activeTab?.id ?? null}
+        worktreeId={worktree.id}
+        onCloseTab={requestCloseTab}
+      />
       <TabContent
         worktree={worktree}
         tab={activeTab}
         projectPath={project.path}
+      />
+      <CloseTabConfirmDialog
+        tab={pendingClose}
+        onCancel={() => setPendingClose(null)}
+        onDiscard={() => {
+          if (pendingClose) dispatch({ type: "close-tab", id: pendingClose.id });
+          setPendingClose(null);
+        }}
+        onSave={async () => {
+          if (!pendingClose) return;
+          if (pendingClose.kind !== "markdown") {
+            // Defensive — only markdown tabs are dirty-trackable today.
+            // For any future tab kind, "save" is a no-op and we just close.
+            dispatch({ type: "close-tab", id: pendingClose.id });
+            setPendingClose(null);
+            return;
+          }
+          const tabRef = pendingClose;
+          const content = tabRef.content ?? "";
+          try {
+            await fs.writeTextFile(tabRef.filePath, content);
+            dispatch({
+              type: "update-tab",
+              id: tabRef.id,
+              patch: { savedContent: content },
+            });
+            dispatch({ type: "close-tab", id: tabRef.id });
+          } catch {
+            // Leave the tab open if the write failed so the user can
+            // see the dirty state and try again. The modal still
+            // closes so they can retake action.
+          }
+          setPendingClose(null);
+        }}
       />
     </div>
   );
@@ -79,10 +132,12 @@ function TabStrip({
   tabs,
   activeTabId,
   worktreeId,
+  onCloseTab,
 }: {
   tabs: Tab[];
   activeTabId: string | null;
   worktreeId: string;
+  onCloseTab: (tab: Tab) => void;
 }) {
   const dispatch = useAppDispatch();
 
@@ -131,6 +186,7 @@ function TabStrip({
           tab={tab}
           active={tab.id === activeTabId}
           worktreeId={worktreeId}
+          onCloseTab={onCloseTab}
         />
       ))}
       <button
@@ -169,10 +225,12 @@ function TabButton({
   tab,
   active,
   worktreeId,
+  onCloseTab,
 }: {
   tab: Tab;
   active: boolean;
   worktreeId: string;
+  onCloseTab: (tab: Tab) => void;
 }) {
   const dispatch = useAppDispatch();
   // Hover tooltip exposes the tab's full live summary — the same
@@ -235,7 +293,7 @@ function TabButton({
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          dispatch({ type: "close-tab", id: tab.id });
+          onCloseTab(tab);
         }}
         title="Close tab"
         style={{
@@ -434,25 +492,6 @@ function tabLabel(tab: Tab): string {
   return tab.filePath.split("/").pop() ?? tab.title;
 }
 
-function TabKindGlyph({ tab }: { tab: Tab }) {
-  const dot = (color: string) => (
-    <span
-      aria-hidden
-      style={{
-        width: 6,
-        height: 6,
-        borderRadius: "var(--radius-pill)",
-        backgroundColor: color,
-        display: "inline-block",
-      }}
-    />
-  );
-  if (tab.kind === "terminal") return dot("var(--text-tertiary)");
-  if (tab.kind === "diff") return dot("var(--state-info)");
-  if (tab.kind === "project-settings") return dot("var(--accent)");
-  return dot("var(--state-warning)");
-}
-
 /**
  * The 6px dot painted at the left of each tab. Three visual states
  * drive it for terminal tabs:
@@ -474,9 +513,24 @@ function TabKindGlyph({ tab }: { tab: Tab }) {
  * via the global tokens.css rule, leaving the dot at its initial
  * opacity (0.45) — still visible as "computing", just not animated.
  */
+/**
+ * Tab strip dot. One simple rule:
+ *
+ *   grey by default · red when the tab has unsaved edits
+ *
+ * Only markdown tabs carry a notion of "unsaved" right now — they
+ * read from disk on open, track autosave-vs-current in
+ * `tab.savedContent`, and flip the dot red when those diverge.
+ * Terminal / diff / project-settings tabs don't correspond to an
+ * editable file, so their dots stay grey.
+ *
+ * Agent activity on terminal tabs is conveyed elsewhere now: the
+ * sidebar shows a running-spinner per worktree, and the tab title
+ * displays the CLI name while it's foregrounded. Keeping the tab
+ * dot reserved for one single signal — "this file has unsaved
+ * changes" — makes that signal unambiguous.
+ */
 function TabBadgeDot({ tab }: { tab: Tab }) {
-  if (tab.kind !== "terminal") return <TabKindGlyph tab={tab} />;
-  const badge = tab.badge ?? "idle";
   const base: React.CSSProperties = {
     display: "inline-block",
     width: 6,
@@ -484,29 +538,34 @@ function TabBadgeDot({ tab }: { tab: Tab }) {
     borderRadius: "var(--radius-pill)",
     flexShrink: 0,
   };
-  if (badge === "computing") {
-    return (
-      <span
-        aria-hidden
-        className="rli-tab-dot-computing"
-        style={{ ...base, backgroundColor: "var(--accent)" }}
-      />
-    );
-  }
-  if (badge === "finished-unseen") {
-    return (
-      <span
-        aria-hidden
-        style={{ ...base, backgroundColor: "var(--accent)" }}
-      />
-    );
-  }
+  const dirty = isTabDirty(tab);
   return (
     <span
       aria-hidden
-      style={{ ...base, backgroundColor: "var(--text-tertiary)" }}
+      style={{
+        ...base,
+        backgroundColor: dirty ? "var(--state-error)" : "var(--text-tertiary)",
+      }}
     />
   );
+}
+
+/**
+ * True when a tab represents an editable file whose in-memory
+ * content has diverged from what's saved on disk. Currently only
+ * markdown tabs surface this concept; other tab kinds (terminal,
+ * diff, project-settings) return false. Used by both the dot
+ * renderer and the close-tab confirmation flow.
+ */
+function isTabDirty(tab: Tab): boolean {
+  if (tab.kind !== "markdown") return false;
+  // Treat both null and undefined as "not yet loaded". Persisted
+  // tabs from before the savedContent field existed will have
+  // `undefined` rather than `null`; without this check those tabs
+  // would always read as dirty on app load.
+  if (tab.savedContent == null) return false;
+  if (tab.content == null) return false;
+  return tab.content !== tab.savedContent;
 }
 
 /* ------------------------------------------------------------------
@@ -742,25 +801,82 @@ function MarkdownTabContent({ tab }: { tab: Tab & { kind: "markdown" } }) {
   const dispatch = useAppDispatch();
   const lastReadRef = useRef<string | null>(null);
 
+  // Read from disk on first mount per filepath. On success, content
+  // and savedContent both populate to the on-disk text so the tab
+  // starts in-sync (no red dot just because the file finished
+  // loading). `== null` covers both null and undefined — older
+  // persisted tabs may have savedContent missing entirely.
   useEffect(() => {
-    if (tab.content !== null) return;
+    if (tab.content != null && tab.savedContent != null) return;
     if (lastReadRef.current === tab.filePath) return;
     lastReadRef.current = tab.filePath;
     void fs
       .readTextFile(tab.filePath)
       .then((content) => {
-        dispatch({ type: "update-tab", id: tab.id, patch: { content } });
+        dispatch({
+          type: "update-tab",
+          id: tab.id,
+          patch: { content, savedContent: content },
+        });
       })
       .catch(() => {
         dispatch({
           type: "update-tab",
           id: tab.id,
-          patch: { content: "" },
+          patch: { content: "", savedContent: "" },
         });
       });
+  }, [tab.id, tab.filePath, tab.content, tab.savedContent, dispatch]);
+
+  // Save handler — fires on ⌘S while this tab is active. The previous
+  // autosave-on-every-pause was suspected of causing crashes (lots of
+  // disk IO churn on every keystroke pause, racing with the close
+  // dialog's save path), so we switched to explicit save only. The
+  // dirty dot still tracks `content !== savedContent` so the user has
+  // immediate visual feedback that there's unsaved work.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const cmd = e.metaKey || e.ctrlKey;
+      if (!cmd) return;
+      if (e.key.toLowerCase() !== "s") return;
+      if (e.shiftKey || e.altKey) return;
+      if (tab.content == null) return;
+      e.preventDefault();
+      const content = tab.content;
+      void fs
+        .writeTextFile(tab.filePath, content)
+        .then(() => {
+          dispatch({
+            type: "update-tab",
+            id: tab.id,
+            patch: { savedContent: content },
+          });
+        })
+        .catch(() => {
+          // Swallow — the user can see the dot stays red and retry.
+        });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, [tab.id, tab.filePath, tab.content, dispatch]);
 
-  return (
+  // The tab kind is "markdown" for any file opened from the file
+  // tree, but only actual .md / .mdx files should get the rich
+  // TipTap viewer + Rich/Source toggle. Everything else (.ts, .js,
+  // .py, .rs, …) renders in the plain CodeMirror editor that all
+  // code files have always used.
+  const ext = tab.filePath.split(".").pop()?.toLowerCase() ?? "";
+  const isMarkdownSource = ext === "md" || ext === "mdx";
+
+  return isMarkdownSource ? (
+    <MarkdownView
+      path={tab.filePath}
+      content={tab.content ?? ""}
+      onChange={(content) => {
+        dispatch({ type: "update-tab", id: tab.id, patch: { content } });
+      }}
+    />
+  ) : (
     <Editor
       path={tab.filePath}
       content={tab.content ?? ""}
@@ -768,6 +884,187 @@ function MarkdownTabContent({ tab }: { tab: Tab & { kind: "markdown" } }) {
         dispatch({ type: "update-tab", id: tab.id, patch: { content } });
       }}
     />
+  );
+}
+
+/**
+ * Confirmation modal for closing a tab with unsaved edits. Renders as
+ * a centered card over a dimmed backdrop. Three actions:
+ *
+ *   Save & Close    — writes the current content to disk, then closes
+ *   Discard & Close — closes immediately, in-memory edits are lost
+ *   Cancel          — keeps the tab open, no state change
+ *
+ * Backdrop click and Escape both cancel. Save is the safe default —
+ * it's the primary button and the one auto-focused on mount, so a
+ * stray Enter press never loses work.
+ */
+function CloseTabConfirmDialog({
+  tab,
+  onCancel,
+  onDiscard,
+  onSave,
+}: {
+  tab: Tab | null;
+  onCancel: () => void;
+  onDiscard: () => void;
+  onSave: () => void | Promise<void>;
+}) {
+  // Escape key cancels.
+  useEffect(() => {
+    if (!tab) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [tab, onCancel]);
+
+  if (!tab) return null;
+  const fileName =
+    tab.kind === "markdown" || tab.kind === "diff"
+      ? tab.filePath.split("/").pop() ?? tab.filePath
+      : tab.title || "this tab";
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Unsaved changes"
+      onClick={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 1200,
+        display: "grid",
+        placeItems: "center",
+        backgroundColor: "oklch(0% 0 0 / 0.45)",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "min(420px, calc(100vw - 32px))",
+          padding: "20px 22px 18px",
+          backgroundColor: "var(--surface-2)",
+          border: "1px solid var(--border-strong)",
+          borderRadius: "var(--radius-md)",
+          boxShadow:
+            "0 8px 24px oklch(0% 0 0 / 0.45), 0 1px 2px oklch(0% 0 0 / 0.45)",
+          fontFamily: "var(--font-sans)",
+          color: "var(--text-primary)",
+        }}
+      >
+        <h2
+          style={{
+            margin: 0,
+            marginBottom: 6,
+            fontSize: "var(--text-md)",
+            fontWeight: "var(--weight-semibold)",
+            letterSpacing: "var(--tracking-tight)",
+          }}
+        >
+          Unsaved changes
+        </h2>
+        <p
+          style={{
+            margin: 0,
+            marginBottom: 18,
+            fontSize: "var(--text-sm)",
+            color: "var(--text-secondary)",
+            lineHeight: 1.45,
+          }}
+        >
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              color: "var(--text-primary)",
+            }}
+          >
+            {fileName}
+          </span>{" "}
+          has edits that haven't been saved. What do you want to do?
+        </p>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            gap: 8,
+          }}
+        >
+          <DialogButton variant="ghost" onClick={onCancel}>
+            Cancel
+          </DialogButton>
+          <DialogButton variant="ghost" onClick={onDiscard}>
+            Discard
+          </DialogButton>
+          <DialogButton
+            variant="primary"
+            autoFocus
+            onClick={() => void onSave()}
+          >
+            Save & Close
+          </DialogButton>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DialogButton({
+  children,
+  onClick,
+  variant,
+  autoFocus,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  variant: "primary" | "ghost";
+  autoFocus?: boolean;
+}) {
+  const isPrimary = variant === "primary";
+  return (
+    <button
+      type="button"
+      autoFocus={autoFocus}
+      onClick={onClick}
+      style={{
+        height: 30,
+        padding: "0 14px",
+        fontFamily: "var(--font-sans)",
+        fontSize: "var(--text-sm)",
+        fontWeight: "var(--weight-medium)",
+        color: isPrimary ? "var(--surface-1)" : "var(--text-primary)",
+        backgroundColor: isPrimary ? "var(--accent)" : "transparent",
+        border: isPrimary
+          ? "1px solid var(--accent)"
+          : "1px solid var(--border-default)",
+        borderRadius: "var(--radius-sm)",
+        cursor: "default",
+        transition:
+          "background-color var(--motion-instant) var(--ease-out-quart)," +
+          "border-color var(--motion-instant) var(--ease-out-quart)",
+      }}
+      onMouseEnter={(e) => {
+        if (isPrimary) {
+          e.currentTarget.style.backgroundColor = "var(--accent-hover)";
+        } else {
+          e.currentTarget.style.backgroundColor = "var(--surface-3)";
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (isPrimary) {
+          e.currentTarget.style.backgroundColor = "var(--accent)";
+        } else {
+          e.currentTarget.style.backgroundColor = "transparent";
+        }
+      }}
+    >
+      {children}
+    </button>
   );
 }
 
