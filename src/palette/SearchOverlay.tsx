@@ -3,6 +3,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { backdropVariants, paletteVariants } from "@/design/motion";
 import { search, type SearchHit } from "@/lib/search";
 import { fs } from "@/lib/fs";
+import { FileTypeIcon } from "@/files/FileTypeIcon";
+import { useToast } from "@/primitives/Toast";
 import {
   useActiveProject,
   useActiveWorktree,
@@ -10,22 +12,39 @@ import {
   useAppState,
 } from "@/state/AppState";
 
-type Mode = "text" | "regex" | "structural";
+type Mode = "files" | "text" | "regex";
 
 const MODE_LABELS: Record<Mode, string> = {
+  files: "files",
   text: "literal",
   regex: "regex",
-  structural: "ast-grep",
 };
+
+// Tab cycles through these in order. Files is first because that's
+// what opens by default and what most users will want; literal and
+// regex are progressively-more-precise alternates for power users.
+const MODE_ORDER: Mode[] = ["files", "text", "regex"];
+
+/**
+ * A row in the overlay's result list. Either a `SearchHit` (content
+ * match — has line/column/snippet text) or a `FileHit` (file picker
+ * — path only). Discriminated on `kind` so the row renderer + the
+ * open handler can branch on shape without duck-typing.
+ */
+type ResultItem =
+  | { kind: "file"; path: string }
+  | { kind: "match"; hit: SearchHit };
 
 /**
  * ⌘⇧F search overlay (Task #15).
  *
- * Three modes — text (rg literal), regex (rg regex), structural (ast-grep).
- * Tab cycles modes. Enter on a result jumps to file:line (jump-to-editor
- * wires up when the editor pane is mounted; for now we copy the path).
+ * Three modes — files (rg --files + fuzzy), text (rg literal), regex
+ * (rg regex). Tab cycles. Enter on a result opens the file as a tab
+ * in the active worktree; content matches scroll the editor to the
+ * matched line and flash it.
  *
- * Filtering is debounced 200ms so we don't spawn a new rg per keystroke.
+ * Filtering is debounced 80ms for the file picker and 220ms for
+ * content modes so we don't spawn a new rg per keystroke.
  */
 export function SearchOverlay() {
   const { searchOpen } = useAppState();
@@ -61,7 +80,13 @@ export function SearchOverlay() {
             onClick={(e) => e.stopPropagation()}
             style={{
               width: "min(720px, 90vw)",
-              maxHeight: "70vh",
+              // Fixed height: the modal occupies the same vertical
+              // slot regardless of how many results are in the list.
+              // Previously it collapsed to the input+footer when the
+              // list was empty, which made switching between modes
+              // feel jumpy. The list itself takes flex:1 inside, so
+              // any empty space lands at the bottom of the list area.
+              height: "min(70vh, 600px)",
               backgroundColor: "var(--surface-2)",
               borderRadius: "var(--radius-lg)",
               boxShadow: "var(--shadow-modal)",
@@ -83,30 +108,48 @@ function SearchInner({ onClose }: { onClose: () => void }) {
   const project = useActiveProject();
   const worktree = useActiveWorktree();
   const dispatch = useAppDispatch();
+  const toast = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
-  const [mode, setMode] = useState<Mode>("text");
+  // Default to file-picker mode so the overlay opens to a useful
+  // list immediately — typing filters the list, Tab swaps into the
+  // content-search modes for power users.
+  const [mode, setMode] = useState<Mode>("files");
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<SearchHit[]>([]);
+  const [results, setResults] = useState<ResultItem[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
   const [cursor, setCursor] = useState(0);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+  // Monotonic search counter — every time the (query, mode) pair
+  // changes we increment it, and only the in-flight invocation that
+  // matches the current counter is allowed to write back into
+  // `results`. Without this, fast typing produces a parade of stale
+  // Tauri promises landing out of order and the user sees old hits
+  // overwrite new ones.
+  const searchIdRef = useRef(0);
 
   /**
-   * Open the file behind a result hit as a markdown tab in the active
-   * worktree's main column. The tab loads its content lazily on mount;
-   * we don't read here to keep the overlay snappy.
+   * Open the file behind a result row as a markdown tab in the active
+   * worktree's main column. Both ripgrep and the file picker hand us
+   * paths relative to the project root; we resolve to absolute here
+   * so `fs.readTextFile` (which expects absolute paths) doesn't fail
+   * silently and leave the user staring at a closed overlay with no
+   * new tab. For content hits we also pass `openAt` so the editor
+   * scrolls to the match line and briefly flashes it.
    */
-  const openHit = async (hit: SearchHit) => {
-    if (!worktree) {
+  const openItem = async (item: ResultItem) => {
+    if (!worktree || !project) {
       onClose();
       return;
     }
+    const rawPath = item.kind === "file" ? item.path : item.hit.path;
+    // Strip the `./` rg sometimes emits, then join with project.path
+    // if the path isn't already absolute. macOS absolute paths start
+    // with `/`; nothing else in either rg or fs.readDir output does.
+    const cleaned = rawPath.replace(/^\.\//, "");
+    const absPath = cleaned.startsWith("/")
+      ? cleaned
+      : `${project.path}/${cleaned}`;
     try {
-      const content = await fs.readTextFile(hit.path);
+      const content = await fs.readTextFile(absPath);
       const id = `t_${Date.now().toString(36)}`;
       dispatch({
         type: "open-tab",
@@ -114,52 +157,88 @@ function SearchInner({ onClose }: { onClose: () => void }) {
           id,
           worktreeId: worktree.id,
           kind: "markdown",
-          filePath: hit.path,
+          filePath: absPath,
           mode: "edit",
           content,
           // Search-overlay opens land with content already read from
           // disk, so the tab starts in-sync (savedContent === content).
           savedContent: content,
-          title: hit.path.split("/").pop() ?? hit.path,
-          summary: hit.path,
+          title: absPath.split("/").pop() ?? absPath,
+          summary: absPath,
           summaryUpdatedAt: Date.now(),
+          openAt:
+            item.kind === "match"
+              ? { line: item.hit.line, column: item.hit.column }
+              : undefined,
         },
       });
+      onClose();
     } catch (err) {
-      // best-effort; skip on read failure
-      void err;
+      // Surface the failure instead of silently dropping it — the
+      // common case was the user thinking the search results were
+      // broken when actually the path resolution had bugged out.
+      // Keep the overlay open so the user can pick another row.
+      toast.show({ message: `Couldn't open ${cleaned}: ${err}` });
     }
-    onClose();
   };
 
-  // Debounced search
+  // Debounced search. Every mode shows the file list when the query
+  // is empty so the modal opens with something useful no matter what
+  // the user last left the mode as; once they type, the content
+  // modes (literal / regex) switch to actual content search while
+  // files mode just fuzzy-filters the same list.
   useEffect(() => {
     if (!project) return;
-    if (!query.trim()) {
-      setResults([]);
-      setError(null);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
+
+    const isFileMode = mode === "files";
+    const hasQuery = query.trim().length > 0;
+    // Bump the counter *outside* the timeout so we capture the value
+    // at debounce-schedule time. The timeout callback compares its
+    // captured id against the ref's current value before committing
+    // results — a newer keystroke will have bumped the ref past it,
+    // and this callback's writes get dropped.
+    const myId = ++searchIdRef.current;
     setError(null);
     const t = window.setTimeout(async () => {
       try {
-        const hits =
-          mode === "structural"
-            ? await search.astGrep(project.path, query)
-            : await search.rg(project.path, query, mode === "regex");
-        setResults(hits);
+        let next: ResultItem[];
+        if (isFileMode || !hasQuery) {
+          // Files-as-default: drives both `files` mode and the
+          // empty-query state of every content mode. No query → list
+          // every file (capped at 200); with a query in files mode →
+          // fuzzy-filter the same path set server-side.
+          const paths = await search.files(
+            project.path,
+            isFileMode ? query : "",
+            200,
+          );
+          next = paths.map((path) => ({ kind: "file", path }));
+        } else {
+          const hits = await search.rg(project.path, query, mode === "regex");
+          next = hits.map((hit) => ({ kind: "match", hit }));
+        }
+        // Drop the response if a newer search has been scheduled
+        // while this one was in flight. Without this guard, a slow
+        // regex finishing after a faster successor would overwrite
+        // the user's current results.
+        if (myId !== searchIdRef.current) return;
+        setResults(next);
         setCursor(0);
       } catch (e) {
+        if (myId !== searchIdRef.current) return;
         setError(String(e));
         setResults([]);
-      } finally {
-        setLoading(false);
       }
-    }, 200);
+    }, isFileMode || !hasQuery ? 80 : 220);
     return () => window.clearTimeout(t);
   }, [project, query, mode]);
+
+  const cycleMode = () => {
+    setMode((m) => {
+      const idx = MODE_ORDER.indexOf(m);
+      return MODE_ORDER[(idx + 1) % MODE_ORDER.length];
+    });
+  };
 
   const handleKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "ArrowDown") {
@@ -170,23 +249,21 @@ function SearchInner({ onClose }: { onClose: () => void }) {
       setCursor((c) => Math.max(c - 1, 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const hit = results[cursor];
-      if (hit) void openHit(hit);
+      const item = results[cursor];
+      if (item) void openItem(item);
     } else if (e.key === "Escape") {
       e.preventDefault();
       onClose();
     } else if (e.key === "Tab") {
       e.preventDefault();
-      setMode((m) =>
-        m === "text" ? "regex" : m === "regex" ? "structural" : "text",
-      );
+      cycleMode();
     }
   };
 
   const placeholder = useMemo(() => {
+    if (mode === "files") return "Search files…";
     if (mode === "text") return "Search literal text…";
-    if (mode === "regex") return "Search regex…";
-    return "Search structural pattern (ast-grep)…";
+    return "Search regex…";
   }, [mode]);
 
   return (
@@ -218,12 +295,7 @@ function SearchInner({ onClose }: { onClose: () => void }) {
             color: "var(--text-primary)",
           }}
         />
-        <ModePill mode={mode} onCycle={() =>
-          setMode((m) =>
-            m === "text" ? "regex" : m === "regex" ? "structural" : "text",
-          )
-        }
-        />
+        <ModePill mode={mode} onCycle={cycleMode} />
       </div>
 
       <div
@@ -235,23 +307,51 @@ function SearchInner({ onClose }: { onClose: () => void }) {
           padding: "var(--space-1) 0",
         }}
       >
-        {loading && <Hint label="searching…" />}
+        {/* No `searching…` overlay — it floated on top of the previous
+            result set and made every keystroke feel like a flicker.
+            The cancellation-id guard above keeps stale searches from
+            clobbering newer ones, so we can safely leave the prior
+            results in place until the next batch arrives. */}
         {error && <Hint label={error} tone="error" />}
-        {!loading && !error && query.trim() && results.length === 0 && (
-          <Hint label="no matches" />
+        {!error && results.length === 0 && (
+          <Hint
+            label={
+              query.trim()
+                ? mode === "files"
+                  ? "no matching files"
+                  : "no matches"
+                : "no files in this project"
+            }
+          />
         )}
-        {results.map((hit, i) => (
+        {results.map((item, i) => (
           <ResultRow
-            key={`${hit.path}:${hit.line}:${hit.column}:${i}`}
-            hit={hit}
+            key={
+              item.kind === "file"
+                ? `file:${item.path}:${i}`
+                : `match:${item.hit.path}:${item.hit.line}:${item.hit.column}:${i}`
+            }
+            item={item}
             active={i === cursor}
-            onClick={() => void openHit(hit)}
+            onClick={() => void openItem(item)}
             onMouseEnter={() => setCursor(i)}
           />
         ))}
       </div>
 
-      <Footer mode={mode} count={results.length} />
+      <Footer
+        mode={mode}
+        count={results.length}
+        // Noun follows what's actually in the list, not the mode pill —
+        // an empty-query literal mode still shows files, and saying
+        // "0 matches · literal" while a file list is on screen
+        // would be lying about what's there.
+        countNoun={
+          results.length > 0 && results[0].kind === "match"
+            ? "match"
+            : "file"
+        }
+      />
     </>
   );
 }
@@ -281,16 +381,25 @@ function ModePill({ mode, onCycle }: { mode: Mode; onCycle: () => void }) {
 }
 
 function ResultRow({
-  hit,
+  item,
   active,
   onClick,
   onMouseEnter,
 }: {
-  hit: SearchHit;
+  item: ResultItem;
   active: boolean;
   onClick: () => void;
   onMouseEnter: () => void;
 }) {
+  // The file-type icon uses the same library + sizing as the right-
+  // panel file tree, so a `.ts` hit in the overlay reads as the same
+  // glyph the user sees in the tree — no visual stutter when they
+  // jump between the two surfaces.
+  const path = item.kind === "file" ? item.path : item.hit.path;
+  const filename = path.split("/").pop() ?? path;
+  const dirname = path.includes("/")
+    ? path.slice(0, path.lastIndexOf("/"))
+    : "";
   return (
     <div
       role="option"
@@ -298,48 +407,114 @@ function ResultRow({
       onClick={onClick}
       onMouseEnter={onMouseEnter}
       style={{
-        padding: "var(--space-1-5) var(--space-4)",
+        display: "flex",
+        alignItems: item.kind === "file" ? "center" : "flex-start",
+        gap: "var(--space-2)",
+        padding:
+          item.kind === "file"
+            ? "var(--space-1) var(--space-4)"
+            : "var(--space-1-5) var(--space-4)",
         backgroundColor: active ? "var(--surface-3)" : "transparent",
         cursor: "default",
       }}
     >
-      <div
+      <span
+        aria-hidden
         style={{
-          display: "flex",
-          alignItems: "baseline",
-          gap: "var(--space-2)",
-          fontFamily: "var(--font-mono)",
-          fontSize: "var(--text-2xs)",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 16,
+          height: 16,
+          flexShrink: 0,
+          marginTop: item.kind === "file" ? 0 : 2,
         }}
       >
-        <span
+        <FileTypeIcon name={filename} isDir={false} size={14} />
+      </span>
+      {item.kind === "file" ? (
+        // File-picker row: filename prominent, dirname trailing in
+        // tertiary so the user can still see which copy of `index.ts`
+        // they're picking from. One line per file — there's no
+        // snippet to render.
+        <div
           style={{
-            color: "var(--text-secondary)",
+            flex: 1,
+            minWidth: 0,
+            display: "flex",
+            alignItems: "baseline",
+            gap: "var(--space-2)",
             overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            maxWidth: "60%",
           }}
         >
-          {hit.path}
-        </span>
-        <span className="tabular" style={{ color: "var(--text-tertiary)" }}>
-          {hit.line}:{hit.column}
-        </span>
-      </div>
-      <div
-        style={{
-          fontFamily: "var(--font-mono)",
-          fontSize: "var(--text-sm)",
-          fontVariantLigatures: "none",
-          color: "var(--text-primary)",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {hit.text}
-      </div>
+          <span
+            style={{
+              fontFamily: "var(--font-sans)",
+              fontSize: "var(--text-sm)",
+              color: "var(--text-primary)",
+              fontWeight: "var(--weight-medium)",
+              flexShrink: 0,
+            }}
+          >
+            {filename}
+          </span>
+          {dirname && (
+            <span
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "var(--text-2xs)",
+                color: "var(--text-tertiary)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                minWidth: 0,
+              }}
+            >
+              {dirname}
+            </span>
+          )}
+        </div>
+      ) : (
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "baseline",
+              gap: "var(--space-2)",
+              fontFamily: "var(--font-mono)",
+              fontSize: "var(--text-2xs)",
+            }}
+          >
+            <span
+              style={{
+                color: "var(--text-secondary)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                maxWidth: "60%",
+              }}
+            >
+              {item.hit.path}
+            </span>
+            <span className="tabular" style={{ color: "var(--text-tertiary)" }}>
+              {item.hit.line}:{item.hit.column}
+            </span>
+          </div>
+          <div
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: "var(--text-sm)",
+              fontVariantLigatures: "none",
+              color: "var(--text-primary)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {item.hit.text}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -367,7 +542,15 @@ function Hint({
   );
 }
 
-function Footer({ mode, count }: { mode: Mode; count: number }) {
+function Footer({
+  mode,
+  count,
+  countNoun,
+}: {
+  mode: Mode;
+  count: number;
+  countNoun: "file" | "match";
+}) {
   return (
     <div
       style={{
@@ -390,7 +573,15 @@ function Footer({ mode, count }: { mode: Mode; count: number }) {
       </span>
       <span style={{ display: "inline-flex", alignItems: "center", gap: "var(--space-2)" }}>
         <span className="tabular">
-          {count} {count === 1 ? "match" : "matches"} · {MODE_LABELS[mode]}
+          {count}{" "}
+          {countNoun === "file"
+            ? count === 1
+              ? "file"
+              : "files"
+            : count === 1
+              ? "match"
+              : "matches"}{" "}
+          · {MODE_LABELS[mode]}
         </span>
         <span
           style={{

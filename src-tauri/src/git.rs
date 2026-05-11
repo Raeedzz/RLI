@@ -201,6 +201,60 @@ pub async fn git_diff(
     run(&cwd, &args).await
 }
 
+/// Aggregate diff stats vs HEAD (working tree + index). Powers the
+/// "+N -M" indicator in the window chrome — one HEAD-relative summary
+/// across every uncommitted change in the worktree.
+#[derive(Debug, serde::Serialize)]
+pub struct DiffStat {
+    pub files: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
+#[tauri::command]
+pub async fn git_diff_all(cwd: String) -> Result<String, String> {
+    // HEAD-relative so staged + unstaged collapse into one stream.
+    // The frontend parses `diff --git` boundaries to slice the
+    // result into per-file sections for the all-changes view.
+    run(&cwd, &["diff", "HEAD", "--no-color"]).await
+}
+
+#[tauri::command]
+pub async fn git_diff_stat(cwd: String) -> Result<DiffStat, String> {
+    // `git diff HEAD --shortstat` collapses every uncommitted change
+    // (staged + unstaged) into a single summary line:
+    //   ` 5 files changed, 18 insertions(+), 3 deletions(-)`
+    // Some axes can be absent (e.g., adds-only commits drop the
+    // deletions clause); we tolerate any combination.
+    let out = run(&cwd, &["diff", "HEAD", "--shortstat"]).await?;
+    let mut files = 0u32;
+    let mut insertions = 0u32;
+    let mut deletions = 0u32;
+    for tok in out.split(',') {
+        let t = tok.trim();
+        // Pluck the leading integer of each phrase, then key off the
+        // phrase's lexical content so we don't depend on hyphenation
+        // quirks ("file changed" vs "files changed").
+        let num: Option<u32> = t
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse().ok());
+        let Some(n) = num else { continue };
+        if t.contains("file") {
+            files = n;
+        } else if t.contains("insertion") {
+            insertions = n;
+        } else if t.contains("deletion") {
+            deletions = n;
+        }
+    }
+    Ok(DiffStat {
+        files,
+        insertions,
+        deletions,
+    })
+}
+
 /* ------------------------------------------------------------------
    Stage / commit / push
    ------------------------------------------------------------------ */

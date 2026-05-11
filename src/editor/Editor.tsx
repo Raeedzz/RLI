@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import {
   EditorState,
+  StateEffect,
+  StateField,
   type Extension,
 } from "@codemirror/state";
 import {
+  Decoration,
+  type DecorationSet,
   EditorView,
   highlightActiveLine,
   highlightActiveLineGutter,
@@ -81,7 +85,48 @@ interface Props {
   content: string;
   /** Called when the user edits. */
   onChange?: (content: string) => void;
+  /**
+   * One-shot navigation target. When set, the editor scrolls to
+   * `(line, column)` (1-based) once content is loaded, drops the
+   * cursor at that position, and briefly flashes the line. After
+   * navigation it self-clears — pass the same value back in on a
+   * remount and it'll re-fire; pass `undefined` and it stays put.
+   */
+  openAt?: { line: number; column: number };
 }
+
+// Flash decoration plumbing — drives the `.cm-editor-flash` line
+// background animation in tokens.css. Two effects + a single-line
+// decoration set: one to add the highlight, one to clear it after
+// the animation finishes (so the class doesn't linger and prevent a
+// future flash from re-triggering its keyframe).
+const setFlashLine = StateEffect.define<number>();
+const clearFlashLine = StateEffect.define<void>();
+
+const flashLineField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    deco = deco.map(tr.changes);
+    for (const effect of tr.effects) {
+      if (effect.is(setFlashLine)) {
+        const lineNum = effect.value;
+        if (lineNum >= 1 && lineNum <= tr.state.doc.lines) {
+          const line = tr.state.doc.line(lineNum);
+          return Decoration.set([
+            Decoration.line({
+              attributes: { class: "cm-editor-flash" },
+            }).range(line.from),
+          ]);
+        }
+      }
+      if (effect.is(clearFlashLine)) {
+        return Decoration.none;
+      }
+    }
+    return deco;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
 
 interface AskState {
   selection: string;
@@ -111,7 +156,7 @@ interface AskHintState {
  * Languages auto-detected from file extension. v1 ships JS/TS + Rust;
  * adding more is one import each.
  */
-export function Editor({ path, content, onChange }: Props) {
+export function Editor({ path, content, onChange, openAt }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const [ask, setAsk] = useState<AskState | null>(null);
@@ -206,6 +251,7 @@ export function Editor({ path, content, onChange }: Props) {
       }),
       ...(langExt ? [langExt] : []),
       ...cm6ThemeExtension,
+      flashLineField,
     ];
 
     const view = new EditorView({
@@ -232,6 +278,55 @@ export function Editor({ path, content, onChange }: Props) {
       changes: { from: 0, to: view.state.doc.length, insert: content },
     });
   }, [content]);
+
+  // Handle one-shot search jumps. Two-phase because the view mounts
+  // with empty content on first render, then `content` arrives async
+  // from the disk read in MarkdownTabContent. The navigation can only
+  // be applied once the doc actually has lines to scroll to, so we
+  // watch `content` along with `openAt` and trip the consumed-ref
+  // once the doc is non-empty. The MarkdownTabContent layer dispatches
+  // a clear of `tab.openAt` on its own mount, so a later tab-switch-
+  // and-back doesn't re-fire — `openAt` will be undefined the second
+  // time around.
+  const consumedOpenAtRef = useRef(false);
+  useEffect(() => {
+    if (!openAt) return;
+    if (consumedOpenAtRef.current) return;
+    const view = viewRef.current;
+    if (!view) return;
+    if (view.state.doc.length === 0) return;
+
+    consumedOpenAtRef.current = true;
+
+    const totalLines = view.state.doc.lines;
+    const line = Math.min(Math.max(1, openAt.line), totalLines);
+    const lineInfo = view.state.doc.line(line);
+    const col = Math.min(Math.max(0, openAt.column - 1), lineInfo.length);
+    const pos = lineInfo.from + col;
+
+    view.dispatch({
+      selection: { anchor: pos },
+      // `scrollIntoView` as an effect (not a property) is what does
+      // the actual scroll inside CM6. We center vertically so the
+      // matched line lands in the middle of the viewport, not at
+      // the edge where it'd be easy to miss.
+      effects: [
+        EditorView.scrollIntoView(pos, { y: "center" }),
+        setFlashLine.of(line),
+      ],
+    });
+    view.focus();
+
+    // Clear the flash decoration after the keyframe animation lands
+    // its end state. Keeping the class on the line past that point
+    // would prevent a future jump on the same line from re-firing
+    // the animation (browsers don't replay completed CSS animations
+    // unless the className changes).
+    const timer = window.setTimeout(() => {
+      view.dispatch({ effects: clearFlashLine.of() });
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [content, openAt]);
 
   return (
     <div

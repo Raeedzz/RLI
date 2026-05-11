@@ -341,3 +341,18 @@ body { font-variant-numeric: tabular-nums; }
 .rli-tab-dot-computing {
   animation: rli-tab-dot-pulse 1.4s ease-in-out infinite;
 }
+
+/* Search-jump flash. Applied as a line decoration by the editor when
+   the user opens a search result — the matched row tints to the
+   accent for a moment, then fades back to transparent. The accent is
+   slightly translucent so the line text stays readable through it.
+   1.4s feels long enough to "register" without overstaying its
+   welcome; ease-out lets the tint dissipate rather than pulse. */
+@keyframes rli-editor-flash {
+  0%   { background-color: oklch(72% 0.13 220 / 0.32); }
+  60%  { background-color: oklch(72% 0.13 220 / 0.18); }
+  100% { background-color: transparent; }
+}
+.cm-editor-flash {
+  animation: rli-editor-flash 1.4s ease-out forwards;
+}

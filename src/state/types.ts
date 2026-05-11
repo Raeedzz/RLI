@@ -275,6 +275,17 @@ export interface MarkdownTab extends TabBase {
    * read from disk.
    */
   savedContent: string | null;
+  /**
+   * One-shot navigation target. When set (e.g. by the search overlay
+   * opening a hit), the embedded editor scrolls to (line, column) on
+   * mount, selects the line, and briefly flashes it so the user
+   * can spot the match. Both axes are 1-based to match rg's output
+   * format and what people read in error messages. Consumed exactly
+   * once — the reducer's `clear-tab-open-at` action strips it after
+   * the editor reports the navigation done, so subsequent re-mounts
+   * (tab-switch then back) don't re-jump.
+   */
+  openAt?: { line: number; column: number };
 }
 
 /** Tab variant rendering the per-repo Repository Settings page. */
@@ -283,7 +294,23 @@ export interface ProjectSettingsTab extends TabBase {
   projectId: ProjectId;
 }
 
-export type Tab = TerminalTab | DiffTab | MarkdownTab | ProjectSettingsTab;
+/**
+ * Tab variant rendering every uncommitted file's diff as one
+ * scrollable view. Opened from the chrome's `+N -M` diff trigger,
+ * dismissed like any other tab. No per-tab state beyond what `TabBase`
+ * carries — the view reads `git status` + per-file `git diff` live,
+ * so a fresh edit just re-renders.
+ */
+export interface AllChangesTab extends TabBase {
+  kind: "all-changes";
+}
+
+export type Tab =
+  | TerminalTab
+  | DiffTab
+  | MarkdownTab
+  | ProjectSettingsTab
+  | AllChangesTab;
 
 /**
  * Which page the Settings overlay shows. `general` = global RLI

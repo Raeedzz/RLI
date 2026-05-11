@@ -10,7 +10,7 @@ interface Props {
   onClose: () => void;
 }
 
-interface DiffLine {
+export interface DiffLine {
   kind: "header" | "hunk" | "context" | "add" | "remove";
   text: string;
   /** Old (left) line number for context+remove lines. */
@@ -235,7 +235,7 @@ export function DiffView({ projectPath, filePath, staged, onClose }: Props) {
   );
 }
 
-function DiffBody({ lines }: { lines: DiffLine[] }) {
+export function DiffBody({ lines }: { lines: DiffLine[] }) {
   return (
     <table
       style={{
@@ -359,7 +359,7 @@ function Empty({ label }: { label: string }) {
  * hunks. Header lines (`diff --git`, `index`, `+++`, `---`) get
  * collapsed under a single "header" kind.
  */
-function parseUnifiedDiff(raw: string): DiffLine[] {
+export function parseUnifiedDiff(raw: string): DiffLine[] {
   const out: DiffLine[] = [];
   let oldLine = 0;
   let newLine = 0;

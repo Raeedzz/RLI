@@ -17,6 +17,7 @@ import type { Tab, TerminalTab, Worktree } from "@/state/types";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { BlockTerminal } from "@/terminal/BlockTerminal";
 import { DiffView } from "@/git/DiffView";
+import { AllChangesView } from "@/git/AllChangesView";
 import { Editor } from "@/editor/Editor";
 import { MarkdownView } from "@/editor/MarkdownView";
 import { fs } from "@/lib/fs";
@@ -382,6 +383,9 @@ function fullTabSummary(tab: Tab): string | null {
   if (tab.kind === "project-settings") {
     return trim(tab.title) || "Repository settings";
   }
+  if (tab.kind === "all-changes") {
+    return trim(tab.title) || "All changes";
+  }
   return null;
 }
 
@@ -457,6 +461,7 @@ function tabSummary(tab: Tab): string {
   if (tab.kind === "diff" || tab.kind === "markdown") {
     return trim(tab.filePath);
   }
+  if (tab.kind === "all-changes") return "";
   return trim(tab.summary);
 }
 
@@ -487,6 +492,9 @@ function tabLabel(tab: Tab): string {
   }
   if (tab.kind === "project-settings") {
     return tab.title || "Settings";
+  }
+  if (tab.kind === "all-changes") {
+    return tab.title || "Changes";
   }
   // diff / markdown — show the filename basename.
   return tab.filePath.split("/").pop() ?? tab.title;
@@ -618,6 +626,8 @@ function TabContent({
             filePath={tab.filePath}
             staged={tab.staged}
           />
+        ) : tab.kind === "all-changes" ? (
+          <AllChangesView key={tab.id} projectPath={projectPath} />
         ) : tab.kind === "project-settings" ? (
           <RepositorySettingsView key={tab.id} projectId={tab.projectId} />
         ) : (
@@ -800,6 +810,24 @@ function DiffTabContent({
 function MarkdownTabContent({ tab }: { tab: Tab & { kind: "markdown" } }) {
   const dispatch = useAppDispatch();
   const lastReadRef = useRef<string | null>(null);
+  // Capture the search-overlay's openAt exactly once, on first mount.
+  // After capture we dispatch a patch to clear it from the tab state
+  // so a later tab-switch-and-back doesn't re-jump the user away
+  // from wherever they've scrolled to. The captured ref is what gets
+  // forwarded to the editor.
+  const initialOpenAtRef = useRef<{ line: number; column: number } | undefined>(
+    tab.openAt,
+  );
+  useEffect(() => {
+    if (tab.openAt) {
+      dispatch({ type: "update-tab", id: tab.id, patch: { openAt: undefined } });
+    }
+    // Empty deps: this is a one-shot mount-time clear. The captured
+    // value lives in initialOpenAtRef and is forwarded to the editor
+    // below, so we don't need to react to subsequent openAt changes
+    // here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Read from disk on first mount per filepath. On success, content
   // and savedContent both populate to the on-disk text so the tab
@@ -883,6 +911,7 @@ function MarkdownTabContent({ tab }: { tab: Tab & { kind: "markdown" } }) {
       onChange={(content) => {
         dispatch({ type: "update-tab", id: tab.id, patch: { content } });
       }}
+      openAt={initialOpenAtRef.current}
     />
   );
 }

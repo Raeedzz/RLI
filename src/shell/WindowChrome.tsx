@@ -22,8 +22,17 @@ import { useToast } from "@/primitives/Toast";
 import { projectSettings, type Tab, type Worktree } from "@/state/types";
 
 const TRAFFIC_LIGHT_GUTTER = 78;
-const HEIGHT = 28;
+// 36px matches the right panel's tab bar exactly, so the two
+// strips read as one continuous chrome plane when laid out
+// side-by-side. A 28px button sits centered with 4px of breathing
+// room above/below — tight but consistent across both surfaces.
+const HEIGHT = 36;
 const PR_POLL_MS = 12_000;
+// Diff-stat polls the worktree HEAD for additions/deletions every
+// 8s — same cadence ballpark as the changes panel, so the chrome
+// counter and the right-panel badge stay in lockstep without doubling
+// up on git work.
+const DIFF_STAT_POLL_MS = 8_000;
 
 interface PrStatus {
   exists: boolean;
@@ -88,12 +97,17 @@ export function WindowChrome() {
         style={{
           position: "absolute",
           top: "50%",
-          right: "var(--space-2)",
+          // var(--space-3) (12px) instead of space-2 — pulls the
+          // button cluster off the right edge so it has visible
+          // padding against the window border, not flush.
+          right: "var(--space-3)",
           transform: "translateY(-50%)",
           display: "flex",
           alignItems: "center",
+          gap: 8,
         }}
       >
+        <DiffTrigger worktree={worktree} />
         <BranchActionButton worktree={worktree} />
       </div>
     </div>
@@ -516,12 +530,11 @@ function ActionButton({
       aria-haspopup={ariaExpanded !== undefined ? "menu" : undefined}
       aria-expanded={ariaExpanded}
       style={{
-        height: 22,
+        height: 28,
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
-        padding: "0 10px",
-        margin: "0 2px",
+        padding: "0 12px",
         backgroundColor: disabled ? "var(--surface-1)" : intentBg(intent),
         color: disabled ? "var(--text-disabled)" : intentText(intent),
         border: `1px solid ${
@@ -529,7 +542,7 @@ function ActionButton({
         }`,
         borderRadius: "var(--radius-sm)",
         fontFamily: "var(--font-sans)",
-        fontSize: "var(--text-2xs)",
+        fontSize: "var(--text-xs)",
         fontWeight: "var(--weight-semibold)",
         letterSpacing: "var(--tracking-tight)",
         cursor: disabled ? "default" : "pointer",
@@ -546,7 +559,7 @@ function ActionButton({
         e.currentTarget.style.backgroundColor = intentBg(intent);
       }}
     >
-      <IconPullRequest size={12} />
+      <IconPullRequest size={13} />
       <span>{label}</span>
     </button>
   );
@@ -595,6 +608,13 @@ function stringToUtf8Bytes(s: string): number[] {
   return Array.from(enc.encode(s));
 }
 
+/**
+ * Centered search summoner. Pill-shaped tall input styled after the
+ * search modal — prominent leading magnifier, dark surface that pops
+ * against `--surface-2` chrome, generous internal padding. Click or
+ * ⌘K opens the real palette overlay; the chrome version is the
+ * read-only handoff that signals "search lives here, always."
+ */
 function SearchTrigger({ onOpen }: { onOpen: () => void }) {
   return (
     <button
@@ -604,26 +624,38 @@ function SearchTrigger({ onOpen }: { onOpen: () => void }) {
       title="Search  ⌘K"
       aria-label="Search"
       style={{
-        width: 360,
+        // Wider than the previous 360 to match the new bar's heft;
+        // 50vw cap keeps it from running into the right-side buttons
+        // on narrow windows.
+        width: 460,
         maxWidth: "50vw",
-        height: 22,
+        // 28px matches the side buttons so the chrome reads as a
+        // single horizontal rail of equal-height controls — search
+        // sitting at a different height from the action buttons
+        // breaks that.
+        height: 28,
         display: "inline-flex",
         alignItems: "center",
-        gap: "var(--space-2)",
-        padding: "0 10px",
-        backgroundColor: "var(--surface-1)",
-        border: "var(--border-1)",
-        borderRadius: "var(--radius-sm)",
+        gap: 10,
+        padding: "0 14px",
+        // Dark surface (one step darker than the bar) with a soft
+        // 1px hairline. Reads as an inset well at rest, lifts on
+        // hover. Matches the search-modal look.
+        backgroundColor: "var(--surface-0)",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: "var(--radius-md)",
         cursor: "text",
         textAlign: "left",
         transition:
-          "background-color var(--motion-instant) var(--ease-out-quart), border-color var(--motion-instant) var(--ease-out-quart)",
+          "background-color var(--motion-fast) var(--ease-out-quart), border-color var(--motion-fast) var(--ease-out-quart)",
       }}
       onMouseEnter={(e) => {
-        e.currentTarget.style.backgroundColor = "var(--surface-0)";
+        e.currentTarget.style.backgroundColor = "var(--surface-1)";
+        e.currentTarget.style.borderColor = "var(--border-default)";
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.backgroundColor = "var(--surface-1)";
+        e.currentTarget.style.backgroundColor = "var(--surface-0)";
+        e.currentTarget.style.borderColor = "var(--border-subtle)";
       }}
     >
       <span
@@ -634,7 +666,7 @@ function SearchTrigger({ onOpen }: { onOpen: () => void }) {
           flexShrink: 0,
         }}
       >
-        <SearchIcon size={13} />
+        <SearchIcon size={15} />
       </span>
       <span
         style={{
@@ -644,12 +676,12 @@ function SearchTrigger({ onOpen }: { onOpen: () => void }) {
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
           fontFamily: "var(--font-sans)",
-          fontSize: "var(--text-xs)",
+          fontSize: "var(--text-sm)",
           color: "var(--text-tertiary)",
           letterSpacing: "var(--tracking-tight)",
         }}
       >
-        Search
+        Search files, sessions, agents…
       </span>
       <span
         style={{
@@ -660,6 +692,138 @@ function SearchTrigger({ onOpen }: { onOpen: () => void }) {
         }}
       >
         ⌘K
+      </span>
+    </button>
+  );
+}
+
+/**
+ * `+N -M` button to the left of the PR action. Polls `git diff
+ * --shortstat HEAD` so the counts include every uncommitted change
+ * (staged + unstaged) in one number, matching what the
+ * `AllChangesView` will show when clicked. Stays hidden when there
+ * are no changes — there's nothing to diff against, so the slot just
+ * collapses out of the header rather than sitting at `+0 -0` and
+ * adding noise.
+ */
+function DiffTrigger({ worktree }: { worktree: Worktree | null }) {
+  const dispatch = useAppDispatch();
+  const state = useAppState();
+  const [stat, setStat] = useState<{
+    files: number;
+    insertions: number;
+    deletions: number;
+  } | null>(null);
+  const path = worktree?.path ?? "";
+
+  useEffect(() => {
+    if (!worktree) {
+      setStat(null);
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const s = await invoke<{
+          files: number;
+          insertions: number;
+          deletions: number;
+        }>("git_diff_stat", { cwd: path });
+        if (!cancelled) setStat(s);
+      } catch {
+        if (!cancelled) setStat(null);
+      }
+    };
+    void poll();
+    const t = window.setInterval(poll, DIFF_STAT_POLL_MS);
+    const onRefresh = (e: Event) => {
+      const detail = (e as CustomEvent<{ cwd?: string }>).detail;
+      if (!detail?.cwd || detail.cwd === path) void poll();
+    };
+    window.addEventListener("rli-git-refresh", onRefresh);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+      window.removeEventListener("rli-git-refresh", onRefresh);
+    };
+  }, [worktree, path]);
+
+  if (!worktree || !stat || stat.files === 0) return null;
+
+  const openChanges = () => {
+    // Reuse an open "all-changes" tab for this worktree if there is
+    // one — opening the diff trigger repeatedly should select the
+    // existing tab, not stack new ones.
+    const existing = worktree.tabIds.find((id) => {
+      const t = state.tabs[id];
+      return t && t.kind === "all-changes";
+    });
+    if (existing) {
+      dispatch({ type: "select-tab", worktreeId: worktree.id, id: existing });
+      return;
+    }
+    const id = `t_changes_${Date.now().toString(36)}`;
+    dispatch({
+      type: "open-tab",
+      tab: {
+        id,
+        worktreeId: worktree.id,
+        kind: "all-changes",
+        title: "Changes",
+        summary: "",
+        summaryUpdatedAt: Date.now(),
+      },
+    });
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={openChanges}
+      data-tauri-drag-region={false}
+      title={`Review ${stat.files} file${stat.files === 1 ? "" : "s"} · +${stat.insertions} −${stat.deletions}`}
+      aria-label="Review all changes"
+      style={{
+        height: 28,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "0 12px",
+        backgroundColor: "var(--surface-1)",
+        border: "1px solid var(--border-default)",
+        borderRadius: "var(--radius-sm)",
+        cursor: "pointer",
+        flexShrink: 0,
+        fontFamily: "var(--font-mono)",
+        fontSize: "var(--text-xs)",
+        fontWeight: "var(--weight-semibold)",
+        letterSpacing: 0,
+        transition:
+          "background-color var(--motion-instant) var(--ease-out-quart), border-color var(--motion-instant) var(--ease-out-quart)",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.backgroundColor = "var(--surface-2)";
+        e.currentTarget.style.borderColor = "var(--border-strong)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.backgroundColor = "var(--surface-1)";
+        e.currentTarget.style.borderColor = "var(--border-default)";
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          color: "var(--text-tertiary)",
+          fontSize: "var(--text-2xs)",
+        }}
+      >
+        ±
+      </span>
+      <span className="tabular" style={{ color: "var(--diff-add-fg)" }}>
+        +{stat.insertions}
+      </span>
+      <span className="tabular" style={{ color: "var(--diff-remove-fg)" }}>
+        −{stat.deletions}
       </span>
     </button>
   );

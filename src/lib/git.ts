@@ -21,6 +21,12 @@ export interface StatusResult {
   entries: StatusEntry[];
 }
 
+export interface DiffStat {
+  files: number;
+  insertions: number;
+  deletions: number;
+}
+
 export interface LogEntry {
   hash: string;
   author: string;
@@ -37,6 +43,8 @@ export const git = {
   status: (cwd: string) => invoke<StatusResult>("git_status", { cwd }),
   diff: (cwd: string, path?: string, staged = false) =>
     invoke<string>("git_diff", { cwd, path, staged }),
+  diffAll: (cwd: string) => invoke<string>("git_diff_all", { cwd }),
+  diffStat: (cwd: string) => invoke<DiffStat>("git_diff_stat", { cwd }),
   stage: (cwd: string, paths: string[]) =>
     invoke<void>("git_stage", { cwd, paths }),
   unstage: (cwd: string, paths: string[]) =>

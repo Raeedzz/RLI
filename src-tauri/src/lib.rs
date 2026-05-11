@@ -1,7 +1,7 @@
 /// GLI Tauri entry point.
 ///
 /// Plugin set is the minimum needed for v1 features:
-///   - shell:   spawn `git`, `rg`, `ast-grep`, etc. from the frontend
+///   - shell:   spawn `git`, `rg`, etc. from the frontend
 ///   - fs:      read project files, write per-session config
 ///   - dialog:  "Open Folder" picker
 ///   - os:      platform queries (we're macOS-only v1, but used for paths)
@@ -70,6 +70,8 @@ pub fn run() {
             // Git (Task #8)
             git::git_status,
             git::git_diff,
+            git::git_diff_all,
+            git::git_diff_stat,
             git::git_stage,
             git::git_unstage,
             git::git_discard,
@@ -102,7 +104,7 @@ pub fn run() {
             connections::connections_scan,
             // Search (Task #15)
             search::search_rg,
-            search::search_ast_grep,
+            search::search_files,
             // Filesystem
             fs::fs_read_dir,
             fs::fs_read_text_file,
