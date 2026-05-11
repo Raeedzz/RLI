@@ -1073,6 +1073,15 @@ pub fn term_resize(
         sessions.get(&id).cloned().ok_or("unknown term session")?
     };
     let mut s = arc.lock().map_err(|e| e.to_string())?;
+    // No-op if the dimensions haven't actually changed. Every call to
+    // `pty_master.resize` sends a SIGWINCH to the child, and TUI agents
+    // (claude, codex, …) redraw on every SIGWINCH — so duplicate
+    // resizes (e.g. the frontend remounting a tab and re-running its
+    // ResizeObserver) cause visible UI flicker mid-session. This guard
+    // also avoids the alacritty grid reflow + tab-state churn.
+    if s.rows == rows && s.cols == cols {
+        return Ok(());
+    }
     s.cols = cols;
     s.rows = rows;
     s.term.resize(Dims {

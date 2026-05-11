@@ -215,7 +215,7 @@
   --right-width:      372px;   /* files / changes / checks / memory + secondary terminal */
 
   --rail-width:         48px;
-  --tab-height:         44px;   /* taller — accommodates 2-line tab (name + summary) */
+  --tab-height:         40px;   /* 2-line tab (title + summary) at a fixed height */
   --pane-header-height: 28px;
   --filter-bar-height:  32px;
   --section-header-height: 24px;

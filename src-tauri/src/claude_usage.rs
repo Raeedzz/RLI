@@ -292,7 +292,19 @@ pub fn claude_usage_status() -> Result<ClaudeUsageStatus, String> {
         let cache = home.join(".claude").join("cache").join("rli-usage.json");
         if let Ok(bytes) = fs::read(&cache) {
             if let Ok(c) = serde_json::from_slice::<CapturedUsage>(&bytes) {
-                status.real_captured_at_ms = c.captured_at_ms;
+                // Some capture scripts (older versions, or the one
+                // Claude installs by default) write the rate-limit
+                // body without a `captured_at_ms` field. Fall back to
+                // the file's mtime so the frontend's freshness check
+                // still has a timestamp to compare against — without
+                // this, a perfectly good cache file with a real %
+                // value reads as "stale" and the pill stays hidden.
+                let mtime_ms = fs::metadata(&cache)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64);
+                status.real_captured_at_ms = c.captured_at_ms.or(mtime_ms);
                 if let Some(rl) = c.rate_limits {
                     if let Some(fh) = rl.five_hour {
                         status.real_five_hour_percent = fh.used_percentage;

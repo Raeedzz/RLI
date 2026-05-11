@@ -248,7 +248,13 @@ function TabButton({
       ref={ref}
       role="tab"
       aria-selected={active}
-      layout
+      // `layout="position"` (not `layout`) — we want neighbours to
+      // slide when a tab is opened, closed, or reordered, but we
+      // *don't* want motion to animate the tab's own width when its
+      // label or summary text changes. Plain `layout` was the cause
+      // of the wobble where the tab visibly shrank/grew as the live
+      // activity summary updated mid-session.
+      layout="position"
       initial={{ opacity: 0, x: 6 }}
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, y: 3 }}
@@ -264,7 +270,13 @@ function TabButton({
         display: "inline-flex",
         alignItems: "center",
         gap: 8,
-        height: 40,
+        // Fixed at 36 — leaves 4px breathing inside the 40px strip,
+        // and is tall enough to host the two-line label stack
+        // (title 12px / summary 10px = ~23px content) without ever
+        // growing further when the summary line appears. The tab no
+        // longer "stretches" on agent start; the second line just
+        // fills the space we already reserved.
+        height: 36,
         minWidth: 120,
         maxWidth: 240,
         padding: "0 var(--space-2) 0 10px",
@@ -399,6 +411,12 @@ function fullTabSummary(tab: Tab): string | null {
  * summary arrives or clears.
  */
 function TabLabelStack({ tab }: { tab: Tab }) {
+  // Two-line stack: session title on top, live summary below. The
+  // stack is rendered inside a fixed-height tab button (see
+  // TabButton), so this column flex-centers its content vertically
+  // and never pushes the tab itself taller — the summary line
+  // appears/disappears within the same physical slot rather than
+  // doubling the strip height the way it used to.
   const title = tabLabel(tab);
   const summary = tabSummary(tab);
   return (
@@ -407,15 +425,15 @@ function TabLabelStack({ tab }: { tab: Tab }) {
         display: "flex",
         flexDirection: "column",
         justifyContent: "center",
-        gap: 1,
+        gap: 0,
         minWidth: 0,
         maxWidth: 200,
-        lineHeight: 1.1,
+        lineHeight: 1.05,
       }}
     >
       <span
         style={{
-          fontSize: 13,
+          fontSize: 12,
           fontWeight: "var(--weight-medium)",
           letterSpacing: "var(--tracking-tight)",
           overflow: "hidden",
@@ -428,7 +446,7 @@ function TabLabelStack({ tab }: { tab: Tab }) {
       {summary && (
         <span
           style={{
-            fontSize: 11,
+            fontSize: 10,
             color: "var(--text-tertiary)",
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -443,19 +461,23 @@ function TabLabelStack({ tab }: { tab: Tab }) {
 }
 
 /**
- * Pick the one-line summary to show under the tab title. We trust
- * `tab.summary` (set by BlockTerminal via the helper-agent layer or
- * the activeCommand fallback) for terminal tabs, and fall back to
- * the file path for file-backed tabs so the line still carries
- * information. Strings are truncated to a reasonable display width
- * client-side; CSS handles the visual ellipsis.
+ * The live one-line summary that sits below the title inside the
+ * tab. We trust `tab.summary` (set by BlockTerminal via the
+ * helper-agent layer or the activeCommand fallback) for terminal
+ * tabs, and fall back to the file path for file-backed tabs so the
+ * line still carries information. CSS handles the visual ellipsis.
  */
 function tabSummary(tab: Tab): string {
+  // Hard cap at 80 chars defensively — the agent's activity-summary
+  // helper occasionally emits a runaway sentence, and tab labels are
+  // bounded by `maxWidth` anyway but we want predictable layout cost
+  // (CSS `text-overflow: ellipsis` is O(n) on text length when
+  // computing the truncation point).
   const trim = (s: string | undefined | null): string => {
     if (!s) return "";
     const cleaned = s.replace(/\s+/g, " ").trim();
     if (cleaned === "ready" || cleaned === "Untitled") return "";
-    return cleaned;
+    return cleaned.length > 80 ? cleaned.slice(0, 80) : cleaned;
   };
   if (tab.kind === "terminal") return trim(tab.summary);
   if (tab.kind === "diff" || tab.kind === "markdown") {
@@ -464,6 +486,7 @@ function tabSummary(tab: Tab): string {
   if (tab.kind === "all-changes") return "";
   return trim(tab.summary);
 }
+
 
 /** Bare label for a tab — bare names only (no path, no subtitle).
  *  Terminal tabs only surface the CLI badge ("claude" / "codex" /

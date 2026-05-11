@@ -319,22 +319,32 @@ export function BlockTerminal({
     };
   }, [foregroundIsAgent, cwd, activeCommand, command]);
 
-  // Forward the live activity summary up to the pane chrome, where it
-  // surfaces as the subtitle next to the pane header. Trimmed and
+  // Forward the live activity summary up to the pane chrome, where
+  // it surfaces as the subtitle next to the pane header. Trimmed and
   // collapsed-whitespace so multi-line composed commands read on one
-  // line in a 28px header strip. Prefer the agent's AI-summarized
-  // activity when available — it carries more meaning than the launch
-  // command.
+  // line in a 28px header strip.
   //
-  // CRITICAL: only dispatch when we actually have a summary. Firing
-  // with `""` on idle mount erases whatever default the session had
-  // ("ready") and leaves the header chip blank — that was the bug
-  // that made it look like summaries weren't working at all. Letting
-  // the prior value persist is the right default.
+  // Two non-obvious rules here:
+  //  1. Empty/unset summaries don't dispatch — firing with "" on
+  //     idle mount erases whatever default the session had ("ready")
+  //     and leaves the chip blank.
+  //  2. **Bare CLI launch names don't dispatch either.** When the
+  //     tab remounts (e.g. on tab switch), `activeCommand` is
+  //     seeded back to the agent's name ("claude" / "codex" /
+  //     "gemini") before `claudeSummary` has had a chance to tick.
+  //     Without this guard the stored summary would briefly flip
+  //     to "claude" and then get rewritten with the real activity
+  //     summary a moment later — a visible flicker the user
+  //     specifically called out. Letting the prior real summary
+  //     persist until a real new one arrives is the right default.
   useEffect(() => {
     const source = claudeSummary ?? activeCommand;
     const summary = source.replace(/\s+/g, " ").trim();
     if (!summary) return;
+    const lower = summary.toLowerCase();
+    if (lower === "claude" || lower === "codex" || lower === "gemini") {
+      return;
+    }
     onActivitySummaryChangeRef.current?.(summary);
   }, [activeCommand, claudeSummary]);
 
@@ -493,12 +503,24 @@ export function BlockTerminal({
   // rows so the LiveBlock body sizes naturally to actual content;
   // and the outer column-reverse scroll lets the user reach the top
   // of the prompt by scrolling up.
+  // Track last (rows, cols) we sent to the PTY so the ResizeObserver
+  // running on every layout tick doesn't repeatedly fire the same
+  // resize, and so a tab-switch remount that lands at the same final
+  // dimensions skips the round-trip entirely. Backed up server-side
+  // by the idempotent guard in `term_resize`, but doing it here too
+  // saves the bridge call.
+  const lastResizeRef = useRef<{ rows: number; cols: number }>({
+    rows: 0,
+    cols: 0,
+  });
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const compute = () => {
       const rect = el.getBoundingClientRect();
-      const inputChrome = agentMode ? 8 : 80;
+      // Agent mode now also reserves room for the AgentStatusBar below
+      // the terminal grid (38px + a 6px breathing strip = 44).
+      const inputChrome = agentMode ? 44 : 80;
       const liveBlockChrome = 50;
       const reserved = inputChrome + liveBlockChrome;
       const usableHeight = Math.max(120, rect.height - reserved);
@@ -515,6 +537,9 @@ export function BlockTerminal({
         ? visibleRows + AGENT_ROW_HEADROOM
         : visibleRows;
       const cols = Math.max(20, Math.floor((rect.width - 24) / cellWidth));
+      const prev = lastResizeRef.current;
+      if (prev.rows === rows && prev.cols === cols) return;
+      lastResizeRef.current = { rows, cols };
       void resize(rows, cols).catch(() => {});
     };
     compute();
@@ -830,6 +855,17 @@ export function BlockTerminal({
 
       {!agentMode && effectiveCwd && (
         <TerminalStatusBar cwd={effectiveCwd} command={command} />
+      )}
+      {agentMode && effectiveCwd && (
+        // Agent-mode info strip: icon + diff + path + branch, no
+        // controls. Same component as shell mode in `readonly` form —
+        // share data + styling, drop the branch-switcher picker so it
+        // can't fire mid-agent-session.
+        <TerminalStatusBar
+          cwd={effectiveCwd}
+          command={activeCommand || command}
+          readonly
+        />
       )}
       {!agentMode && (
         <PromptInput

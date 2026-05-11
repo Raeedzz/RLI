@@ -2,12 +2,22 @@ import { AnimatePresence } from "motion/react";
 import { useEffect, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { git } from "@/lib/git";
 import { BranchSwitcher } from "@/shell/BranchSwitcher";
+import { useClaudeUsage } from "@/lib/claudeUsage";
+import { useAppState } from "@/state/AppState";
+import type { TerminalTab } from "@/state/types";
 
 interface Props {
   /** Working directory the terminal was started in. */
   cwd: string;
-  /** Shell or agent binary name (zsh / claude / codex). */
+  /** Shell or agent binary name (zsh / claude / codex / gemini). */
   command: string;
+  /**
+   * Read-only mode for the agent-running variant of this bar. Kills
+   * the branch-switcher picker and the hover affordances so the bar
+   * reads as pure context — the user shouldn't be switching branches
+   * mid-agent-session anyway, and the agent's own UI owns clicks.
+   */
+  readonly?: boolean;
 }
 
 interface GitInfo {
@@ -31,17 +41,19 @@ const POLL_MS = 4000;
  * the chrome doesn't melt into the dark surface. Polls `git status` at
  * 4s cadence — glanceable info, not sub-second.
  */
-export function TerminalStatusBar({ cwd, command }: Props) {
+export function TerminalStatusBar({ cwd, command, readonly = false }: Props) {
   const { info, refresh } = useGitInfo(cwd);
   const home = abbreviateHome(cwd);
   const totalChanges = info.added + info.removed + info.modified;
   const [picker, setPicker] = useState<{ x: number; y: number } | null>(null);
 
-  const openPicker = (e: ReactMouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setPicker({ x: e.clientX, y: e.clientY });
-  };
+  const openPicker = readonly
+    ? undefined
+    : (e: ReactMouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setPicker({ x: e.clientX, y: e.clientY });
+      };
 
   return (
     <div
@@ -123,18 +135,22 @@ export function TerminalStatusBar({ cwd, command }: Props) {
         />
       )}
 
+      <ClaudeUsagePill command={command} />
+
       <span style={{ flex: 1 }} />
 
-      <AnimatePresence>
-        {picker && (
-          <BranchSwitcher
-            cwd={cwd}
-            anchor={picker}
-            onClose={() => setPicker(null)}
-            onSwitched={() => void refresh()}
-          />
-        )}
-      </AnimatePresence>
+      {!readonly && (
+        <AnimatePresence>
+          {picker && (
+            <BranchSwitcher
+              cwd={cwd}
+              anchor={picker}
+              onClose={() => setPicker(null)}
+              onSwitched={() => void refresh()}
+            />
+          )}
+        </AnimatePresence>
+      )}
     </div>
   );
 }
@@ -284,10 +300,100 @@ function abbreviateHome(p: string): string {
   return p.replace(/^\/Users\/[^/]+/, "~");
 }
 
+/**
+ * Inline 5-hour-window usage pill. Sources its number from the real
+ * Anthropic capture hook (Claude's status-line writes the live %
+ * into ~/.claude every redraw, and `claude_usage_status` reads it
+ * back) — when that value isn't fresh we render nothing rather than
+ * fall back to the local estimator, since the user explicitly asked
+ * for the *actual* % and not a guess.
+ *
+ * Only mounts when the active command is `claude`; for `codex` /
+ * `gemini` / shell sessions there's no 5h-window concept to display.
+ */
+function ClaudeUsagePill({ command }: { command: string }) {
+  // Two-layer component. The OUTER gate is cheap — just a check
+  // against worktree/tab agentStatus — and returns null when no
+  // agent is running. Critically, that means `useClaudeUsage` (which
+  // spins up a 5s Tauri-invoke polling loop + walks transcript
+  // files) NEVER mounts until an agent is actually running. Without
+  // this split, every TerminalStatusBar mount — including the
+  // remounts that happen on every tab switch — would kick off a
+  // fresh poll loop and a synchronous IPC call, which was making
+  // tab switches from agent tabs feel sluggish.
+  void command;
+  const state = useAppState();
+  const anyAgentRunning =
+    Object.values(state.worktrees).some((w) => w.agentStatus === "running") ||
+    Object.values(state.tabs).some(
+      (t): t is TerminalTab =>
+        t.kind === "terminal" && t.agentStatus === "running",
+    );
+  if (!anyAgentRunning) return null;
+  return <ClaudeUsagePillInner />;
+}
+
+function ClaudeUsagePillInner() {
+  const { derived } = useClaudeUsage();
+  // `realSource` gates so we never paint a guessed number — same
+  // contract as ClaudePill. No fresh capture → no pill.
+  if (!derived || !derived.realSource) return null;
+
+  const fraction = derived.fractionUsed;
+  // Match Claude.ai's own visual language for the session bar:
+  // <50% calm, <80% warn, ≥80% danger.
+  const tone =
+    fraction >= 0.8
+      ? "var(--state-error)"
+      : fraction >= 0.5
+        ? "var(--state-warning)"
+        : "var(--state-success)";
+  const title = `Claude 5h window: ${derived.percentUsedLabel} used · ${derived.remainingLabel} remaining`;
+
+  return (
+    <Pill title={title}>
+      <span
+        aria-hidden
+        style={{
+          color: "var(--state-warning)",
+          fontFamily: "var(--font-mono)",
+          fontVariantLigatures: "none",
+          fontSize: "var(--text-xs)",
+          lineHeight: 1,
+        }}
+      >
+        ✻
+      </span>
+      <span
+        className="tabular"
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontVariantLigatures: "none",
+          color: tone,
+          fontWeight: "var(--weight-medium)",
+        }}
+      >
+        {derived.percentUsedLabel}
+      </span>
+      <span style={{ color: "var(--text-disabled)" }}>/</span>
+      <span
+        style={{
+          color: "var(--text-tertiary)",
+          fontFamily: "var(--font-mono)",
+          fontVariantLigatures: "none",
+        }}
+      >
+        5h
+      </span>
+    </Pill>
+  );
+}
+
 function shellGlyph(command: string): string {
   const c = command.toLowerCase();
   if (c.includes("claude")) return "✻";
   if (c.includes("codex")) return "◇";
+  if (c.includes("gemini")) return "✦";
   return ">_";
 }
 
@@ -295,6 +401,7 @@ function shellGlyphColor(command: string): string {
   const c = command.toLowerCase();
   if (c.includes("claude")) return "var(--state-warning)";
   if (c.includes("codex")) return "var(--accent-bright)";
+  if (c.includes("gemini")) return "var(--state-info)";
   return "var(--text-tertiary)";
 }
 

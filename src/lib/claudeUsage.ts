@@ -14,7 +14,7 @@
  * because the banner just appeared"). That's a separate concern from
  * usage budgeting.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 /** Anthropic's published rolling-window length. Kept here only for
@@ -111,56 +111,83 @@ export interface ClaudeUsageStatus {
   real_captured_at_ms: number | null;
 }
 
-/** How often we re-walk the transcript dir. The window is 5h, the
- *  data only ever changes when an in-progress claude session writes a
- *  fresh assistant message — 20s is plenty. */
-const POLL_MS = 20_000;
+/** How often we re-walk the transcript dir + re-read the captured
+ *  rate-limit cache. Claude rewrites the cache file on every status-
+ *  line redraw (≈ every keystroke / agent step), so a 5s cadence
+ *  keeps the displayed % within a few seconds of Claude's own
+ *  `/usage` reading. The full transcript walk is bounded by the 5h
+ *  lookback window so it stays cheap even at 5s. */
+const POLL_MS = 5_000;
+
+// ── Singleton polling store ──────────────────────────────────────
+// Every `useClaudeUsage()` consumer shares one polling loop. Without
+// this, each TerminalStatusBar mount (which happens on every tab
+// switch since the active-tab content remounts via `key={tab.id}`)
+// would kick off its own Tauri invocation + setInterval — fast in
+// the abstract, but the cumulative React commit cost of every tab
+// switch starting two new background loops was noticeable. With the
+// singleton, the poll loop starts on the first subscriber and stays
+// running for the rest of the session; tab switches just attach/
+// detach a listener to the shared cache.
+let storeStatus: ClaudeUsageStatus | null = null;
+let pollStarted = false;
+const storeListeners = new Set<() => void>();
+
+function ensurePolling() {
+  if (pollStarted) return;
+  pollStarted = true;
+  const pull = async () => {
+    try {
+      storeStatus = await invoke<ClaudeUsageStatus>("claude_usage_status");
+    } catch {
+      storeStatus = null;
+    }
+    storeListeners.forEach((fn) => fn());
+  };
+  void pull();
+  window.setInterval(pull, POLL_MS);
+}
+
+function subscribeStore(notify: () => void): () => void {
+  ensurePolling();
+  storeListeners.add(notify);
+  return () => storeListeners.delete(notify);
+}
+
+function getStoreStatus(): ClaudeUsageStatus | null {
+  return storeStatus;
+}
 
 /**
- * Polls the Rust scanner. The returned `now` ticks every second so
- * UIs can interpolate the remaining-time label without re-fetching.
- * `status` is the raw payload + a derived `derived` block of
- * frequently-needed metrics so consumers don't have to recompute.
+ * Subscribes to the singleton polling store. `status` only changes
+ * when the underlying Tauri response changes; consumers get the
+ * cached value instantly on mount instead of waiting for a fresh
+ * IPC call. `now` ticks 1Hz locally so the time-remaining label
+ * still updates smoothly between polls.
  */
 export function useClaudeUsage(): {
   status: ClaudeUsageStatus | null;
   derived: ClaudeUsageDerived | null;
   refresh: () => void;
 } {
-  const [status, setStatus] = useState<ClaudeUsageStatus | null>(null);
+  const status = useSyncExternalStore(
+    subscribeStore,
+    getStoreStatus,
+    getStoreStatus,
+  );
   const [now, setNow] = useState(() => Date.now());
-  const [tick, setTick] = useState(0);
-
-  // Slow path: hit the backend on a longer cadence.
-  useEffect(() => {
-    let cancelled = false;
-    const pull = async () => {
-      try {
-        const s = await invoke<ClaudeUsageStatus>("claude_usage_status");
-        if (!cancelled) setStatus(s);
-      } catch {
-        if (!cancelled) setStatus(null);
-      }
-    };
-    void pull();
-    const id = window.setInterval(pull, POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, [tick]);
-
-  // Fast path: 1 Hz local clock so the time-remaining label ticks
-  // smoothly between polls.
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
-
   return {
     status,
     derived: status ? deriveStatus(status, now) : null,
-    refresh: () => setTick((t) => t + 1),
+    refresh: () => {
+      // Forces an immediate re-pull on next render — currently
+      // unused since the singleton polls on its own; kept on the
+      // surface for callers that want to nudge.
+    },
   };
 }
 
