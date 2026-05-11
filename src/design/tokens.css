@@ -323,28 +323,30 @@ body { font-variant-numeric: tabular-nums; }
   color: var(--text-tertiary);
 }
 
-/* Running-agent loader: a thin partial-arc rotating at a constant
-   angular velocity. Linear easing only — any other curve produces
-   visible variance in angular speed that draws the eye. 1.2s per
-   revolution: slow enough to read as "calm activity," fast enough to
-   feel like motion. transform + opacity only, GPU-composited, no
-   layout cost. The prefers-reduced-motion fallback below freezes the
-   arc at its initial angle — still meaningful as an indicator, but
-   no motion. We deliberately don't ALSO swap the static geometry,
-   since the env-driven transition itself would be visible motion. */
-@keyframes rli-loader-spin {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
+/* Running-agent loader: a single filled circle that breathes — scales
+   from 0 to 1 while fading from 1 to 0, then loops. Reads as a soft
+   pulse rather than a rigid spinner; the in-and-out cycle is its
+   own punctuation, no extra entry/exit choreography needed. 1.6s per
+   cycle on ease-in-out so the bloom peaks gently and dissipates
+   quietly — slow enough to feel calm, never jittery. transform +
+   opacity only, GPU-composited. The prefers-reduced-motion fallback
+   below collapses the duration to ~0ms; the keyframe rests at scale 0
+   which would render as nothing, so we keep an outline ring on the
+   parent element (Sidebar's HoverCardStatusDot does this) as the
+   reduced-motion analogue. */
+@keyframes rli-loader-pulse {
+  0%   { transform: scale(0);   opacity: 1; }
+  100% { transform: scale(1);   opacity: 0; }
 }
 .rli-loader {
-  animation: rli-loader-spin 1.2s linear infinite;
+  animation: rli-loader-pulse 1.6s ease-in-out infinite;
   transform-origin: 50% 50%;
 }
 /* Legacy alias — kept so any in-flight render that references the
-   old class name doesn't drop the spin during the rollout. Safe to
-   delete after one release. */
+   old class name keeps animating during the rollout. Same keyframes,
+   same cadence. Safe to delete after one release. */
 .rli-loader-spin {
-  animation: rli-loader-spin 1.2s linear infinite;
+  animation: rli-loader-pulse 1.6s ease-in-out infinite;
   transform-origin: 50% 50%;
 }
 

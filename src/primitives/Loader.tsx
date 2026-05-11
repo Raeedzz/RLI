@@ -1,67 +1,50 @@
 /**
- * Minimal "agent running" loader. A single thin arc rotating at a
- * steady angular velocity — that's it. No glow, no pulse, no double
- * ring, no easing-induced jitter. Calm enough to leave on indefinitely
- * but unmistakable as "in progress."
+ * "Agent running" pulse — a single filled circle that scales 0→1 while
+ * fading 1→0, then loops. Replaces the previous rotating arc with a
+ * gentler in-and-out breath. The shape of the keyframe IS the entrance
+ * and exit; no extra animation choreography needed.
  *
  * Visual contract:
- *   - 14px square (sized via the `size` prop, defaults to 14)
- *   - 1.5px stroke in `currentColor` so it inherits whatever accent
- *     the parent sets (sidebar uses `--accent`, tab strip uses
- *     `--accent`, hover cards use `--accent`)
- *   - 270° arc with rounded caps; 90° gap so the rotation is visible
- *   - 1.2s per revolution, linear easing (any other curve produces
- *     uneven angular velocity that draws the eye)
+ *   - Square slot sized via the `size` prop (defaults to 14).
+ *   - A single circle that fills the slot at peak scale.
+ *   - `currentColor` for the fill so callers inherit accent/state
+ *     colors (sidebar uses `--accent`, hover cards use `--accent`).
  *
  * Hardening:
- *   - SVG only, no JS animation loop — CSS keyframes drive the
- *     rotation, which the compositor handles entirely off the main
- *     thread. No frame-budget cost from running this even on dozens
- *     of tabs in parallel.
- *   - `aria-hidden` so it doesn't pollute screen-reader output. The
- *     visible "running" state is conveyed by surrounding chrome (tab
- *     badge, hover-card spinner) which carry their own labels.
+ *   - Animation lives in `src/design/tokens.css` (`@keyframes
+ *     rli-loader-pulse`). Single source of truth means the cadence
+ *     can be retuned project-wide from one place.
+ *   - 1.6s ease-in-out cycle. Long enough to read as calm, short
+ *     enough to feel alive. Symmetrical curve means the bloom and
+ *     the fade share the same easing shape.
+ *   - transform + opacity only — the compositor handles the whole
+ *     animation off the main thread.
+ *   - `will-change: transform, opacity` keeps the element on its own
+ *     compositor layer; without it slower GPUs can re-rasterize per
+ *     frame and look choppy.
+ *   - `transform-origin: 50% 50%` is explicit so future stylesheet
+ *     changes can't shift the bloom off-center.
  *   - prefers-reduced-motion: the global rule in tokens.css collapses
- *     animation-duration to ~0ms, which freezes the arc at its initial
- *     angle. Still readable as a partial-circle indicator; no flicker
- *     or staccato motion. We don't try to swap to a static dot because
- *     the reduced-motion gate is environmental — at the moment the
- *     setting flips on, swapping geometry would itself be a visible
- *     transition we don't want.
- *   - `will-change: transform` keeps the element on its own
- *     compositor layer; without it, the rotation can re-rasterize
- *     each frame on slower GPUs and look choppy.
- *   - `transform-origin: 50% 50%` is explicit even though it's the
- *     default — guards against future stylesheet changes that might
- *     globally override the origin.
- *   - Single element rotation: rotating the wrapper span (not the
- *     SVG itself) avoids cross-browser quirks with `transform-box`
- *     on SVG children, which Safari historically gets wrong.
+ *     animation-duration to ~0ms. The dot rests at its starting state
+ *     (scale 0) and renders as nothing. Callers that need a visible
+ *     reduced-motion analogue paint their own static dot in the same
+ *     slot — see `HoverCardStatusDot` in Sidebar.tsx.
+ *   - `aria-hidden` so screen readers don't announce decorative motion.
+ *     The visible "running" state is conveyed by surrounding chrome
+ *     (tab badge, hover card) which carry their own labels.
  *
- * Reused across the sidebar worktree rows, the main-column tab
- * strip, the right-panel secondary terminal indicator, and the
- * worktree hover-card status dot. One implementation = one motion
- * grammar across the app.
+ * Reused across the sidebar worktree rows, the main-column tab strip,
+ * the right-panel secondary terminal indicator, and the worktree
+ * hover-card status dot. One implementation = one motion grammar.
  */
 export function Loader({
   size = 14,
-  strokeWidth = 1.5,
 }: {
-  /** Pixel size of the square. Default 14. */
+  /** Pixel size of the square slot. Default 14. */
   size?: number;
-  /** Arc stroke width. Bump up for larger sizes if you want it to read. */
-  strokeWidth?: number;
 }) {
-  // Geometry: viewBox 0..14, center 7,7, radius 5.5 (leaves 1.5px room
-  // for the stroke). Circumference is ~34.56. Pick a dasharray that
-  // paints ~75% of the circle.
-  const RADIUS = 5.5;
-  const CIRCUMFERENCE = 2 * Math.PI * RADIUS; // ≈ 34.56
-  const ARC = CIRCUMFERENCE * 0.72; // ~259° arc — quietly less than 3/4
-  const GAP = CIRCUMFERENCE - ARC;
   return (
     <span
-      className="rli-loader"
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -69,36 +52,22 @@ export function Loader({
         width: size,
         height: size,
         flexShrink: 0,
-        // currentColor lets each caller drive accent/state colors
-        // without prop drilling.
         color: "currentColor",
-        // Keep the spinner on its own compositor layer; rotation stays
-        // smooth even when many are visible simultaneously.
-        willChange: "transform",
-        transformOrigin: "50% 50%",
       }}
       aria-hidden
     >
-      <svg
-        width={size}
-        height={size}
-        viewBox="0 0 14 14"
-        // `display: block` removes the inline-baseline whitespace below
-        // SVGs that would otherwise nudge the icon down by 2-3px and
-        // make the rotation look off-center against neighboring text.
-        style={{ display: "block" }}
-      >
-        <circle
-          cx={7}
-          cy={7}
-          r={RADIUS}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={strokeWidth}
-          strokeLinecap="round"
-          strokeDasharray={`${ARC} ${GAP}`}
-        />
-      </svg>
+      <span
+        className="rli-loader"
+        style={{
+          display: "block",
+          width: size,
+          height: size,
+          borderRadius: "50%",
+          backgroundColor: "currentColor",
+          willChange: "transform, opacity",
+          transformOrigin: "50% 50%",
+        }}
+      />
     </span>
   );
 }
