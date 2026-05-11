@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { connectionsViewVariants } from "@/design/motion";
 import {
   browser,
+  invalidateBrowserBaseCache,
   type BrowserHealth,
   type BrowserLogEntry,
   type BrowserStatus,
@@ -26,6 +27,32 @@ const SCREENSHOT_INTERVAL_MS = 1000;
 const STATUS_INTERVAL_MS = 1500;
 const COMMON_DEV_PORTS = [5173, 3000, 8080, 4321, 1420];
 
+// Console-pane resize bounds. 80px keeps the header row + a single
+// log line visible (the minimum useful state); 600px is a generous
+// upper bound that still leaves room for the screenshot frame above
+// even on small windows.
+const CONSOLE_MIN_HEIGHT = 80;
+const CONSOLE_MAX_HEIGHT = 600;
+const CONSOLE_DEFAULT_HEIGHT = 220;
+const CONSOLE_HEIGHT_STORAGE_KEY = "rli.browser.consoleHeight";
+
+function loadConsoleHeight(): number {
+  if (typeof window === "undefined") return CONSOLE_DEFAULT_HEIGHT;
+  try {
+    const raw = window.localStorage.getItem(CONSOLE_HEIGHT_STORAGE_KEY);
+    if (!raw) return CONSOLE_DEFAULT_HEIGHT;
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n)) return CONSOLE_DEFAULT_HEIGHT;
+    return clampConsoleHeight(n);
+  } catch {
+    return CONSOLE_DEFAULT_HEIGHT;
+  }
+}
+
+function clampConsoleHeight(h: number): number {
+  return Math.min(CONSOLE_MAX_HEIGHT, Math.max(CONSOLE_MIN_HEIGHT, h));
+}
+
 /**
  * In-house browser pane — drives the Rust-side browser daemon.
  *
@@ -42,27 +69,66 @@ export function BrowserPane({ onClose, embedded = false, initialUrl }: Props) {
   const [screenshotUrl, setScreenshotUrl] = useState<string | null>(null);
   const [urlInput, setUrlInput] = useState(initialUrl ?? "");
   const [focused, setFocused] = useState(false);
+  // User-resizable console pane height. Persisted to localStorage so
+  // a deliberately-tall console survives reloads and tab-switches.
+  const [consoleHeight, setConsoleHeight] = useState<number>(loadConsoleHeight);
 
   const imgRef = useRef<HTMLImageElement | null>(null);
   const focusTrap = useRef<HTMLTextAreaElement | null>(null);
 
-  // Health check on mount, retry every 2s until daemon is up.
+  // Health check on mount, retry every 2s until daemon is up. We
+  // require multiple *consecutive* failures before flipping into the
+  // "daemon offline" UI: a single transient `AbortError` (the 3s
+  // fetch timeout firing during a layout reflow, a brief webview
+  // pause when the bottom panel collapses, etc.) shouldn't make the
+  // pane scream that the daemon is dead. We hold the previous
+  // `health` value steady during transient failures so the UI stays
+  // calm — only after `FAILURE_THRESHOLD` failures in a row do we
+  // surface the DaemonOffline state.
+  const FAILURE_THRESHOLD = 5;
+  const failuresRef = useRef(0);
+  const checkRef = useRef<() => void>(() => {});
   useEffect(() => {
     let cancelled = false;
     const check = () => {
       void browser.health().then((h) => {
-        if (!cancelled) setHealth(h);
+        if (cancelled) return;
+        if (h.ok) {
+          failuresRef.current = 0;
+          setHealth(h);
+        } else {
+          failuresRef.current += 1;
+          if (failuresRef.current >= FAILURE_THRESHOLD) {
+            setHealth(h);
+          }
+          // Otherwise leave `health` as it was. On first mount that
+          // means it stays `null` (showing "starting browser daemon…")
+          // and on a previously-ok daemon it stays `{ ok: true }` so
+          // the pane keeps rendering while we ride out the blip.
+        }
       });
     };
+    checkRef.current = check;
     check();
-    const t = window.setInterval(() => {
-      if (!cancelled && !health?.ok) check();
-    }, 2000);
+    const t = window.setInterval(check, 2000);
     return () => {
       cancelled = true;
       window.clearInterval(t);
     };
-  }, [health?.ok]);
+    // Setup-once; the interval handles ongoing rechecks. Re-running
+    // this effect on every health flip would tear down and rebuild
+    // the timer pointlessly.
+  }, []);
+  // Manual retry — bypasses the URL cache, resets the failure
+  // counter, and triggers an immediate re-check so the user can
+  // recover from the offline UI without waiting for the next
+  // interval tick.
+  const retryHealth = useCallback(() => {
+    invalidateBrowserBaseCache();
+    failuresRef.current = 0;
+    setHealth(null);
+    checkRef.current();
+  }, []);
 
   // Auto-navigate to the initial URL once health flips ok.
   useEffect(() => {
@@ -212,7 +278,9 @@ export function BrowserPane({ onClose, embedded = false, initialUrl }: Props) {
       />
 
       {!health && <Empty label="starting browser daemon…" />}
-      {health && !health.ok && <DaemonOffline error={health.error} />}
+      {health && !health.ok && (
+        <DaemonOffline error={health.error} onRetry={retryHealth} />
+      )}
       {health?.ok && (
         <>
           <Frame
@@ -241,10 +309,118 @@ export function BrowserPane({ onClose, embedded = false, initialUrl }: Props) {
               pointerEvents: "none",
             }}
           />
-          <ConsoleTail logs={logs} />
+          <ConsoleResizeHandle
+            height={consoleHeight}
+            onChange={(h) => {
+              const clamped = clampConsoleHeight(h);
+              setConsoleHeight(clamped);
+              try {
+                window.localStorage.setItem(
+                  CONSOLE_HEIGHT_STORAGE_KEY,
+                  String(clamped),
+                );
+              } catch {
+                /* localStorage can fail under storage pressure; not fatal. */
+              }
+            }}
+          />
+          <ConsoleTail logs={logs} height={consoleHeight} />
         </>
       )}
     </motion.aside>
+  );
+}
+
+/**
+ * Thin draggable strip pinned just above the console. Drag up to grow
+ * the console (shrinks the screenshot frame), drag down to shrink it.
+ * The hit zone is 6px tall but the visible center line is 1px so the
+ * chrome stays calm; we tint the line on hover/drag to indicate the
+ * affordance is alive.
+ */
+function ConsoleResizeHandle({
+  height,
+  onChange,
+}: {
+  height: number;
+  onChange: (next: number) => void;
+}) {
+  const startYRef = useRef(0);
+  const startHRef = useRef(0);
+  const draggingRef = useRef(false);
+  const [hover, setHover] = useState(false);
+  const [active, setActive] = useState(false);
+
+  const onMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      draggingRef.current = true;
+      startYRef.current = e.clientY;
+      startHRef.current = height;
+      setActive(true);
+      document.body.style.cursor = "row-resize";
+      document.body.style.userSelect = "none";
+    },
+    [height],
+  );
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!draggingRef.current) return;
+      // Drag UP (negative dy) → console grows. The console sits at
+      // the bottom of the pane, so its height increases as the
+      // pointer moves up. Caller clamps to the min/max bounds.
+      const dy = e.clientY - startYRef.current;
+      onChange(startHRef.current - dy);
+    };
+    const onUp = () => {
+      if (!draggingRef.current) return;
+      draggingRef.current = false;
+      setActive(false);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [onChange]);
+
+  const lit = hover || active;
+  return (
+    <div
+      role="separator"
+      aria-orientation="horizontal"
+      aria-label="Resize console"
+      onMouseDown={onMouseDown}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        flexShrink: 0,
+        // 6px hit zone, with a 1px hairline centered inside it.
+        height: 6,
+        marginTop: -3,
+        marginBottom: -3,
+        position: "relative",
+        cursor: "row-resize",
+        zIndex: 5,
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          top: 2,
+          height: 1,
+          backgroundColor: lit ? "var(--accent)" : "transparent",
+          transition:
+            "background-color var(--motion-fast) var(--ease-out-quart)",
+        }}
+      />
+    </div>
   );
 }
 
@@ -512,7 +688,13 @@ const LEVEL_PRESENTATION: Record<
   },
 };
 
-function ConsoleTail({ logs }: { logs: BrowserLogEntry[] }) {
+function ConsoleTail({
+  logs,
+  height,
+}: {
+  logs: BrowserLogEntry[];
+  height: number;
+}) {
   const [filter, setFilter] = useState<LogFilter>("all");
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Stick-to-bottom: only auto-scroll when the user is already near
@@ -553,7 +735,7 @@ function ConsoleTail({ logs }: { logs: BrowserLogEntry[] }) {
   return (
     <div
       style={{
-        height: 220,
+        height,
         flexShrink: 0,
         backgroundColor: "var(--surface-1)",
         borderTop: "var(--border-1)",
@@ -894,7 +1076,13 @@ function Empty({ label, small = false }: { label: string; small?: boolean }) {
   );
 }
 
-function DaemonOffline({ error }: { error?: string }) {
+function DaemonOffline({
+  error,
+  onRetry,
+}: {
+  error?: string;
+  onRetry: () => void;
+}) {
   return (
     <div
       style={{
@@ -920,7 +1108,7 @@ function DaemonOffline({ error }: { error?: string }) {
             color: "var(--text-primary)",
           }}
         >
-          browser daemon failed to start
+          browser daemon unreachable
         </div>
         <div
           style={{
@@ -929,10 +1117,28 @@ function DaemonOffline({ error }: { error?: string }) {
             lineHeight: "var(--leading-sm)",
           }}
         >
-          The in-house daemon couldn't bind a local port. Check the app
-          log for details — usually means another process is using
-          ports 4000–4099.
+          The daemon hasn't responded to a health check after multiple
+          attempts. It may still be starting up, or another process
+          may be holding its preferred port range.
         </div>
+        <button
+          type="button"
+          onClick={onRetry}
+          style={{
+            justifySelf: "center",
+            padding: "6px 14px",
+            backgroundColor: "var(--surface-3)",
+            color: "var(--text-primary)",
+            border: "1px solid var(--border-default)",
+            borderRadius: "var(--radius-sm)",
+            fontFamily: "var(--font-sans)",
+            fontSize: "var(--text-xs)",
+            fontWeight: "var(--weight-medium)",
+            cursor: "pointer",
+          }}
+        >
+          Retry
+        </button>
         {error && (
           <div
             style={{

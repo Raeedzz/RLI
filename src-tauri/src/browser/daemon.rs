@@ -38,7 +38,10 @@ use super::chrome::{ChromeSession, LogEntry, Status};
 use super::BrowserState;
 
 const PORT_FIRST: u16 = 4000;
-const PORT_LAST: u16 = 4099;
+// Widened from 4099 to give 200 ports of headroom for dev sessions
+// that accumulate stale processes from repeated `tauri dev` restarts
+// before falling back to an OS-assigned port.
+const PORT_LAST: u16 = 4199;
 
 struct DaemonCtx<R: Runtime> {
     app: AppHandle<R>,
@@ -62,10 +65,28 @@ impl<R: Runtime> Clone for DaemonCtx<R> {
 /// bound so the caller can move on with app boot.
 pub async fn start<R: Runtime>(app: AppHandle<R>) -> Result<u16, String> {
     let state: BrowserState = app.state::<BrowserState>().inner().clone();
-    let ctx = DaemonCtx { app: app.clone(), state };
+    let ctx = DaemonCtx {
+        app: app.clone(),
+        state: state.clone(),
+    };
+
+    // Best-effort cleanup of the legacy port-file location, in case an
+    // earlier build wrote one there. Stale files in the old dir aren't
+    // read by anyone anymore but keeping them around invites confusion.
+    if let Some(legacy) = dirs::data_dir() {
+        let _ = std::fs::remove_file(legacy.join("RLI").join("browser-port"));
+    }
 
     let (listener, port) = bind_with_retry().await?;
-    write_port_file(port);
+    // Publish the bound port to BrowserState BEFORE writing the file
+    // — that's the in-memory source of truth that `term.rs` reads to
+    // inject `GLI_BROWSER_URL` into PTY children. The port file is
+    // for the React frontend, which can't reach managed state
+    // directly.
+    state
+        .bound_port
+        .store(port, std::sync::atomic::Ordering::Relaxed);
+    write_port_file(&app, port);
 
     let router = Router::new()
         .route("/health", get(health))
@@ -92,21 +113,58 @@ pub async fn start<R: Runtime>(app: AppHandle<R>) -> Result<u16, String> {
 }
 
 async fn bind_with_retry() -> Result<(TcpListener, u16), String> {
+    let mut last_err: Option<std::io::Error> = None;
     for port in PORT_FIRST..=PORT_LAST {
         let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
         match TcpListener::bind(addr).await {
             Ok(l) => return Ok((l, port)),
-            Err(_) => continue,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
         }
     }
-    Err(format!(
-        "no free port in {PORT_FIRST}..={PORT_LAST} — every port the browser daemon could use is taken"
-    ))
+    // Fallback: bind to an OS-assigned ephemeral port (`:0`). This
+    // virtually always succeeds — the only way it doesn't is the
+    // whole machine being out of file descriptors / ephemeral ports,
+    // which means much bigger problems than the browser daemon.
+    // The port is unpredictable but harmless: BrowserState publishes
+    // it, and term.rs reads from BrowserState before injecting the
+    // env var into PTYs, so agents always get the right URL.
+    let fallback_addr: std::net::SocketAddr = ([127, 0, 0, 1], 0).into();
+    match TcpListener::bind(fallback_addr).await {
+        Ok(l) => {
+            let port = l
+                .local_addr()
+                .map(|a| a.port())
+                .map_err(|e| format!("could not read OS-assigned port: {e}"))?;
+            eprintln!(
+                "[browser daemon] preferred range {PORT_FIRST}..={PORT_LAST} \
+                 was fully taken; bound OS-assigned port {port} instead"
+            );
+            Ok((l, port))
+        }
+        Err(e) => Err(format!(
+            "browser daemon could not bind any port — preferred range \
+             {PORT_FIRST}..={PORT_LAST} exhausted, OS-assigned fallback \
+             also failed: {} (last preferred-range error: {})",
+            e,
+            last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+        )),
+    }
 }
 
-fn write_port_file(port: u16) {
-    let Some(dir) = dirs::data_dir() else { return };
-    let dir = dir.join("RLI");
+fn write_port_file<R: Runtime>(app: &AppHandle<R>, port: u16) {
+    // CRITICAL: we MUST write into the same directory Tauri's frontend
+    // resolves via `appDataDir()` — that's the bundle-id-scoped
+    // `~/Library/Application Support/dev.raeedz.gli/` on macOS. The
+    // previous `dirs::data_dir().join("RLI")` resolved to a sibling
+    // directory the frontend never read, so any non-default port the
+    // daemon ended up on (4001+, e.g. after a port collision) was
+    // invisible — the frontend kept trying :4000 and timed out.
+    let Ok(dir) = app.path().app_data_dir() else { return };
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }

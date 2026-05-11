@@ -133,17 +133,32 @@ function UpperPanel({ worktree }: { worktree: Worktree }) {
         </button>
       </div>
 
-      <div style={{ minHeight: 0, overflow: "auto", position: "relative" }}>
-        {worktree.rightPanel === "files" ? (
+      <div style={{ minHeight: 0, overflow: "hidden", position: "relative" }}>
+        {worktree.rightPanel === "files" && (
           <FilesView worktree={worktree} />
-        ) : worktree.rightPanel === "changes" ? (
+        )}
+        {worktree.rightPanel === "changes" && (
           <ChangesView worktree={worktree} />
-        ) : (
-          // BrowserPane drives the in-house Chrome daemon at
-          // $RLI_BROWSER_URL. Rendered embedded so it fills the panel
-          // instead of floating as its old standalone overlay. The
-          // pane's close button maps to switching the right panel
-          // back to the file tree.
+        )}
+        {/*
+          BrowserPane stays mounted across right-panel tab switches.
+          Its Rust-side Chrome session is long-lived anyway, but the
+          React state (health, status, screenshot URL, console
+          history, focused, user-set console height) is expensive to
+          rebuild and slow to "load in" on every switch back. Hiding
+          via display:none keeps the layout, the polling timers, the
+          screenshot <img>, and the console scroll position alive in
+          the background — so flipping to Browser feels instant
+          instead of going through the "starting browser daemon…"
+          hint every time.
+         */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: worktree.rightPanel === "browser" ? "flex" : "none",
+          }}
+        >
           <BrowserPane
             embedded
             onClose={() =>
@@ -154,7 +169,7 @@ function UpperPanel({ worktree }: { worktree: Worktree }) {
               })
             }
           />
-        )}
+        </div>
       </div>
 
       {state.prDialogOpen ? null : null}

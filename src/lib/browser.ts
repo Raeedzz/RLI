@@ -17,36 +17,56 @@ import { join } from "@tauri-apps/api/path";
 import { appDataDir } from "@tauri-apps/api/path";
 
 const DEFAULT_BASE = "http://127.0.0.1:4000";
+// Cache TTL for the resolved daemon URL. The previous "cache once
+// forever" policy locked in DEFAULT_BASE on first call if the port
+// file hadn't been written yet — even if the daemon later landed on
+// 4001+ and wrote the file, every subsequent fetch still tried 4000
+// and timed out. A 5s cache absorbs the per-call FS read cost while
+// still letting the discovery loop find a late-arriving port file.
+const BASE_TTL_MS = 5_000;
 
 let cachedBase: string | null = null;
+let cachedAt = 0;
 
 /**
- * Resolve the daemon URL. Default is :4000; if the daemon ended up on a
- * different port (collision with an actual gstack install or a stale
- * socket) it writes the chosen port to `~/Library/Application
- * Support/RLI/browser-port`. We try that file once and cache the
- * result so subsequent fetches are instant.
+ * Resolve the daemon URL. Default is :4000; if the daemon ended up on
+ * a different port (collision with an actual gstack install or a
+ * stale socket) it writes the chosen port to Tauri's
+ * `appDataDir()/browser-port`. We try that file every `BASE_TTL_MS`
+ * so the frontend can recover when the daemon comes up late or on a
+ * non-default port.
  */
 async function baseUrl(): Promise<string> {
-  if (cachedBase) return cachedBase;
   const override = (globalThis as { RLI_BROWSER_URL?: string }).RLI_BROWSER_URL;
-  if (override) {
-    cachedBase = override;
-    return override;
-  }
+  if (override) return override;
+  const now = Date.now();
+  if (cachedBase && now - cachedAt < BASE_TTL_MS) return cachedBase;
+  let resolved = DEFAULT_BASE;
   try {
     const dir = await appDataDir();
     const portFile = await join(dir, "browser-port");
     const port = (await readTextFile(portFile)).trim();
     if (/^\d+$/.test(port)) {
-      cachedBase = `http://127.0.0.1:${port}`;
-      return cachedBase;
+      resolved = `http://127.0.0.1:${port}`;
     }
   } catch {
-    // file missing → daemon must be on the default port.
+    // file missing → daemon hasn't written it yet (or bound on
+    // default). Fall through to DEFAULT_BASE and try again on the
+    // next call after the TTL expires.
   }
-  cachedBase = DEFAULT_BASE;
-  return cachedBase;
+  cachedBase = resolved;
+  cachedAt = now;
+  return resolved;
+}
+
+/**
+ * Drop the cached base URL so the next fetch re-resolves from the
+ * port file. Exposed in case a caller wants to force a recheck after
+ * a known daemon restart; the TTL handles the common cases.
+ */
+export function invalidateBrowserBaseCache() {
+  cachedBase = null;
+  cachedAt = 0;
 }
 
 export interface BrowserHealth {
@@ -102,8 +122,13 @@ async function postEmpty(path: string): Promise<boolean> {
 export const browser = {
   health: async (): Promise<BrowserHealth> => {
     try {
+      // 3s — generous enough that a momentary webview pause (e.g.
+      // panel collapse/expand transitions on the same render tick)
+      // doesn't trip the timeout, but short enough that a genuinely
+      // dead daemon still gives up fast. The BrowserPane retry loop
+      // covers anything slower than that.
       const res = await fetch(`${await baseUrl()}/health`, {
-        signal: AbortSignal.timeout(1500),
+        signal: AbortSignal.timeout(3000),
       });
       if (!res.ok) return { ok: false, error: `${res.status} ${res.statusText}` };
       const body = (await res.json().catch(() => ({}))) as { version?: string };
