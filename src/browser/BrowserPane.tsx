@@ -1,5 +1,5 @@
 import { motion } from "motion/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { connectionsViewVariants } from "@/design/motion";
 import {
   browser,
@@ -474,11 +474,86 @@ function Frame({
   );
 }
 
+type LogLevel = BrowserLogEntry["level"];
+type LogFilter = "all" | "errors" | "warnings";
+
+// Per-level visual presentation. `tag` is what reads in the row's
+// pill column (4 chars wide so the column aligns regardless of which
+// level a line is); `tone` colors the pill and tint rail; `bg` is
+// the row's faint background tint.
+const LEVEL_PRESENTATION: Record<
+  LogLevel,
+  { tag: string; tone: string; bg: string }
+> = {
+  error: {
+    tag: "ERR",
+    tone: "var(--state-error-bright)",
+    bg: "var(--surface-error-soft)",
+  },
+  warn: {
+    tag: "WARN",
+    tone: "var(--state-warning-bright)",
+    bg: "var(--surface-warning-soft)",
+  },
+  info: {
+    tag: "INFO",
+    tone: "var(--state-info)",
+    bg: "transparent",
+  },
+  log: {
+    tag: "LOG",
+    tone: "var(--text-secondary)",
+    bg: "transparent",
+  },
+  debug: {
+    tag: "DBG",
+    tone: "var(--text-tertiary)",
+    bg: "transparent",
+  },
+};
+
 function ConsoleTail({ logs }: { logs: BrowserLogEntry[] }) {
+  const [filter, setFilter] = useState<LogFilter>("all");
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Stick-to-bottom: only auto-scroll when the user is already near
+  // the bottom. If they've scrolled up to read something, leave them
+  // there — otherwise rapid log activity would yank the viewport
+  // around mid-read.
+  const stickRef = useRef(true);
+
+  const counts = useMemo(() => {
+    let err = 0;
+    let warn = 0;
+    for (const e of logs) {
+      if (e.level === "error") err++;
+      else if (e.level === "warn") warn++;
+    }
+    return { err, warn, total: logs.length };
+  }, [logs]);
+
+  const filtered = useMemo(() => {
+    if (filter === "all") return logs;
+    if (filter === "errors") return logs.filter((e) => e.level === "error");
+    return logs.filter((e) => e.level === "warn" || e.level === "error");
+  }, [logs, filter]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !stickRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [filtered]);
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const slop = 12;
+    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < slop;
+  };
+
   return (
     <div
       style={{
-        height: 200,
+        height: 220,
         flexShrink: 0,
         backgroundColor: "var(--surface-1)",
         borderTop: "var(--border-1)",
@@ -487,25 +562,34 @@ function ConsoleTail({ logs }: { logs: BrowserLogEntry[] }) {
         overflow: "hidden",
       }}
     >
+      <ConsoleHeader
+        counts={counts}
+        filter={filter}
+        onFilter={setFilter}
+      />
       <div
+        ref={scrollRef}
+        onScroll={onScroll}
         style={{
-          padding: "var(--space-1) var(--space-3)",
-          fontFamily: "var(--font-sans)",
-          fontSize: "var(--text-2xs)",
-          fontWeight: "var(--weight-semibold)",
-          letterSpacing: "var(--tracking-caps)",
-          textTransform: "uppercase",
-          color: "var(--text-tertiary)",
-          borderBottom: "var(--border-1)",
+          flex: 1,
+          minHeight: 0,
+          overflowY: "auto",
+          fontFamily: "var(--font-mono)",
+          fontSize: "var(--text-xs)",
+          lineHeight: 1.5,
         }}
       >
-        console · {logs.length}
-      </div>
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-        {logs.length === 0 ? (
-          <Empty label="(no entries)" small />
+        {filtered.length === 0 ? (
+          <Empty
+            label={
+              logs.length === 0
+                ? "No console output yet — interact with the page above."
+                : `No ${filter === "errors" ? "errors" : "errors or warnings"} in the last ${logs.length} entries.`
+            }
+            small
+          />
         ) : (
-          logs.map((entry, i) => (
+          filtered.map((entry, i) => (
             <LogRow key={`${entry.ts}-${i}`} entry={entry} />
           ))
         )}
@@ -514,37 +598,267 @@ function ConsoleTail({ logs }: { logs: BrowserLogEntry[] }) {
   );
 }
 
-function LogRow({ entry }: { entry: BrowserLogEntry }) {
-  const tone =
-    entry.level === "error"
-      ? "var(--state-error)"
-      : entry.level === "warn"
-        ? "var(--state-warning)"
-        : "var(--text-secondary)";
+function ConsoleHeader({
+  counts,
+  filter,
+  onFilter,
+}: {
+  counts: { err: number; warn: number; total: number };
+  filter: LogFilter;
+  onFilter: (f: LogFilter) => void;
+}) {
   return (
     <div
       style={{
-        padding: "2px var(--space-3)",
-        borderLeft:
-          entry.level === "error"
-            ? "2px solid var(--state-error)"
-            : "2px solid transparent",
-        backgroundColor:
-          entry.level === "error" ? "var(--state-error-bg)" : "transparent",
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--space-2)",
+        height: 26,
+        flexShrink: 0,
+        padding: "0 var(--space-2) 0 var(--space-3)",
+        borderBottom: "var(--border-1)",
+        backgroundColor: "var(--surface-1)",
       }}
     >
       <span
         style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: "var(--text-2xs)",
+          fontWeight: "var(--weight-semibold)",
+          letterSpacing: "var(--tracking-caps)",
+          textTransform: "uppercase",
+          color: "var(--text-tertiary)",
+        }}
+      >
+        Console
+      </span>
+      <span
+        className="tabular"
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: "var(--text-2xs)",
+          color: "var(--text-tertiary)",
+        }}
+      >
+        {counts.total}
+      </span>
+
+      <span style={{ flex: 1 }} />
+
+      <LevelCount
+        tone="var(--state-error-bright)"
+        count={counts.err}
+        title={`${counts.err} error${counts.err === 1 ? "" : "s"}`}
+      />
+      <LevelCount
+        tone="var(--state-warning-bright)"
+        count={counts.warn}
+        title={`${counts.warn} warning${counts.warn === 1 ? "" : "s"}`}
+      />
+
+      <span
+        aria-hidden
+        style={{
+          width: 1,
+          height: 14,
+          backgroundColor: "var(--border-default)",
+          margin: "0 var(--space-1)",
+        }}
+      />
+
+      <FilterPill
+        active={filter === "all"}
+        onClick={() => onFilter("all")}
+        label="All"
+      />
+      <FilterPill
+        active={filter === "errors"}
+        onClick={() => onFilter("errors")}
+        label="Errors"
+      />
+      <FilterPill
+        active={filter === "warnings"}
+        onClick={() => onFilter("warnings")}
+        label="Warn+"
+      />
+    </div>
+  );
+}
+
+function LevelCount({
+  tone,
+  count,
+  title,
+}: {
+  tone: string;
+  count: number;
+  title: string;
+}) {
+  const dim = count === 0;
+  return (
+    <span
+      title={title}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        opacity: dim ? 0.4 : 1,
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 7,
+          height: 7,
+          borderRadius: "var(--radius-pill)",
+          backgroundColor: tone,
+          flexShrink: 0,
+        }}
+      />
+      <span
+        className="tabular"
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: "var(--text-2xs)",
+          color: dim ? "var(--text-tertiary)" : "var(--text-secondary)",
+          minWidth: 12,
+          textAlign: "right",
+        }}
+      >
+        {count}
+      </span>
+    </span>
+  );
+}
+
+function FilterPill({
+  active,
+  onClick,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        height: 18,
+        padding: "0 8px",
+        fontFamily: "var(--font-sans)",
+        fontSize: "var(--text-2xs)",
+        fontWeight: "var(--weight-medium)",
+        color: active ? "var(--text-primary)" : "var(--text-tertiary)",
+        backgroundColor: active ? "var(--surface-3)" : "transparent",
+        border: "none",
+        borderRadius: "var(--radius-sm)",
+        cursor: "pointer",
+        transition:
+          "background-color var(--motion-instant) var(--ease-out-quart)," +
+          "color var(--motion-instant) var(--ease-out-quart)",
+      }}
+      onMouseEnter={(e) => {
+        if (!active) {
+          e.currentTarget.style.color = "var(--text-secondary)";
+          e.currentTarget.style.backgroundColor = "var(--surface-2)";
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!active) {
+          e.currentTarget.style.color = "var(--text-tertiary)";
+          e.currentTarget.style.backgroundColor = "transparent";
+        }
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+function LogRow({ entry }: { entry: BrowserLogEntry }) {
+  const pres = LEVEL_PRESENTATION[entry.level] ?? LEVEL_PRESENTATION.log;
+  const time = formatLogTime(entry.ts);
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "3px 38px 56px 1fr",
+        gap: "var(--space-2)",
+        padding: "4px var(--space-3) 4px 0",
+        backgroundColor: pres.bg,
+        borderTop: "1px solid color-mix(in oklch, var(--surface-1), transparent 90%)",
+      }}
+    >
+      {/* Tint rail — colors the row's left edge with the level tone.
+          Reads as gradient ribbon when stacked, error rows visually
+          cluster together. */}
+      <span
+        aria-hidden
+        style={{
+          backgroundColor:
+            entry.level === "error" || entry.level === "warn"
+              ? pres.tone
+              : "transparent",
+        }}
+      />
+      {/* Level pill — fixed 38px column keeps the timestamp + text
+          aligned across every row regardless of which level fired. */}
+      <span
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          fontWeight: "var(--weight-semibold)",
+          letterSpacing: "var(--tracking-caps)",
+          color: pres.tone,
+          alignSelf: "start",
+          paddingTop: 1,
+        }}
+      >
+        {pres.tag}
+      </span>
+      <span
+        className="tabular"
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          color: "var(--text-tertiary)",
+          alignSelf: "start",
+          paddingTop: 1,
+        }}
+      >
+        {time}
+      </span>
+      <span
+        style={{
           fontFamily: "var(--font-mono)",
           fontSize: "var(--text-xs)",
-          color: tone,
+          color:
+            entry.level === "error"
+              ? "var(--text-primary)"
+              : entry.level === "warn"
+                ? "var(--text-primary)"
+                : "var(--text-secondary)",
           fontVariantLigatures: "none",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          minWidth: 0,
         }}
       >
         {entry.text}
       </span>
     </div>
   );
+}
+
+function formatLogTime(ts: number): string {
+  if (!ts || !Number.isFinite(ts)) return "--:--:--";
+  const d = new Date(ts);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
 }
 
 function Dot({ color }: { color: string }) {

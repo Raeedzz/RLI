@@ -113,12 +113,52 @@ export async function loadState(): Promise<Partial<AppState> | null> {
       settings,
       markdownView,
     } = parsed;
+    // Strip any persisted `project-settings` tabs — those used to be
+    // how settings opened, but the overlay route owns that flow now.
+    // Surviving tabs would still render as a stale "Settings" entry
+    // in the main column on cold start.
+    const cleanTabs: AppState["tabs"] = {};
+    const staleTabIds = new Set<string>();
+    for (const id of Object.keys(tabs)) {
+      const t = tabs[id];
+      if (t.kind === "project-settings") {
+        staleTabIds.add(id);
+      } else {
+        cleanTabs[id] = t;
+      }
+    }
+
     // Migrate older v2 worktrees that predate `secondaryTerminals` —
     // seed it from the legacy single-pty id so existing saved state
-    // gets a one-tab terminal strip rather than an empty one.
+    // gets a one-tab terminal strip rather than an empty one. Also
+    // remap the deprecated rightPanel = "checks" to "browser" — the
+    // Checks slot was replaced by the Browser tab and the union no
+    // longer includes "checks". Also filter out any tabIds pointing
+    // at the project-settings tabs we just stripped.
     const migratedWorktrees: AppState["worktrees"] = {};
     for (const id of Object.keys(worktrees)) {
-      const w = worktrees[id];
+      let w = worktrees[id];
+      if (
+        (w as { rightPanel?: unknown }).rightPanel === "checks"
+      ) {
+        w = { ...w, rightPanel: "browser" };
+      }
+      // Drop any tabIds pointing at the project-settings tabs we
+      // stripped above so the worktree's strip doesn't reference a
+      // missing tab on next paint.
+      if (staleTabIds.size > 0) {
+        const filtered = w.tabIds.filter((tid) => !staleTabIds.has(tid));
+        if (filtered.length !== w.tabIds.length) {
+          w = {
+            ...w,
+            tabIds: filtered,
+            activeTabId:
+              w.activeTabId && staleTabIds.has(w.activeTabId)
+                ? (filtered[0] ?? null)
+                : w.activeTabId,
+          };
+        }
+      }
       if (
         !Array.isArray((w as { secondaryTerminals?: unknown }).secondaryTerminals) ||
         (w as { secondaryTerminals?: unknown[] }).secondaryTerminals!.length === 0
@@ -144,7 +184,7 @@ export async function loadState(): Promise<Partial<AppState> | null> {
       projects,
       projectOrder,
       worktrees: migratedWorktrees,
-      tabs,
+      tabs: cleanTabs,
       activeProjectId,
       activeWorktreeByProject,
       archivedWorktrees,

@@ -68,7 +68,12 @@ export function RepositorySettingsView({ projectId }: { projectId: string }) {
         style={{
           maxWidth: PAGE_MAX,
           margin: "0 auto",
-          padding: "var(--space-9) var(--space-7) var(--space-12)",
+          // Space-7/9/11 don't exist in our token scale — the old
+          // declaration parsed as invalid and was dropped, which is
+          // why the header used to sit flush against the top. The
+          // real-token values below give the page proper breathing
+          // room top and bottom.
+          padding: "var(--space-12) var(--space-6) var(--space-16)",
           display: "flex",
           flexDirection: "column",
           gap: "var(--space-6)",

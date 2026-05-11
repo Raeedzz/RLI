@@ -98,6 +98,7 @@ export const INITIAL_STATE: AppState = {
   paletteOpen: false,
   searchOpen: false,
   settingsOpen: false,
+  settingsSection: { kind: "general" },
   prDialogOpen: null,
   settings: DEFAULT_SETTINGS,
   markdownView: "rich",
@@ -543,8 +544,43 @@ export function reducer(state: AppState, action: AppAction): AppState {
           : null,
       };
 
-    case "set-settings-open":
-      return { ...state, settingsOpen: action.open };
+    case "set-settings-open": {
+      // When the caller deep-links into a specific repo's settings,
+      // we also sweep any stale `project-settings` tabs out of the
+      // workspace — those used to be how settings opened, and the
+      // overlay is meant to replace them. Tabs surviving an upgrade
+      // would still render as a "Settings" tab in the main column,
+      // which is exactly what we're trying to escape from.
+      const next: AppState = {
+        ...state,
+        settingsOpen: action.open,
+        settingsSection: action.section ?? state.settingsSection,
+      };
+      if (!action.open) return next;
+      const staleIds = Object.values(state.tabs)
+        .filter((t) => t.kind === "project-settings")
+        .map((t) => t.id);
+      if (staleIds.length === 0) return next;
+      const tabs = { ...next.tabs };
+      for (const id of staleIds) delete tabs[id];
+      const worktrees = { ...next.worktrees };
+      for (const w of Object.values(worktrees)) {
+        if (w.tabIds.some((id) => staleIds.includes(id))) {
+          worktrees[w.id] = {
+            ...w,
+            tabIds: w.tabIds.filter((id) => !staleIds.includes(id)),
+            activeTabId:
+              w.activeTabId && staleIds.includes(w.activeTabId)
+                ? (w.tabIds.find((id) => !staleIds.includes(id)) ?? null)
+                : w.activeTabId,
+          };
+        }
+      }
+      return { ...next, tabs, worktrees };
+    }
+
+    case "set-settings-section":
+      return { ...state, settingsSection: action.section };
 
     case "toggle-settings":
       return { ...state, settingsOpen: !state.settingsOpen };

@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { type CSSProperties, type ReactNode } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   IconBack,
@@ -17,29 +17,26 @@ import type {
   CompletionSound,
   ProjectId,
   Settings,
+  SettingsSection,
 } from "@/state/types";
 import { RepositorySettingsView } from "./RepositorySettingsView";
-
-/**
- * Which page is showing in the main pane. `"general"` = global RLI
- * settings; `{ kind: "repository", id }` = per-repo settings for the
- * project of that id, rendered via the same component the in-tab
- * Repository Settings page uses.
- */
-type Section =
-  | { kind: "general" }
-  | { kind: "repository"; id: ProjectId };
 
 /**
  * Full-window settings overlay. Replaces the 3-column shell while open.
  * Two sections — General (RLI-relevant toggles) and Repositories
  * (snapshot of the projects list). Esc / Back-to-app dismisses.
+ *
+ * Which section is shown lives on AppState (`settingsSection`) so the
+ * Sidebar's "Repository settings" entry can deep-link into a specific
+ * project's page without remounting the overlay.
  */
 export function SettingsView() {
   const state = useAppState();
   const dispatch = useAppDispatch();
   const open = state.settingsOpen;
-  const [section, setSection] = useState<Section>({ kind: "general" });
+  const section = state.settingsSection;
+  const setSection = (s: SettingsSection) =>
+    dispatch({ type: "set-settings-section", section: s });
 
   const close = () => dispatch({ type: "set-settings-open", open: false });
   const projects = state.projectOrder
@@ -89,8 +86,8 @@ function SettingsSidebar({
   onClose,
   projects,
 }: {
-  current: Section;
-  onPick: (s: Section) => void;
+  current: SettingsSection;
+  onPick: (s: SettingsSection) => void;
   onClose: () => void;
   projects: { id: ProjectId; name: string }[];
 }) {
@@ -316,7 +313,7 @@ function SettingsMain({
   section,
   settings,
 }: {
-  section: Section;
+  section: SettingsSection;
   settings: Settings;
 }) {
   if (section.kind === "repository") {
@@ -342,7 +339,11 @@ function SettingsMain({
         height: "100%",
         overflow: "auto",
         backgroundColor: "var(--surface-0)",
-        padding: "calc(var(--space-8) + 32px) max(var(--space-12), 8vw) var(--space-8)",
+        // Match the repository page's breathing room — generous top
+        // (clears traffic lights + adds visual rest), generous bottom
+        // (last row never butts against the window edge).
+        padding:
+          "calc(var(--space-12) + 32px) max(var(--space-12), 8vw) var(--space-16)",
       }}
     >
       <h1

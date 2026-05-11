@@ -107,7 +107,7 @@ export function Sidebar() {
             padding: "0 var(--space-1) var(--space-2)",
             display: "flex",
             flexDirection: "column",
-            gap: 6,
+            gap: 4,
           }}
         >
           {projectIds.map((id) => {
@@ -158,7 +158,7 @@ function SidebarHeader() {
   return (
     <div
       style={{
-        height: 36,
+        height: 32,
         flexShrink: 0,
         display: "flex",
         alignItems: "center",
@@ -192,7 +192,7 @@ function ProjectsHeader() {
       style={{
         display: "flex",
         alignItems: "center",
-        height: 30,
+        height: 26,
         padding: "0 var(--space-2) 0 var(--space-3)",
         color: "var(--text-tertiary)",
         fontSize: "var(--text-xs)",
@@ -255,61 +255,14 @@ function ProjectGroup({
     }
   };
 
-  const onOpenSettings = async () => {
-    const tabId = `t_settings_${project.id}`;
-    // The settings tab is per-project but Tabs are scoped to a
-    // worktree, so we attach it to whichever worktree is currently
-    // active for this project (or the first one). When the project
-    // has no worktrees we mint one on the fly so the user is never
-    // stuck in a dead end.
-    let wt: Worktree | null =
-      (state.activeWorktreeByProject[project.id] &&
-        state.worktrees[state.activeWorktreeByProject[project.id]!]) ||
-      Object.values(state.worktrees).find((w) => w.projectId === project.id) ||
-      null;
-    if (!wt) {
-      try {
-        const branch = nextAutoBranch(project.id, state);
-        const cfg = projectSettings(project);
-        const created = await worktreeCreate(
-          project.id,
-          project.path,
-          branch,
-          branch,
-          {
-            baseRef: cfg.baseBranch,
-            filesToCopy: cfg.filesToCopy,
-            setupScript: cfg.setupScript,
-          },
-        );
-        dispatch({ type: "add-worktree", worktree: created });
-        wt = created;
-      } catch (err) {
-        toast.show({ message: `Could not open settings: ${err}` });
-        return;
-      }
-    }
-    // Switch the user's view so the tab they just opened is what they
-    // actually see. Without these the tab is added to a worktree that
-    // isn't the active one, so MainColumn keeps rendering the previous
-    // surface.
-    dispatch({ type: "set-active-project", id: project.id });
+  const onOpenSettings = () => {
+    // Open the full-window Settings overlay deep-linked into this
+    // project's Repository page. Lives outside the 3-column shell so
+    // settings never steals the center column.
     dispatch({
-      type: "set-active-worktree",
-      projectId: project.id,
-      worktreeId: wt.id,
-    });
-    dispatch({
-      type: "open-tab",
-      tab: {
-        id: tabId,
-        worktreeId: wt.id,
-        kind: "project-settings",
-        projectId: project.id,
-        title: "Settings",
-        summary: project.path,
-        summaryUpdatedAt: Date.now(),
-      },
+      type: "set-settings-open",
+      open: true,
+      section: { kind: "repository", id: project.id },
     });
   };
 
@@ -394,15 +347,15 @@ function ProjectGroup({
           display: "flex",
           alignItems: "center",
           gap: 12,
-          // Sidebar rows share a single 42px height so the project
+          // Sidebar rows share a single 36px height so the project
           // header, History button, and worktree rows line up vertically
           // as a uniform rail.
-          height: 42,
+          height: 36,
           padding: "0 var(--space-2)",
           margin: "0 4px",
           borderRadius: "var(--radius-sm)",
           color: "var(--text-primary)",
-          fontSize: "var(--text-md)",
+          fontSize: "var(--text-sm)",
           fontWeight: "var(--weight-semibold)",
           cursor: "default",
           userSelect: "none",
@@ -499,8 +452,8 @@ function ProjectGlyph({ project }: { project: Project }) {
       <span
         aria-hidden
         style={{
-          width: 20,
-          height: 20,
+          width: 18,
+          height: 18,
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
@@ -510,7 +463,7 @@ function ProjectGlyph({ project }: { project: Project }) {
           flexShrink: 0,
         }}
       >
-        <Glyph size={18} />
+        <Glyph size={16} />
       </span>
     );
   }
@@ -519,8 +472,8 @@ function ProjectGlyph({ project }: { project: Project }) {
       <img
         src={project.faviconDataUri}
         alt=""
-        width={20}
-        height={20}
+        width={18}
+        height={18}
         style={{ borderRadius: 4, flexShrink: 0 }}
       />
     );
@@ -529,8 +482,8 @@ function ProjectGlyph({ project }: { project: Project }) {
     <span
       aria-hidden
       style={{
-        width: 20,
-        height: 20,
+        width: 18,
+        height: 18,
         borderRadius: 4,
         backgroundColor: project.color
           ? `color-mix(in oklch, var(--surface-3), var(--tag-${project.color}) 35%)`
@@ -568,7 +521,7 @@ function HistorySection({ records }: { records: ArchiveRecord[] }) {
           display: "flex",
           alignItems: "center",
           gap: 12,
-          height: 42,
+          height: 36,
           // History anchors the top-left "tab" of the sidebar — its hover
           // surface fills the row edge-to-edge instead of inset like the
           // worktree rows below. Padding compensates so the icon sits at
@@ -592,8 +545,8 @@ function HistorySection({ records }: { records: ArchiveRecord[] }) {
           e.currentTarget.style.backgroundColor = "transparent";
         }}
       >
-        <IconHistory size={16} />
-        <span style={{ fontSize: "var(--text-md)" }}>History</span>
+        <IconHistory size={15} />
+        <span style={{ fontSize: "var(--text-sm)" }}>History</span>
         <span style={{ flex: 1 }} />
         {records.length > 0 && (
           <span
@@ -667,9 +620,9 @@ function HistorySection({ records }: { records: ArchiveRecord[] }) {
                     display: "flex",
                     alignItems: "center",
                     gap: 6,
-                    height: 26,
+                    height: 24,
                     width: "100%",
-                    padding: "0 var(--space-3) 0 28px",
+                    padding: "0 var(--space-3) 0 30px",
                     color: "var(--text-tertiary)",
                     fontSize: "var(--text-xs)",
                     backgroundColor: "transparent",
@@ -914,12 +867,12 @@ function WorktreeRow({
     gap: 12,
     width: "calc(100% - 8px)",
     margin: "0 4px",
-    height: 42,
-    padding: "0 var(--space-2) 0 36px",
+    height: 36,
+    padding: "0 var(--space-2) 0 32px",
     borderRadius: "var(--radius-sm)",
     backgroundColor: startBg,
     color: textColor,
-    fontSize: "var(--text-md)",
+    fontSize: "var(--text-sm)",
     textAlign: "left",
     border: "none",
     cursor: "default",
@@ -1499,7 +1452,7 @@ function SidebarFooter() {
   return (
     <div
       style={{
-        height: 36,
+        height: 32,
         flexShrink: 0,
         display: "flex",
         alignItems: "center",

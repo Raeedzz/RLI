@@ -160,7 +160,7 @@ export function projectSettings(project: Project | null | undefined): ProjectSet
    target, and a secondary terminal in the right panel.
    ------------------------------------------------------------------ */
 
-export type RightPanelTab = "files" | "changes" | "checks" | "memory";
+export type RightPanelTab = "files" | "changes" | "browser" | "memory";
 export type SecondaryTab = "setup" | "run" | "terminal";
 
 export interface Worktree {
@@ -284,6 +284,16 @@ export interface ProjectSettingsTab extends TabBase {
 }
 
 export type Tab = TerminalTab | DiffTab | MarkdownTab | ProjectSettingsTab;
+
+/**
+ * Which page the Settings overlay shows. `general` = global RLI
+ * settings; `repository` = per-repo settings for the named project.
+ * Lives on AppState so the Sidebar's "Repository settings" entry can
+ * deep-link directly to a specific repo's page.
+ */
+export type SettingsSection =
+  | { kind: "general" }
+  | { kind: "repository"; id: ProjectId };
 
 /* ------------------------------------------------------------------
    Archive — a previously-active worktree, persisted on close.
@@ -436,6 +446,10 @@ export interface AppState {
   paletteOpen: boolean;
   searchOpen: boolean;
   settingsOpen: boolean;
+  /** Which page the Settings overlay shows when opened. Lifted out of
+      the view so callers can deep-link into a specific repo's page
+      (e.g. the Sidebar's "Repository settings" entry). */
+  settingsSection: SettingsSection;
   prDialogOpen: {
     worktreeId: WorktreeId;
     /**
@@ -521,7 +535,8 @@ export type AppAction =
       worktreeId: WorktreeId | null;
       mode?: "manual" | "auto";
     }
-  | { type: "set-settings-open"; open: boolean }
+  | { type: "set-settings-open"; open: boolean; section?: SettingsSection }
+  | { type: "set-settings-section"; section: SettingsSection }
   | { type: "toggle-settings" }
   | { type: "update-settings"; patch: Partial<Settings> }
   | { type: "set-markdown-view"; view: "rich" | "source" }

@@ -28,6 +28,7 @@ import { GraphView } from "@/graph/GraphView";
 import { BlockTerminal } from "@/terminal/BlockTerminal";
 import { useToast } from "@/primitives/Toast";
 import { Loader } from "@/primitives/Loader";
+import { BrowserPane } from "@/browser/BrowserPane";
 
 /**
  * Right panel: top tabs (All files / Changes / Checks / Memory) + Review
@@ -104,9 +105,9 @@ function UpperPanel({ worktree }: { worktree: Worktree }) {
         />
         <PanelTab
           worktreeId={worktree.id}
-          label="Checks"
-          tab="checks"
-          active={worktree.rightPanel === "checks"}
+          label="Browser"
+          tab="browser"
+          active={worktree.rightPanel === "browser"}
         />
         <PanelTab
           worktreeId={worktree.id}
@@ -130,13 +131,27 @@ function UpperPanel({ worktree }: { worktree: Worktree }) {
         </button>
       </div>
 
-      <div style={{ minHeight: 0, overflow: "auto" }}>
+      <div style={{ minHeight: 0, overflow: "auto", position: "relative" }}>
         {worktree.rightPanel === "files" ? (
           <FilesView worktree={worktree} />
         ) : worktree.rightPanel === "changes" ? (
           <ChangesView worktree={worktree} />
-        ) : worktree.rightPanel === "checks" ? (
-          <ChecksView />
+        ) : worktree.rightPanel === "browser" ? (
+          // BrowserPane drives the in-house Chrome daemon at
+          // $RLI_BROWSER_URL. Rendered embedded so it fills the panel
+          // instead of floating as its old standalone overlay. The
+          // pane's close button maps to switching the right panel
+          // back to the file tree.
+          <BrowserPane
+            embedded
+            onClose={() =>
+              dispatch({
+                type: "set-right-panel",
+                worktreeId: worktree.id,
+                panel: "files",
+              })
+            }
+          />
         ) : (
           <MemoryView />
         )}
@@ -1540,23 +1555,10 @@ function ScriptPanel({
 
   const openSettings = () => {
     if (!project) return;
-    dispatch({ type: "set-active-project", id: project.id });
     dispatch({
-      type: "set-active-worktree",
-      projectId: project.id,
-      worktreeId: worktree.id,
-    });
-    dispatch({
-      type: "open-tab",
-      tab: {
-        id: `t_settings_${project.id}`,
-        worktreeId: worktree.id,
-        kind: "project-settings",
-        projectId: project.id,
-        title: "Settings",
-        summary: project.path,
-        summaryUpdatedAt: Date.now(),
-      },
+      type: "set-settings-open",
+      open: true,
+      section: { kind: "repository", id: project.id },
     });
   };
 
@@ -1698,3 +1700,10 @@ function ScriptPanel({
 }
 
 void fs;
+// ChecksView is currently unrouted — its panel slot now hosts the
+// Browser tab. The component itself is retained because checks are
+// likely to come back as a different surface (status bar pill or
+// notifications drawer), so deleting and re-implementing would be
+// wasted work. The `void` reference silences the unused-locals
+// diagnostic without contributing runtime cost.
+void ChecksView;
