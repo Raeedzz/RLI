@@ -442,6 +442,7 @@ pub async fn worktree_restore(
     app: AppHandle,
     archive_id: String,
     project_id: String,
+    project_path: String,
 ) -> Result<WorktreeRow, String> {
     let dir = archive_dir(&app, &project_id)?;
     let file = dir.join(format!("{}.json", archive_id));
@@ -449,26 +450,59 @@ pub async fn worktree_restore(
     let record: ArchiveRecord = serde_json::from_str(&raw)
         .map_err(|e| format!("parse archive: {e}"))?;
 
-    let repo_root = infer_repo_root(&record.original_path);
+    // The worktree's own path is gone (that's what archive did), so we
+    // can't infer the repo root from it like worktree_archive does.
+    // The frontend hands us project_path explicitly — that's where the
+    // main repo lives and where `git worktree add` must run from.
+    if !Path::new(&project_path).exists() {
+        return Err(format!("project path does not exist: {project_path}"));
+    }
+
+    // git worktree add creates the leaf dir but not its parents. The
+    // archive was made under `~/GLI/workspaces/<basename>/<id>`; the
+    // parent `~/GLI/workspaces/<basename>` may have been emptied or
+    // collected since. Create it eagerly so the add never trips on a
+    // missing intermediate.
+    if let Some(parent) = Path::new(&record.original_path).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    // Re-target so the worktree id is fresh (the old one might still
+    // be referenced by stale archive metadata if the user restored
+    // before we deleted the JSON). The frontend keys session memory
+    // off the worktree id, so a clean uuid is what we want here.
+    let new_id = format!("w_{}", Uuid::new_v4().simple());
+    let restored_path = match Path::new(&record.original_path).parent() {
+        Some(parent) => parent.join(&new_id).to_string_lossy().to_string(),
+        None => record.original_path.clone(),
+    };
+    if let Some(parent) = Path::new(&restored_path).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
     git(
-        &repo_root,
-        &["worktree", "add", &record.original_path, &record.branch],
+        &project_path,
+        &["worktree", "add", &restored_path, &record.branch],
     )
     .await?;
 
     if let Some(stash_msg) = &record.stash_ref {
-        // Try `git stash list` to find the matching stash, then apply it.
-        let list = git(&record.original_path, &["stash", "list"]).await?;
-        if let Some(stash_idx) = list
-            .lines()
-            .position(|line| line.contains(stash_msg.as_str()))
-        {
-            let stash_ref = format!("stash@{{{stash_idx}}}");
-            let _ = git(
-                &record.original_path,
-                &["stash", "apply", "--index", &stash_ref],
-            )
-            .await;
+        // Now that the worktree exists again we can run git inside it
+        // to find and apply the matching stash. The stash itself lives
+        // on the parent repo's reflog, so listing from the new
+        // worktree resolves up via the `.git` file the same way.
+        if let Ok(list) = git(&restored_path, &["stash", "list"]).await {
+            if let Some(stash_idx) = list
+                .lines()
+                .position(|line| line.contains(stash_msg.as_str()))
+            {
+                let stash_ref = format!("stash@{{{stash_idx}}}");
+                let _ = git(
+                    &restored_path,
+                    &["stash", "apply", "--index", &stash_ref],
+                )
+                .await;
+            }
         }
     }
 
@@ -479,11 +513,11 @@ pub async fn worktree_restore(
     let secondary_pty = format!("pty_{}", Uuid::new_v4().simple());
 
     Ok(WorktreeRow {
-        id: format!("w_{}", Uuid::new_v4().simple()),
+        id: new_id,
         project_id,
         branch: record.branch,
         name: record.name,
-        path: record.original_path,
+        path: restored_path,
         change_count: 0,
         agent_status: "idle".to_string(),
         agent_cli: record.agent_cli,

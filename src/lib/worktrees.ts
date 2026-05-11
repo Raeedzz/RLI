@@ -79,8 +79,13 @@ export async function worktreeArchive(
 export async function worktreeRestore(
   archiveId: string,
   projectId: string,
+  projectPath: string,
 ): Promise<Worktree> {
-  return invoke<Worktree>("worktree_restore", { archiveId, projectId });
+  return invoke<Worktree>("worktree_restore", {
+    archiveId,
+    projectId,
+    projectPath,
+  });
 }
 
 export async function archiveList(

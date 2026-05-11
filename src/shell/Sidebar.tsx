@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -21,7 +22,6 @@ import {
   IconBranch,
   IconRunning,
   IconClose,
-  IconHelp,
   IconSettings,
   IconEdit,
   IconPullRequest,
@@ -169,7 +169,7 @@ function SidebarHeader() {
       }}
     >
       <IconButton
-        title="Collapse sidebar  ⌘B"
+        title="Collapse sidebar · ⌘B"
         onClick={() => dispatch({ type: "toggle-sidebar" })}
       >
         <IconSidebar size={16} />
@@ -202,7 +202,7 @@ function ProjectsHeader() {
       <span>Projects</span>
       <span style={{ flex: 1 }} />
       <SmallIconButton
-        title="Open project (⌘O)"
+        title="Open file"
         onClick={() => void openProjectDialog(dispatch)}
       >
         <IconFolderAdd size={14} />
@@ -556,6 +556,7 @@ function ProjectGlyph({ project }: { project: Project }) {
 
 function HistorySection({ records }: { records: ArchiveRecord[] }) {
   const dispatch = useAppDispatch();
+  const projects = useAppState().projects;
   const toast = useToast();
   const [open, setOpen] = useState(false);
   return (
@@ -621,12 +622,41 @@ function HistorySection({ records }: { records: ArchiveRecord[] }) {
                 <button
                   type="button"
                   onClick={async () => {
+                    const project = projects[r.projectId];
+                    if (!project) {
+                      toast.show({
+                        message:
+                          "Restore failed: the project this worktree belonged to is no longer open.",
+                      });
+                      return;
+                    }
                     try {
-                      const w = await worktreeRestore(r.id, r.projectId);
+                      const w = await worktreeRestore(
+                        r.id,
+                        r.projectId,
+                        project.path,
+                      );
                       dispatch({
                         type: "restore-worktree",
                         archiveId: r.id,
                         worktree: w,
+                      });
+                      // The restored worktree comes back with a fresh
+                      // primary tab id in w.tabIds[0] but no Tab record
+                      // anywhere — Tab carries runtime fields (PTY id,
+                      // summary) that only the frontend can mint. Open
+                      // the primary terminal tab and focus the worktree
+                      // so the user lands on a live shell instead of
+                      // an empty pane.
+                      dispatch({
+                        type: "open-tab",
+                        tab: primaryTerminalTab(w),
+                      });
+                      dispatch({ type: "set-active-project", id: r.projectId });
+                      dispatch({
+                        type: "set-active-worktree",
+                        projectId: r.projectId,
+                        worktreeId: w.id,
                       });
                       toast.show({ message: `Restored ${r.name}` });
                     } catch (err) {
@@ -816,11 +846,25 @@ function WorktreeRow({
           label: "Restore",
           onClick: async () => {
             try {
-              const restored = await worktreeRestore(record.id, project.id);
+              const restored = await worktreeRestore(
+                record.id,
+                project.id,
+                project.path,
+              );
               dispatch({
                 type: "restore-worktree",
                 archiveId: record.id,
                 worktree: restored,
+              });
+              dispatch({
+                type: "open-tab",
+                tab: primaryTerminalTab(restored),
+              });
+              dispatch({ type: "set-active-project", id: project.id });
+              dispatch({
+                type: "set-active-worktree",
+                projectId: project.id,
+                worktreeId: restored.id,
               });
             } catch (err) {
               toast.show({ message: `Restore failed: ${err}` });
@@ -1465,11 +1509,8 @@ function SidebarFooter() {
         borderTop: "var(--border-1)",
       }}
     >
-      <IconButton title="Help">
-        <IconHelp size={16} />
-      </IconButton>
       <IconButton
-        title="Settings  ⌘,"
+        title="Settings · ⌘,"
         onClick={() => dispatch({ type: "set-settings-open", open: true })}
       >
         <IconSettings size={16} />
@@ -1493,40 +1534,95 @@ function IconButton({
   disabled?: boolean;
   children: ReactNode;
 }) {
+  const { ref, anchor, beginShow, cancelShow } =
+    useButtonTooltip<HTMLButtonElement>();
   return (
-    <button
-      type="button"
-      title={title}
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        width: 24,
-        height: 24,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        borderRadius: "var(--radius-sm)",
-        color: disabled ? "var(--text-disabled)" : "var(--text-tertiary)",
-        backgroundColor: "transparent",
-        cursor: disabled ? "default" : "default",
-        transition:
-          "background-color var(--motion-instant) var(--ease-out-quart)," +
-          "color var(--motion-instant) var(--ease-out-quart)",
-      }}
-      onMouseOver={(e) => {
-        if (disabled) return;
-        e.currentTarget.style.backgroundColor = "var(--surface-3)";
-        e.currentTarget.style.color = "var(--text-primary)";
-      }}
-      onMouseOut={(e) => {
-        if (disabled) return;
-        e.currentTarget.style.backgroundColor = "transparent";
-        e.currentTarget.style.color = "var(--text-tertiary)";
-      }}
-    >
-      {children}
-    </button>
+    <>
+      <button
+        ref={ref}
+        type="button"
+        title={title}
+        onClick={(e) => {
+          cancelShow();
+          onClick?.(e);
+        }}
+        disabled={disabled}
+        onMouseEnter={(e) => {
+          if (disabled) return;
+          e.currentTarget.style.backgroundColor = "var(--surface-3)";
+          e.currentTarget.style.color = "var(--text-primary)";
+          beginShow();
+        }}
+        onMouseLeave={(e) => {
+          if (disabled) return;
+          e.currentTarget.style.backgroundColor = "transparent";
+          e.currentTarget.style.color = "var(--text-tertiary)";
+          cancelShow();
+        }}
+        style={{
+          width: 24,
+          height: 24,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          borderRadius: "var(--radius-sm)",
+          color: disabled ? "var(--text-disabled)" : "var(--text-tertiary)",
+          backgroundColor: "transparent",
+          cursor: disabled ? "default" : "default",
+          transition:
+            "background-color var(--motion-instant) var(--ease-out-quart)," +
+            "color var(--motion-instant) var(--ease-out-quart)",
+        }}
+      >
+        {children}
+      </button>
+      <AnimatePresence>
+        {!disabled && anchor && <ButtonTooltip label={title} anchor={anchor} />}
+      </AnimatePresence>
+    </>
   );
+}
+
+/**
+ * Hook that powers the custom button tooltip. Manages the 400ms hover
+ * intent timer, a one-shot anchor-rect snapshot, and cleanup on
+ * unmount. Returned `ref` is attached to the button; `beginShow` /
+ * `cancelShow` are wired into the button's mouse-enter/leave / click
+ * handlers. The companion <ButtonTooltip> reads `anchor` to portal
+ * the tooltip into <body>.
+ */
+function useButtonTooltip<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const showTimerRef = useRef<number | null>(null);
+
+  const SHOW_DELAY_MS = 400;
+
+  const beginShow = () => {
+    if (anchor || showTimerRef.current) return;
+    showTimerRef.current = window.setTimeout(() => {
+      showTimerRef.current = null;
+      if (ref.current) {
+        setAnchor(ref.current.getBoundingClientRect());
+      }
+    }, SHOW_DELAY_MS);
+  };
+
+  const cancelShow = () => {
+    if (showTimerRef.current) {
+      window.clearTimeout(showTimerRef.current);
+      showTimerRef.current = null;
+    }
+    setAnchor(null);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (showTimerRef.current) window.clearTimeout(showTimerRef.current);
+    };
+  }, []);
+
+  return { ref, anchor, beginShow, cancelShow };
 }
 
 function SmallIconButton({
@@ -1538,36 +1634,150 @@ function SmallIconButton({
   onClick?: (e: MouseEvent) => void;
   children: ReactNode;
 }) {
+  const { ref, anchor, beginShow, cancelShow } =
+    useButtonTooltip<HTMLButtonElement>();
   return (
-    <button
-      type="button"
-      title={title}
-      onClick={onClick}
+    <>
+      <button
+        ref={ref}
+        type="button"
+        // Keep the native title as an accessibility fallback. Browsers
+        // suppress the native tooltip while our custom one is mounted,
+        // so there's no double-tip.
+        title={title}
+        onClick={(e) => {
+          cancelShow();
+          onClick?.(e);
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.backgroundColor = "var(--surface-3)";
+          e.currentTarget.style.color = "var(--text-primary)";
+          beginShow();
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.backgroundColor = "transparent";
+          e.currentTarget.style.color = "var(--text-tertiary)";
+          cancelShow();
+        }}
+        style={{
+          width: 18,
+          height: 18,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          borderRadius: "var(--radius-xs)",
+          color: "var(--text-tertiary)",
+          backgroundColor: "transparent",
+          cursor: "default",
+          transition:
+            "background-color var(--motion-instant) var(--ease-out-quart)," +
+            "color var(--motion-instant) var(--ease-out-quart)",
+        }}
+      >
+        {children}
+      </button>
+      <AnimatePresence>
+        {anchor && <ButtonTooltip label={title} anchor={anchor} />}
+      </AnimatePresence>
+    </>
+  );
+}
+
+/**
+ * Floating tooltip anchored to an icon button. Portaled to <body> so
+ * it escapes the sidebar's clip context. Placement is decided AFTER
+ * the tooltip is rendered (off-screen on the first frame) so we can
+ * use real measured dimensions instead of guessing — this is why the
+ * old viewport-clamp math snapped sidebar-edge tooltips to a fixed
+ * X. Now:
+ *
+ *   horizontal: left edge aligned with the button's left, flipped to
+ *               right-aligned with the button's right if the default
+ *               would clip the right edge of the viewport
+ *
+ *   vertical:   anchored 6px below the button by default, flipped to
+ *               6px above if "below" would push past the viewport
+ *               bottom — that's the case for the settings gear sitting
+ *               in the SidebarFooter at the very bottom of the rail,
+ *               which is why the old code's tooltip was invisible
+ *               there
+ *
+ * The two-pass render avoids visible flicker because `useLayoutEffect`
+ * fires synchronously before the browser paints — the first off-screen
+ * frame never reaches the user's eyes.
+ */
+function ButtonTooltip({
+  label,
+  anchor,
+}: {
+  label: string;
+  anchor: DOMRect;
+}) {
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = tooltipRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const GAP = 6;
+    const SAFE = 8;
+
+    // Horizontal: align tooltip's left edge with the button's left,
+    // right-flip if that would clip, finally clamp to the viewport
+    // left margin so it never disappears past x<0.
+    let left = anchor.left;
+    if (left + rect.width > window.innerWidth - SAFE) {
+      left = anchor.right - rect.width;
+    }
+    left = Math.max(SAFE, left);
+
+    // Vertical: below the button by default, flipped to above when
+    // there isn't enough room. Floor at SAFE so we never paint above
+    // the viewport top in pathological cases (button taller than the
+    // viewport, etc.).
+    let top = anchor.bottom + GAP;
+    if (top + rect.height > window.innerHeight - SAFE) {
+      top = anchor.top - GAP - rect.height;
+    }
+    top = Math.max(SAFE, top);
+
+    setPos({ top, left });
+  }, [anchor]);
+
+  return createPortal(
+    <motion.div
+      ref={tooltipRef}
+      initial={{ opacity: 0, y: -4 }}
+      animate={pos ? { opacity: 1, y: 0 } : { opacity: 0, y: -4 }}
+      exit={{ opacity: 0, y: -3, transition: { duration: 0.12 } }}
+      transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
       style={{
-        width: 18,
-        height: 18,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        borderRadius: "var(--radius-xs)",
-        color: "var(--text-tertiary)",
-        backgroundColor: "transparent",
-        cursor: "default",
-        transition:
-          "background-color var(--motion-instant) var(--ease-out-quart)," +
-          "color var(--motion-instant) var(--ease-out-quart)",
-      }}
-      onMouseOver={(e) => {
-        e.currentTarget.style.backgroundColor = "var(--surface-3)";
-        e.currentTarget.style.color = "var(--text-primary)";
-      }}
-      onMouseOut={(e) => {
-        e.currentTarget.style.backgroundColor = "transparent";
-        e.currentTarget.style.color = "var(--text-tertiary)";
+        position: "fixed",
+        // First render: park far off-screen so the unmeasured tooltip
+        // never paints in the wrong place. After useLayoutEffect runs
+        // we re-render with real coordinates before the browser commits.
+        top: pos ? pos.top : -9999,
+        left: pos ? pos.left : -9999,
+        maxWidth: 240,
+        backgroundColor: "var(--surface-4)",
+        color: "var(--text-primary)",
+        border: "1px solid var(--border-default)",
+        borderRadius: "var(--radius-sm)",
+        padding: "4px 8px",
+        fontSize: "var(--text-xs)",
+        fontFamily: "var(--font-sans)",
+        fontWeight: "var(--weight-medium)",
+        letterSpacing: "var(--tracking-tight)",
+        whiteSpace: "nowrap",
+        pointerEvents: "none",
+        boxShadow: "0 2px 8px oklch(0% 0 0 / 0.35)",
+        zIndex: 1100,
       }}
     >
-      {children}
-    </button>
+      {label}
+    </motion.div>,
+    document.body,
   );
 }
 
@@ -1596,7 +1806,7 @@ function CollapsedRail() {
       </IconButton>
       <span />
       <IconButton
-        title="Settings  ⌘,"
+        title="Settings · ⌘,"
         onClick={() => dispatch({ type: "set-settings-open", open: true })}
       >
         <IconSettings size={16} />
