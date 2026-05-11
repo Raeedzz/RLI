@@ -91,11 +91,16 @@ export function useKeyboardShortcuts() {
 
       // ⌘T — open a new terminal tab in the main column of the active
       // worktree. Each tab gets a fresh PTY id, named "shell" until the
-      // first prompt sets a real title.
+      // first prompt sets a real title. The random suffix matters: two
+      // ⌘T presses in the same millisecond would otherwise mint the
+      // same tab id and the second one would overwrite the first in
+      // the reducer's tabs map.
       if (cmd && !shift && e.key.toLowerCase() === "t" && worktree) {
         e.preventDefault();
-        const id = `t_${Date.now().toString(36)}`;
-        const ptyId = `pty_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        const stamp = Date.now().toString(36);
+        const rand = Math.random().toString(36).slice(2, 8);
+        const id = `t_${stamp}_${rand}`;
+        const ptyId = `pty_${stamp}_${rand}`;
         dispatch({
           type: "open-tab",
           tab: {

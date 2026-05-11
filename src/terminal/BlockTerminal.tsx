@@ -109,6 +109,16 @@ interface Props {
    * the status bar) reflect the running command in real time.
    */
   onActivitySummaryChange?: (summary: string) => void;
+  /**
+   * Whether the parent already knows the foregrounded process is an
+   * interactive agent. Set when re-mounting a tab whose PTY has been
+   * running claude/codex/etc. before the user switched away — without
+   * this seed, foregroundIsAgent restarts at false on each remount and
+   * RLI's PromptInput briefly renders alongside the agent's own UI.
+   */
+  initialAgentRunning?: boolean;
+  /** Detected CLI to seed `activeCommand` from on mount. */
+  initialAgentCli?: DetectedAgentCli;
 }
 
 const DEFAULT_ROWS = 32;
@@ -142,6 +152,8 @@ export function BlockTerminal({
   onClaudeDetected,
   onAgentRunningChange,
   onActivitySummaryChange,
+  initialAgentRunning = false,
+  initialAgentCli = null,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<PromptInputHandle>(null);
@@ -194,16 +206,31 @@ export function BlockTerminal({
   // its own input box inside the live frame, so we hide RLI's
   // PromptInput and route keystrokes through PtyPassthrough instead.
   const directAgent = useMemo(() => isAgentCommand(command), [command]);
-  const [foregroundIsAgent, setForegroundIsAgent] = useState(directAgent);
+  // Seed `foregroundIsAgent` from either:
+  //   1. directAgent — we were *launched* as the agent (rare, used by
+  //      direct-launch panes), or
+  //   2. `initialAgentRunning` — the parent already knew this tab's
+  //      PTY was inside an agent before we remounted (the common case
+  //      when the user toggles away from a tab and back). Without (2)
+  //      a remount briefly drops us into shell mode and PromptInput
+  //      paints under the still-running agent's own UI.
+  const [foregroundIsAgent, setForegroundIsAgent] = useState(
+    directAgent || initialAgentRunning,
+  );
 
   // What the user typed to start the currently-running command.
   // Populates the synthetic header on the in-progress LiveBlock; used
   // to trim zsh's command-echo line out of the live grid body so the
   // command doesn't appear twice (header + first body row). Cleared
   // when the OSC 133 D marker fires.
-  const [activeCommand, setActiveCommand] = useState<string>(
-    directAgent ? command : "",
-  );
+  const [activeCommand, setActiveCommand] = useState<string>(() => {
+    if (directAgent) return command;
+    // Re-mount path: parent told us a CLI was running. Seed activeCommand
+    // with the CLI name so the LiveBlock header and helper-agent routing
+    // both have a value to read until the user types again.
+    if (initialAgentRunning && initialAgentCli) return initialAgentCli;
+    return "";
+  });
 
   // Tell the parent (which dispatches into session state) every time
   // the foreground-agent flag flips. Done in an effect rather than

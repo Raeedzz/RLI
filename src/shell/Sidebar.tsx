@@ -367,18 +367,17 @@ function ProjectGroup({
   ];
 
   return (
-    <li
-      onMouseEnter={() => setHovering(true)}
-      onMouseLeave={() => setHovering(false)}
-    >
+    <li>
       <div
+        onMouseEnter={() => setHovering(true)}
+        onMouseLeave={() => setHovering(false)}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
           setMenuAnchor({ x: e.clientX, y: e.clientY });
         }}
         onDoubleClick={(e) => {
-          // Ignore double-clicks landing on the +new-worktree button.
+          // Ignore double-clicks landing on the action buttons.
           const t = e.target as HTMLElement;
           if (t.closest("button")) return;
           e.preventDefault();
@@ -387,14 +386,22 @@ function ProjectGroup({
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 10,
-          height: 38,
+          gap: 12,
+          // Sidebar rows share a single 42px height so the project
+          // header, History button, and worktree rows line up vertically
+          // as a uniform rail.
+          height: 42,
           padding: "0 var(--space-2)",
+          margin: "0 4px",
+          borderRadius: "var(--radius-sm)",
           color: "var(--text-primary)",
-          fontSize: "var(--text-base)",
+          fontSize: "var(--text-md)",
           fontWeight: "var(--weight-semibold)",
           cursor: "default",
           userSelect: "none",
+          backgroundColor: hovering ? "var(--surface-3)" : "transparent",
+          transition:
+            "background-color var(--motion-instant) var(--ease-out-quart)",
         }}
       >
         <ProjectGlyph project={project} />
@@ -409,9 +416,17 @@ function ProjectGroup({
           {project.name}
         </span>
         {hovering && (
-          <SmallIconButton title="New worktree" onClick={onCreate}>
-            <IconPlus size={14} />
-          </SmallIconButton>
+          <>
+            <SmallIconButton
+              title="Repository settings"
+              onClick={() => void onOpenSettings()}
+            >
+              <IconSettings size={14} />
+            </SmallIconButton>
+            <SmallIconButton title="New worktree" onClick={onCreate}>
+              <IconPlus size={14} />
+            </SmallIconButton>
+          </>
         )}
       </div>
 
@@ -544,16 +559,29 @@ function HistorySection({ records }: { records: ArchiveRecord[] }) {
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 8,
-          height: 30,
-          width: "100%",
+          gap: 12,
+          height: 42,
+          width: "calc(100% - 8px)",
+          margin: "0 4px",
           padding: "0 var(--space-3)",
           color: "var(--text-secondary)",
           backgroundColor: "transparent",
+          borderRadius: "var(--radius-sm)",
+          border: "none",
+          textAlign: "left",
+          cursor: "default",
+          transition:
+            "background-color var(--motion-instant) var(--ease-out-quart)",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.backgroundColor = "var(--surface-3)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.backgroundColor = "transparent";
         }}
       >
-        <IconHistory size={14} />
-        <span style={{ fontSize: "var(--text-sm)" }}>History</span>
+        <IconHistory size={16} />
+        <span style={{ fontSize: "var(--text-md)" }}>History</span>
         <span style={{ flex: 1 }} />
         {records.length > 0 && (
           <span
@@ -731,33 +759,40 @@ function WorktreeRow({
     }
   };
 
-  // Idle: transparent. Active: surface-3 fill. Hover: surface-2.
-  // When colored, blend the tag in subtly so the row reads tinted but
-  // doesn't fight the rest of the chrome.
+  // Idle: transparent. Hover: surface-3 (matches the project header
+  // hover so the sidebar reads as one consistent rail). Active:
+  // surface-4 fill plus a colored tag tint when set. When colored,
+  // blend the tag in subtly so the row reads tinted but doesn't fight
+  // the rest of the chrome.
   const colored = !!worktree.color;
   const restingBg = colored
     ? `color-mix(in oklch, transparent, var(--tag-${worktree.color}) 25%)`
     : "transparent";
   const hoverBg = colored
-    ? `color-mix(in oklch, var(--surface-2), var(--tag-${worktree.color}) 35%)`
-    : "var(--surface-2)";
-  const activeBg = colored
     ? `color-mix(in oklch, var(--surface-3), var(--tag-${worktree.color}) 35%)`
     : "var(--surface-3)";
+  const activeBg = colored
+    ? `color-mix(in oklch, var(--surface-4), var(--tag-${worktree.color}) 35%)`
+    : "var(--surface-4)";
   const startBg = isActive ? activeBg : restingBg;
   const textColor = isActive ? "var(--text-primary)" : "var(--text-secondary)";
 
+  // Match the project header: 4px outer inset on both sides creates a
+  // rounded "box" hover that lines up vertically with the header above
+  // it. width: calc(100% - 8px) keeps the box from butting against the
+  // sidebar's right edge.
   const rowStyle: CSSProperties = {
     display: "flex",
     alignItems: "center",
-    gap: 10,
-    width: "100%",
-    height: 34,
-    padding: "0 var(--space-2) 0 32px",
+    gap: 12,
+    width: "calc(100% - 8px)",
+    margin: "0 4px",
+    height: 42,
+    padding: "0 var(--space-2) 0 36px",
     borderRadius: "var(--radius-sm)",
     backgroundColor: startBg,
     color: textColor,
-    fontSize: "var(--text-base)",
+    fontSize: "var(--text-md)",
     textAlign: "left",
     border: "none",
     cursor: "default",
@@ -780,11 +815,16 @@ function WorktreeRow({
         onDoubleClick={onDoubleClick}
         onContextMenu={onContextMenu}
         style={rowStyle}
-        onMouseOver={(e) => {
-          if (!isActive) e.currentTarget.style.backgroundColor = hoverBg;
+        // Active rows lock to `activeBg` — hover does NOT override.
+        // Without this guard the row visibly flickers when the user
+        // mouses over the selected worktree.
+        onMouseEnter={(e) => {
+          if (isActive) return;
+          e.currentTarget.style.backgroundColor = hoverBg;
         }}
-        onMouseOut={(e) => {
-          if (!isActive) e.currentTarget.style.backgroundColor = restingBg;
+        onMouseLeave={(e) => {
+          if (isActive) return;
+          e.currentTarget.style.backgroundColor = restingBg;
         }}
       >
         <span

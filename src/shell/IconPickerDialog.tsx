@@ -127,7 +127,7 @@ export function IconPickerDialog({
             onMouseUp={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
             style={{
-              width: "min(640px, 90vw)",
+              width: "min(720px, 92vw)",
               maxHeight: "78vh",
               display: "grid",
               gridTemplateRows: "auto auto auto auto 1fr",
@@ -177,14 +177,14 @@ export function IconPickerDialog({
                   }}
                   style={{
                     width: "100%",
-                    height: 32,
-                    padding: "0 10px",
+                    height: 40,
+                    padding: "0 12px",
                     backgroundColor: "var(--surface-1)",
                     border: "var(--border-1)",
                     borderRadius: "var(--radius-sm)",
                     color: "var(--text-primary)",
                     fontFamily: "var(--font-sans)",
-                    fontSize: "var(--text-md)",
+                    fontSize: "var(--text-lg)",
                     fontWeight: "var(--weight-semibold)",
                     outline: "none",
                   }}
@@ -192,7 +192,7 @@ export function IconPickerDialog({
               ) : (
                 <span
                   style={{
-                    fontSize: "var(--text-md)",
+                    fontSize: "var(--text-lg)",
                     fontWeight: "var(--weight-semibold)",
                     color: "var(--text-primary)",
                   }}
@@ -262,9 +262,9 @@ export function IconPickerDialog({
                 style={{
                   display: "flex",
                   alignItems: "center",
-                  gap: 8,
-                  height: 32,
-                  padding: "0 10px",
+                  gap: 10,
+                  height: 40,
+                  padding: "0 12px",
                   backgroundColor: "var(--surface-1)",
                   border: "var(--border-1)",
                   borderRadius: "var(--radius-sm)",
@@ -285,7 +285,7 @@ export function IconPickerDialog({
                     outline: "none",
                     color: "var(--text-primary)",
                     fontFamily: "var(--font-sans)",
-                    fontSize: "var(--text-sm)",
+                    fontSize: "var(--text-md)",
                   }}
                 />
                 {query && (
@@ -321,8 +321,8 @@ export function IconPickerDialog({
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(48px, 1fr))",
-                  gap: 4,
+                  gridTemplateColumns: "repeat(auto-fill, minmax(56px, 1fr))",
+                  gap: 6,
                 }}
               >
                 {filtered.map((icon) => (
@@ -360,13 +360,13 @@ export function IconPickerDialog({
                     type="button"
                     onClick={() => onSelectIcon(undefined)}
                     style={{
-                      height: 26,
-                      padding: "0 12px",
+                      height: 32,
+                      padding: "0 14px",
                       backgroundColor: "transparent",
                       color: "var(--text-tertiary)",
                       border: "var(--border-1)",
                       borderRadius: "var(--radius-sm)",
-                      fontSize: "var(--text-xs)",
+                      fontSize: "var(--text-sm)",
                       cursor: "pointer",
                     }}
                   >
@@ -425,7 +425,7 @@ function IconCell({
         e.currentTarget.style.color = "var(--text-secondary)";
       }}
     >
-      <icon.Component size={18} />
+      <icon.Component size={22} />
     </button>
   );
 }
@@ -448,8 +448,8 @@ function ColorSwatch({
       title={id}
       onClick={onClick}
       style={{
-        width: 26,
-        height: 26,
+        width: 32,
+        height: 32,
         padding: 0,
         flexShrink: 0,
         borderRadius: "var(--radius-pill)",

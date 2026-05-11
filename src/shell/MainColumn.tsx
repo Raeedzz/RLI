@@ -87,8 +87,14 @@ function TabStrip({
   const dispatch = useAppDispatch();
 
   const onNewTerminalTab = () => {
-    const id = `t_${Date.now().toString(36)}`;
-    const ptyId = `pty_${id}`;
+    // Both ids carry a random suffix on top of Date.now(): two clicks
+    // landing in the same millisecond previously produced colliding
+    // ptyIds, which made the new tab attach to an already-running PTY
+    // (e.g. interrupting a running `claude` session in the prior tab).
+    const stamp = Date.now().toString(36);
+    const rand = Math.random().toString(36).slice(2, 8);
+    const id = `t_${stamp}_${rand}`;
+    const ptyId = `pty_${stamp}_${rand}`;
     dispatch({
       type: "open-tab",
       tab: {
@@ -187,10 +193,10 @@ function TabButton({
         position: "relative",
         display: "inline-flex",
         alignItems: "center",
-        gap: 6,
-        height: 32,
-        minWidth: 100,
-        maxWidth: 220,
+        gap: 8,
+        height: 40,
+        minWidth: 120,
+        maxWidth: 240,
         padding: "0 var(--space-2) 0 10px",
         cursor: "default",
         backgroundColor: active ? "var(--surface-2)" : "transparent",
@@ -218,19 +224,8 @@ function TabButton({
           <TabKindGlyph tab={tab} />
         )}
       </span>
-      <span
-        style={{
-          flex: 1,
-          minWidth: 0,
-          fontSize: "var(--text-base)",
-          fontWeight: "var(--weight-medium)",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {tabLabel(tab)}
-      </span>
+      <TabLabelStack tab={tab} />
+      <span style={{ flex: 1, minWidth: 0 }} />
       <button
         type="button"
         onClick={(e) => {
@@ -267,6 +262,81 @@ function TabButton({
       )}
     </motion.div>
   );
+}
+
+/**
+ * Two-line stack rendered inside a tab: the session title on top, a
+ * live one-line summary underneath. The summary is what makes the
+ * tab strip a glance-tool — at any moment the user can read what
+ * each parallel session is doing without switching tabs.
+ *
+ * Keeps the row height fixed so the chrome doesn't reflow when a
+ * summary arrives or clears.
+ */
+function TabLabelStack({ tab }: { tab: Tab }) {
+  const title = tabLabel(tab);
+  const summary = tabSummary(tab);
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "center",
+        gap: 1,
+        minWidth: 0,
+        maxWidth: 200,
+        lineHeight: 1.1,
+      }}
+    >
+      <span
+        style={{
+          fontSize: 13,
+          fontWeight: "var(--weight-medium)",
+          letterSpacing: "var(--tracking-tight)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {title}
+      </span>
+      {summary && (
+        <span
+          style={{
+            fontSize: 11,
+            color: "var(--text-tertiary)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {summary}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Pick the one-line summary to show under the tab title. We trust
+ * `tab.summary` (set by BlockTerminal via the helper-agent layer or
+ * the activeCommand fallback) for terminal tabs, and fall back to
+ * the file path for file-backed tabs so the line still carries
+ * information. Strings are truncated to a reasonable display width
+ * client-side; CSS handles the visual ellipsis.
+ */
+function tabSummary(tab: Tab): string {
+  const trim = (s: string | undefined | null): string => {
+    if (!s) return "";
+    const cleaned = s.replace(/\s+/g, " ").trim();
+    if (cleaned === "ready" || cleaned === "Untitled") return "";
+    return cleaned;
+  };
+  if (tab.kind === "terminal") return trim(tab.summary);
+  if (tab.kind === "diff" || tab.kind === "markdown") {
+    return trim(tab.filePath);
+  }
+  return trim(tab.summary);
 }
 
 /** Bare label for a tab — bare names only (no path, no subtitle).
@@ -368,6 +438,12 @@ function TerminalTabContent({
       autoSummarize={settings.autoSummarize}
       projectId={worktree.projectId}
       sessionId={worktree.id}
+      // Re-seed agent state on remount so an in-flight claude/codex
+      // session doesn't briefly drop back to shell mode (which paints
+      // PromptInput under the agent's own UI) when the user navigates
+      // back to the tab.
+      initialAgentRunning={tab.agentStatus === "running"}
+      initialAgentCli={tab.detectedCli}
       onAgentRunningChange={(running, cli) => {
         dispatch({
           type: "update-tab",
