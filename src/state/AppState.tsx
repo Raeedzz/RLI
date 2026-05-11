@@ -13,6 +13,7 @@ import type {
   Project,
   ProjectId,
   Tab,
+  TabBadge,
   Worktree,
   WorktreeId,
 } from "./types";
@@ -420,10 +421,29 @@ export function reducer(state: AppState, action: AppAction): AppState {
       };
     }
 
-    case "select-tab":
-      return updateWorktree(state, action.worktreeId, () => ({
-        activeTabId: action.id,
-      }));
+    case "select-tab": {
+      // Selecting a tab clears its "finished-unseen" badge — the user
+      // is now viewing it, so the result is no longer unread. We
+      // ignore "computing" badges here; those persist until the
+      // frame-heartbeat callback says the agent stopped.
+      const cur = state.tabs[action.id];
+      let tabs = state.tabs;
+      if (
+        cur &&
+        cur.kind === "terminal" &&
+        cur.badge === "finished-unseen"
+      ) {
+        tabs = {
+          ...state.tabs,
+          [action.id]: { ...cur, badge: "idle" } as Tab,
+        };
+      }
+      return updateWorktree(
+        { ...state, tabs },
+        action.worktreeId,
+        () => ({ activeTabId: action.id }),
+      );
+    }
 
     case "update-tab": {
       const cur = state.tabs[action.id];
@@ -446,6 +466,42 @@ export function reducer(state: AppState, action: AppAction): AppState {
             summary: action.summary,
             summaryUpdatedAt: Date.now(),
           } as Tab,
+        },
+      };
+    }
+
+    case "set-tab-computing": {
+      const cur = state.tabs[action.id];
+      if (!cur || cur.kind !== "terminal") return state;
+      let nextBadge: TabBadge;
+      if (action.computing) {
+        // Agent is actively producing output — pulse the dot.
+        nextBadge = "computing";
+      } else {
+        // Agent just went quiet. If the user is currently looking at
+        // this tab (it's the active tab in its worktree AND the
+        // active project is its project AND the active worktree is
+        // the tab's worktree — i.e., MainColumn is rendering this
+        // tab right now) → idle. Otherwise → finished-unseen so the
+        // tab strip flags an unread result.
+        const w = state.worktrees[cur.worktreeId];
+        const projectActive =
+          w != null && state.activeProjectId === w.projectId;
+        const worktreeActive =
+          w != null &&
+          state.activeWorktreeByProject[w.projectId] === w.id;
+        const tabActive = w != null && w.activeTabId === action.id;
+        const beingViewed = projectActive && worktreeActive && tabActive;
+        nextBadge = beingViewed ? "idle" : "finished-unseen";
+      }
+      // Skip a no-op write so React doesn't re-render the tab strip
+      // for state that didn't move.
+      if (cur.badge === nextBadge) return state;
+      return {
+        ...state,
+        tabs: {
+          ...state.tabs,
+          [action.id]: { ...cur, badge: nextBadge } as Tab,
         },
       };
     }

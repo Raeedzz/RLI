@@ -110,6 +110,19 @@ interface Props {
    */
   onActivitySummaryChange?: (summary: string) => void;
   /**
+   * Fires when the agent's "actively computing" state flips. Tied to a
+   * frame-arrival heartbeat, gated on foregroundIsAgent — flips true
+   * once a frame lands while in agent mode, flips false after no
+   * frames for `COMPUTING_QUIET_MS`. Distinct from
+   * onAgentRunningChange, which only says "an agent CLI is open";
+   * this is "the agent is doing work *right now*."
+   *
+   * Wired into the tab strip's badge dot: pulses blue while
+   * computing, solid blue when an unviewed result is waiting, grey
+   * when truly idle.
+   */
+  onComputingChange?: (computing: boolean) => void;
+  /**
    * Whether the parent already knows the foregrounded process is an
    * interactive agent. Set when re-mounting a tab whose PTY has been
    * running claude/codex/etc. before the user switched away — without
@@ -119,6 +132,15 @@ interface Props {
   initialAgentRunning?: boolean;
   /** Detected CLI to seed `activeCommand` from on mount. */
   initialAgentCli?: DetectedAgentCli;
+  /**
+   * Whether the parent already knows this tab was actively computing
+   * before the BlockTerminal remounted. Without this seed, a tab the
+   * user switches back to mid-stream resets the pulsing dot to idle
+   * until the next prompt submission — the heartbeat would then need
+   * to re-discover the in-flight work. Setting it from `tab.badge ===
+   * "computing"` continues the pulse seamlessly across the remount.
+   */
+  initialComputing?: boolean;
 }
 
 const DEFAULT_ROWS = 32;
@@ -152,8 +174,10 @@ export function BlockTerminal({
   onClaudeDetected,
   onAgentRunningChange,
   onActivitySummaryChange,
+  onComputingChange,
   initialAgentRunning = false,
   initialAgentCli = null,
+  initialComputing = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<PromptInputHandle>(null);
@@ -191,6 +215,10 @@ export function BlockTerminal({
   useEffect(() => {
     onActivitySummaryChangeRef.current = onActivitySummaryChange;
   }, [onActivitySummaryChange]);
+  const onComputingChangeRef = useRef(onComputingChange);
+  useEffect(() => {
+    onComputingChangeRef.current = onComputingChange;
+  }, [onComputingChange]);
   // For direct-launched claude sessions, fire the detected callback
   // on mount — there's no banner to sniff because we ARE the agent.
   useEffect(() => {
@@ -351,6 +379,88 @@ export function BlockTerminal({
   // After the PTY exits, downshift back to shell-mode chrome regardless
   // of what the last frame's flags were — those readings are stale.
   const agentMode = !exited && (altScreen || foregroundIsAgent);
+
+  // ── Agent computing heartbeat ─────────────────────────────────────
+  // "Computing" is gated on a SUBMISSION event, not on raw frame
+  // activity. Frames also flow while the user is typing into the
+  // agent's input box (each keystroke redraws the input area), and
+  // we explicitly don't want the dot to pulse while the user is
+  // composing — only after they've actually pressed Enter.
+  //
+  // State machine:
+  //   - isComputing flips TRUE when the user presses plain Enter
+  //     while in agent mode (PtyPassthrough.onSendBytes sees the CR
+  //     byte and calls `markPromptSubmitted`). Also true on mount
+  //     when `initialComputing` is set — that's how we survive a
+  //     BlockTerminal remount mid-agent-work.
+  //   - While true, the heartbeat tick checks frame staleness. If no
+  //     new frame has arrived for COMPUTING_QUIET_MS, the agent has
+  //     gone quiet → flip FALSE.
+  //   - Frames during the active window keep bumping lastFrameAtRef,
+  //     so a long-running agent stream keeps computing=true
+  //     indefinitely.
+  //
+  // Agent-mode exit (Ctrl+C, `/exit`, PTY death) hard-resets to
+  // false so the reducer's "finished-unseen" branch can fire for
+  // background tabs the user has navigated away from.
+  const lastFrameAtRef = useRef<number>(Date.now());
+  const lastFrameSeqRef = useRef<number>(-1);
+  useEffect(() => {
+    if (!liveFrame) return;
+    if (liveFrame.seq === lastFrameSeqRef.current) return;
+    lastFrameSeqRef.current = liveFrame.seq;
+    lastFrameAtRef.current = Date.now();
+  }, [liveFrame]);
+
+  const COMPUTING_QUIET_MS = 1500;
+  const HEARTBEAT_INTERVAL_MS = 400;
+  // initialComputing prop seeds this so a tab remounted while the
+  // agent is still working continues to pulse instead of resetting
+  // to idle until the next user submission. If the agent is actually
+  // quiet on remount, the heartbeat will flip this to false within
+  // COMPUTING_QUIET_MS — short-lived stale state, self-correcting.
+  const [isComputing, setIsComputing] = useState(() => initialComputing);
+
+  // Called by the PtyPassthrough byte wrapper below whenever the user
+  // presses plain Enter (CR, 0x0d) while in agent mode. That's our
+  // "user submitted a prompt to the agent" event.
+  const markPromptSubmitted = useCallback(() => {
+    lastFrameAtRef.current = Date.now();
+    setIsComputing((cur) => (cur ? cur : true));
+  }, []);
+
+  // When the agent exits cleanly OR the PTY dies, hard-reset
+  // computing to false so the badge doesn't sit pulsing forever on a
+  // dead session.
+  useEffect(() => {
+    if (!agentMode && isComputing) {
+      setIsComputing(false);
+    }
+  }, [agentMode, isComputing]);
+
+  // While computing is true, watch the frame heartbeat for quiet.
+  // We only run the interval when needed — when computing is false
+  // there's nothing to time out, and we'd be paying for a 400ms
+  // wakeup loop in every BlockTerminal for no reason.
+  useEffect(() => {
+    if (!isComputing) return;
+    const id = window.setInterval(() => {
+      const sinceFrame = Date.now() - lastFrameAtRef.current;
+      if (sinceFrame >= COMPUTING_QUIET_MS) {
+        setIsComputing(false);
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [isComputing]);
+
+  // Propagate state changes to the parent — single source of truth
+  // is local; the parent's job is to dispatch to the reducer.
+  const lastReportedComputingRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (lastReportedComputingRef.current === isComputing) return;
+    lastReportedComputingRef.current = isComputing;
+    onComputingChangeRef.current?.(isComputing);
+  }, [isComputing]);
 
   // Bell visualization — a brief, soft pulse on the input zone every
   // time the shell emits BEL. We just track "is currently flashing"
@@ -738,7 +848,18 @@ export function BlockTerminal({
       {foregroundIsAgent && !altScreen && (
         <PtyPassthrough
           ref={passthroughRef}
-          onSendBytes={(b) => void sendBytes(b)}
+          onSendBytes={(b) => {
+            // Plain Enter (CR, 0x0d) is the "submit a prompt to the
+            // agent" signal. Shift+Enter sends LF (0x0a) for multi-line
+            // composition — those don't count. Bracketed-paste blocks
+            // wrap their payload in OSC 200/201 so a stray CR inside
+            // pasted text doesn't satisfy `b.length === 1` and won't
+            // false-trigger the spinner.
+            if (b.length === 1 && b[0] === 0x0d) {
+              markPromptSubmitted();
+            }
+            void sendBytes(b);
+          }}
           appCursor={liveFrame?.app_cursor ?? false}
           bracketedPaste={liveFrame?.bracketed_paste ?? false}
         />

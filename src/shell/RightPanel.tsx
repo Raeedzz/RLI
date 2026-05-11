@@ -27,6 +27,7 @@ import { FileTree } from "@/files/FileTree";
 import { GraphView } from "@/graph/GraphView";
 import { BlockTerminal } from "@/terminal/BlockTerminal";
 import { useToast } from "@/primitives/Toast";
+import { Loader } from "@/primitives/Loader";
 
 /**
  * Right panel: top tabs (All files / Changes / Checks / Memory) + Review
@@ -929,50 +930,15 @@ function AiDraftButton({
 }
 
 /**
- * Refined SVG loader — a 3/4 arc tracing over a faint guide circle.
- * The arc rotates via the existing `rli-loader-spin` keyframe (1.4s
- * linear infinite, defined in tokens.css), which `prefers-reduced-
- * motion` already collapses to a static shape — accessibility falls
- * out for free. Two-tone (active arc + faint base ring) reads as
- * "progress in flight" the moment it appears, vs. a single rotating
- * line which can feel like a glitch on first frame.
+ * Inline button loader. Delegates to the shared `<Loader>` primitive
+ * so the spinner geometry, rotation cadence, and reduced-motion
+ * handling stay in lockstep with the rest of the app — sidebar
+ * worktree row, tab strip, hover-card status, and this button all
+ * pull from the same source. `size` lets the caller tune for button
+ * height; everything else is locked.
  */
 function ArcSpinner({ size }: { size: number }) {
-  return (
-    <span
-      className="rli-loader-spin"
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        width: size,
-        height: size,
-      }}
-    >
-      <svg
-        width={size}
-        height={size}
-        viewBox="0 0 16 16"
-        fill="none"
-        aria-hidden
-      >
-        <circle
-          cx="8"
-          cy="8"
-          r="6.2"
-          stroke="currentColor"
-          strokeOpacity="0.22"
-          strokeWidth="1.6"
-        />
-        <path
-          d="M8 1.8 A6.2 6.2 0 0 1 14.2 8"
-          stroke="currentColor"
-          strokeWidth="1.6"
-          strokeLinecap="round"
-        />
-      </svg>
-    </span>
-  );
+  return <Loader size={size} />;
 }
 
 function ComposerActionButton({

@@ -1,10 +1,10 @@
 import { useEffect, useRef } from "react";
-import { motion } from "motion/react";
+import { AnimatePresence, motion } from "motion/react";
 import {
   IconPlus,
   IconClose,
-  IconRunning,
 } from "@/design/icons";
+import { Tooltip, useTooltipAnchor } from "@/primitives/Tooltip";
 import {
   useActiveProject,
   useActiveTab,
@@ -175,10 +175,18 @@ function TabButton({
   worktreeId: string;
 }) {
   const dispatch = useAppDispatch();
-  const isRunning = tab.kind === "terminal" && tab.agentStatus === "running";
+  // Hover tooltip exposes the tab's full live summary — the same
+  // string that drives the 11px tertiary line below the tab title,
+  // but unellipsed and wrapped so the user can read what each
+  // parallel session is actually doing without switching to it.
+  const { ref, anchor, beginShow, cancelShow } =
+    useTooltipAnchor<HTMLDivElement>();
+  const tooltipLabel = fullTabSummary(tab);
 
   return (
+    <>
     <motion.div
+      ref={ref}
       role="tab"
       aria-selected={active}
       layout
@@ -186,9 +194,12 @@ function TabButton({
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, y: 3 }}
       transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-      onClick={() =>
-        dispatch({ type: "select-tab", worktreeId, id: tab.id })
-      }
+      onClick={() => {
+        cancelShow();
+        dispatch({ type: "select-tab", worktreeId, id: tab.id });
+      }}
+      onMouseEnter={beginShow}
+      onMouseLeave={cancelShow}
       style={{
         position: "relative",
         display: "inline-flex",
@@ -213,16 +224,10 @@ function TabButton({
           alignItems: "center",
           justifyContent: "center",
           width: 14,
-          color: isRunning ? "var(--accent)" : "var(--text-tertiary)",
+          flexShrink: 0,
         }}
       >
-        {isRunning ? (
-          <span className="rli-loader-spin">
-            <IconRunning size={14} />
-          </span>
-        ) : (
-          <TabKindGlyph tab={tab} />
-        )}
+        <TabBadgeDot tab={tab} />
       </span>
       <TabLabelStack tab={tab} />
       <span style={{ flex: 1, minWidth: 0 }} />
@@ -261,7 +266,65 @@ function TabButton({
         />
       )}
     </motion.div>
+    {/* AnimatePresence is a SIBLING of the layout-animated motion.div,
+        not a child. When nested, motion's layout-tracking would see
+        the tooltip's mount/unmount as a layout-relevant change (even
+        though the Tooltip portals to <body> and doesn't actually
+        affect the parent's box) and the AnimatePresence exit could
+        be eaten by the layout animation in the parent. Sibling
+        placement keeps the two animation systems independent. */}
+    <AnimatePresence>
+      {anchor && tooltipLabel && (
+        <Tooltip
+          label={tooltipLabel}
+          anchor={anchor}
+          maxWidth={360}
+          placement="below"
+        />
+      )}
+    </AnimatePresence>
+    </>
   );
+}
+
+/**
+ * The text the hover tooltip should expose for a tab. Prefers the
+ * full unellipsed live summary, falls back through several layers so
+ * the tooltip always has something useful to say when the cursor
+ * lands — a brand-new tab whose summary is still the "ready"
+ * placeholder gets the tab title (or "Shell terminal" if even the
+ * title is generic); a file tab gets the full absolute path (the
+ * strip only shows the basename).
+ *
+ * Returns null only when we genuinely have nothing — defensive, not
+ * common.
+ */
+function fullTabSummary(tab: Tab): string | null {
+  const trim = (s: string | undefined | null): string => {
+    if (!s) return "";
+    return s.replace(/\s+/g, " ").trim();
+  };
+  const isPlaceholderTitle = (s: string): boolean =>
+    !s || s === "shell" || s === "Untitled" || s === "main";
+
+  if (tab.kind === "terminal") {
+    const summary = trim(tab.summary);
+    if (summary && summary !== "ready" && summary !== "Untitled") return summary;
+    // Fall back through tab title / CLI badge / generic label so the
+    // tooltip never pops blank on hover. This matters for new tabs
+    // whose first activity summary hasn't landed yet.
+    const title = trim(tab.title);
+    if (!isPlaceholderTitle(title)) return title;
+    if (tab.detectedCli) return `${tab.detectedCli} session`;
+    return "Shell terminal";
+  }
+  if (tab.kind === "diff" || tab.kind === "markdown") {
+    return trim(tab.filePath) || trim(tab.title) || null;
+  }
+  if (tab.kind === "project-settings") {
+    return trim(tab.title) || "Repository settings";
+  }
+  return null;
 }
 
 /**
@@ -390,6 +453,62 @@ function TabKindGlyph({ tab }: { tab: Tab }) {
   return dot("var(--state-warning)");
 }
 
+/**
+ * The 6px dot painted at the left of each tab. Three visual states
+ * drive it for terminal tabs:
+ *
+ *   idle              — grey static dot. No agent computing.
+ *   computing         — accent-colored dot pulsing opacity 0.45 ↔ 1
+ *                       on a 1.4s ease-in-out loop. Pulses for as long
+ *                       as the BlockTerminal frame-heartbeat says the
+ *                       agent is producing output.
+ *   finished-unseen   — accent-colored solid dot. The agent has gone
+ *                       quiet but the user hasn't viewed this tab yet,
+ *                       so the result is "unread."
+ *
+ * Non-terminal tab kinds fall back to the existing TabKindGlyph
+ * (different colors per kind) since the badge concept only really
+ * applies to live terminal sessions.
+ *
+ * Reduced motion: the keyframe animation collapses to zero-duration
+ * via the global tokens.css rule, leaving the dot at its initial
+ * opacity (0.45) — still visible as "computing", just not animated.
+ */
+function TabBadgeDot({ tab }: { tab: Tab }) {
+  if (tab.kind !== "terminal") return <TabKindGlyph tab={tab} />;
+  const badge = tab.badge ?? "idle";
+  const base: React.CSSProperties = {
+    display: "inline-block",
+    width: 6,
+    height: 6,
+    borderRadius: "var(--radius-pill)",
+    flexShrink: 0,
+  };
+  if (badge === "computing") {
+    return (
+      <span
+        aria-hidden
+        className="rli-tab-dot-computing"
+        style={{ ...base, backgroundColor: "var(--accent)" }}
+      />
+    );
+  }
+  if (badge === "finished-unseen") {
+    return (
+      <span
+        aria-hidden
+        style={{ ...base, backgroundColor: "var(--accent)" }}
+      />
+    );
+  }
+  return (
+    <span
+      aria-hidden
+      style={{ ...base, backgroundColor: "var(--text-tertiary)" }}
+    />
+  );
+}
+
 /* ------------------------------------------------------------------
    Tab content router
    ------------------------------------------------------------------ */
@@ -473,6 +592,10 @@ function TerminalTabContent({
       // back to the tab.
       initialAgentRunning={tab.agentStatus === "running"}
       initialAgentCli={tab.detectedCli}
+      // Continue the pulsing dot across a tab switch — if frames stop
+      // arriving within ~1.5s of mount, the heartbeat in BlockTerminal
+      // will flip it back to false automatically.
+      initialComputing={tab.badge === "computing"}
       onAgentRunningChange={(running, cli) => {
         dispatch({
           type: "update-tab",
@@ -497,6 +620,16 @@ function TerminalTabContent({
             playCompletionSound(settings.completionSound);
           }
         }
+      }}
+      onComputingChange={(computing) => {
+        // Reducer picks the right badge: computing → pulsing, !computing
+        // → "finished-unseen" unless the tab is currently being viewed
+        // (then idle).
+        dispatch({
+          type: "set-tab-computing",
+          id: tab.id,
+          computing,
+        });
       }}
       onActivitySummaryChange={(summary) => {
         if (!summary) return;

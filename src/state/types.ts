@@ -224,12 +224,36 @@ interface TabBase {
   summaryUpdatedAt: number;
 }
 
+/**
+ * Visual badge state for the tab strip's left dot. Distinct from
+ * `agentStatus` — that field only tells you whether an agent CLI is
+ * foregrounded; this one captures whether the agent is *actively
+ * computing* and whether a completed result is awaiting the user's
+ * eyes.
+ *
+ *   idle              — no agent or agent open but not processing
+ *   computing         — frames are streaming from the PTY (agent is
+ *                       producing output / actively thinking)
+ *   finished-unseen   — was computing, has stopped, and the user is
+ *                       not currently viewing this tab — i.e., an
+ *                       unread result is sitting in the tab
+ */
+export type TabBadge = "idle" | "computing" | "finished-unseen";
+
 export interface TerminalTab extends TabBase {
   kind: "terminal";
   ptyId: PtyId;
   /** Detected CLI (set by helper-agent detection on each prompt block). */
   detectedCli: AgentCli | null;
   agentStatus: AgentStatus;
+  /**
+   * Tab strip dot state. Driven by BlockTerminal's frame-heartbeat
+   * (sets computing on/off) and by the reducer's select-tab handler
+   * (clears finished-unseen → idle when the user views the tab).
+   * Optional in the type because old persisted state may not have
+   * it; readers should default to "idle".
+   */
+  badge?: TabBadge;
 }
 
 export interface DiffTab extends TabBase {
@@ -471,6 +495,10 @@ export type AppAction =
   | { type: "select-tab"; worktreeId: WorktreeId; id: TabId }
   | { type: "update-tab"; id: TabId; patch: Partial<Tab> }
   | { type: "set-tab-summary"; id: TabId; summary: string }
+  // Driven by BlockTerminal's frame-heartbeat. The reducer chooses
+  // between "computing" / "finished-unseen" / "idle" based on whether
+  // the affected tab is currently being viewed.
+  | { type: "set-tab-computing"; id: TabId; computing: boolean }
 
   // Chrome
   | { type: "toggle-sidebar" }

@@ -1,6 +1,5 @@
 import {
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -9,6 +8,8 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "motion/react";
+import { Tooltip, useTooltipAnchor } from "@/primitives/Tooltip";
+import { Loader } from "@/primitives/Loader";
 import { IconPickerDialog } from "@/shell/IconPickerDialog";
 import { ContextMenu, type ContextMenuItem } from "@/shell/ContextMenu";
 import { lookupPickerIcon } from "@/design/picker-icons";
@@ -20,7 +21,6 @@ import {
   IconFolderAdd,
   IconPlus,
   IconBranch,
-  IconRunning,
   IconClose,
   IconSettings,
   IconEdit,
@@ -740,7 +740,16 @@ function WorktreeRow({
   const rowRef = useRef<HTMLLIElement>(null);
   const showTimerRef = useRef<number | null>(null);
   const hideTimerRef = useRef<number | null>(null);
-  const isRunning = worktree.agentStatus === "running";
+  // Sidebar spinner: only spins while at least one tab in this
+  // worktree is "computing" (frame-heartbeat says the agent is
+  // producing output). Distinct from "agent CLI open" (agentStatus
+  // === "running") — that flag stays true the whole time claude/codex
+  // is foregrounded, including at the prompt waiting for input, which
+  // would otherwise leave the spinner perma-spinning.
+  const isRunning = worktree.tabIds.some((id) => {
+    const t = tabs[id];
+    return t?.kind === "terminal" && t.badge === "computing";
+  });
 
   // Cancel any pending show/hide timers when the row unmounts. Without
   // this a fast scroll-then-mount could fire a setState into a dead
@@ -972,13 +981,7 @@ function WorktreeRow({
           }}
         >
           {isRunning ? (
-            <span
-              key="running"
-              className="rli-loader-spin"
-              style={{ display: "inline-flex" }}
-            >
-              <IconRunning size={16} />
-            </span>
+            <Loader key="running" size={16} />
           ) : iconEntry ? (
             <iconEntry.Component size={16} />
           ) : (
@@ -1214,17 +1217,16 @@ function WorktreeHoverCard({
   const left = anchor.right + 8;
   const top = Math.max(8, anchor.top);
 
-  // worktree.agentStatus is set by whichever tab's BlockTerminal last
-  // reported. Once the user switches away from a running tab the
-  // BlockTerminal unmounts and worktree.agentStatus can read stale
-  // until they come back, so OR it with per-tab status — covers
-  // background-running agents and concurrent agents in sibling tabs.
-  const isRunning =
-    worktree.agentStatus === "running" ||
-    worktree.tabIds.some((id) => {
-      const t = tabs[id];
-      return t?.kind === "terminal" && t.agentStatus === "running";
-    });
+  // The spinner mirrors the sidebar row's behavior: spin only while a
+  // tab in this worktree is genuinely *computing* (per the
+  // frame-heartbeat badge), not just because an agent CLI is sitting
+  // at a prompt. Otherwise the hover card would spin perma- whenever
+  // claude/codex is open, which defeats the whole point of the
+  // signal.
+  const isRunning = worktree.tabIds.some((id) => {
+    const t = tabs[id];
+    return t?.kind === "terminal" && t.badge === "computing";
+  });
 
   return createPortal(
     <motion.div
@@ -1402,9 +1404,7 @@ function HoverCardStatusDot({ running }: { running: boolean }) {
       }}
     >
       {running ? (
-        <span className="rli-loader-spin" style={{ display: "inline-flex" }}>
-          <IconRunning size={14} />
-        </span>
+        <Loader size={14} />
       ) : (
         <span
           style={{
@@ -1535,7 +1535,7 @@ function IconButton({
   children: ReactNode;
 }) {
   const { ref, anchor, beginShow, cancelShow } =
-    useButtonTooltip<HTMLButtonElement>();
+    useTooltipAnchor<HTMLButtonElement>();
   return (
     <>
       <button
@@ -1577,52 +1577,10 @@ function IconButton({
         {children}
       </button>
       <AnimatePresence>
-        {!disabled && anchor && <ButtonTooltip label={title} anchor={anchor} />}
+        {!disabled && anchor && <Tooltip label={title} anchor={anchor} />}
       </AnimatePresence>
     </>
   );
-}
-
-/**
- * Hook that powers the custom button tooltip. Manages the 400ms hover
- * intent timer, a one-shot anchor-rect snapshot, and cleanup on
- * unmount. Returned `ref` is attached to the button; `beginShow` /
- * `cancelShow` are wired into the button's mouse-enter/leave / click
- * handlers. The companion <ButtonTooltip> reads `anchor` to portal
- * the tooltip into <body>.
- */
-function useButtonTooltip<T extends HTMLElement>() {
-  const ref = useRef<T>(null);
-  const [anchor, setAnchor] = useState<DOMRect | null>(null);
-  const showTimerRef = useRef<number | null>(null);
-
-  const SHOW_DELAY_MS = 400;
-
-  const beginShow = () => {
-    if (anchor || showTimerRef.current) return;
-    showTimerRef.current = window.setTimeout(() => {
-      showTimerRef.current = null;
-      if (ref.current) {
-        setAnchor(ref.current.getBoundingClientRect());
-      }
-    }, SHOW_DELAY_MS);
-  };
-
-  const cancelShow = () => {
-    if (showTimerRef.current) {
-      window.clearTimeout(showTimerRef.current);
-      showTimerRef.current = null;
-    }
-    setAnchor(null);
-  };
-
-  useEffect(() => {
-    return () => {
-      if (showTimerRef.current) window.clearTimeout(showTimerRef.current);
-    };
-  }, []);
-
-  return { ref, anchor, beginShow, cancelShow };
 }
 
 function SmallIconButton({
@@ -1635,7 +1593,7 @@ function SmallIconButton({
   children: ReactNode;
 }) {
   const { ref, anchor, beginShow, cancelShow } =
-    useButtonTooltip<HTMLButtonElement>();
+    useTooltipAnchor<HTMLButtonElement>();
   return (
     <>
       <button
@@ -1677,107 +1635,9 @@ function SmallIconButton({
         {children}
       </button>
       <AnimatePresence>
-        {anchor && <ButtonTooltip label={title} anchor={anchor} />}
+        {anchor && <Tooltip label={title} anchor={anchor} />}
       </AnimatePresence>
     </>
-  );
-}
-
-/**
- * Floating tooltip anchored to an icon button. Portaled to <body> so
- * it escapes the sidebar's clip context. Placement is decided AFTER
- * the tooltip is rendered (off-screen on the first frame) so we can
- * use real measured dimensions instead of guessing — this is why the
- * old viewport-clamp math snapped sidebar-edge tooltips to a fixed
- * X. Now:
- *
- *   horizontal: left edge aligned with the button's left, flipped to
- *               right-aligned with the button's right if the default
- *               would clip the right edge of the viewport
- *
- *   vertical:   anchored 6px below the button by default, flipped to
- *               6px above if "below" would push past the viewport
- *               bottom — that's the case for the settings gear sitting
- *               in the SidebarFooter at the very bottom of the rail,
- *               which is why the old code's tooltip was invisible
- *               there
- *
- * The two-pass render avoids visible flicker because `useLayoutEffect`
- * fires synchronously before the browser paints — the first off-screen
- * frame never reaches the user's eyes.
- */
-function ButtonTooltip({
-  label,
-  anchor,
-}: {
-  label: string;
-  anchor: DOMRect;
-}) {
-  const tooltipRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-
-  useLayoutEffect(() => {
-    const el = tooltipRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const GAP = 6;
-    const SAFE = 8;
-
-    // Horizontal: align tooltip's left edge with the button's left,
-    // right-flip if that would clip, finally clamp to the viewport
-    // left margin so it never disappears past x<0.
-    let left = anchor.left;
-    if (left + rect.width > window.innerWidth - SAFE) {
-      left = anchor.right - rect.width;
-    }
-    left = Math.max(SAFE, left);
-
-    // Vertical: below the button by default, flipped to above when
-    // there isn't enough room. Floor at SAFE so we never paint above
-    // the viewport top in pathological cases (button taller than the
-    // viewport, etc.).
-    let top = anchor.bottom + GAP;
-    if (top + rect.height > window.innerHeight - SAFE) {
-      top = anchor.top - GAP - rect.height;
-    }
-    top = Math.max(SAFE, top);
-
-    setPos({ top, left });
-  }, [anchor]);
-
-  return createPortal(
-    <motion.div
-      ref={tooltipRef}
-      initial={{ opacity: 0, y: -4 }}
-      animate={pos ? { opacity: 1, y: 0 } : { opacity: 0, y: -4 }}
-      exit={{ opacity: 0, y: -3, transition: { duration: 0.12 } }}
-      transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-      style={{
-        position: "fixed",
-        // First render: park far off-screen so the unmeasured tooltip
-        // never paints in the wrong place. After useLayoutEffect runs
-        // we re-render with real coordinates before the browser commits.
-        top: pos ? pos.top : -9999,
-        left: pos ? pos.left : -9999,
-        maxWidth: 240,
-        backgroundColor: "var(--surface-4)",
-        color: "var(--text-primary)",
-        border: "1px solid var(--border-default)",
-        borderRadius: "var(--radius-sm)",
-        padding: "4px 8px",
-        fontSize: "var(--text-xs)",
-        fontFamily: "var(--font-sans)",
-        fontWeight: "var(--weight-medium)",
-        letterSpacing: "var(--tracking-tight)",
-        whiteSpace: "nowrap",
-        pointerEvents: "none",
-        boxShadow: "0 2px 8px oklch(0% 0 0 / 0.35)",
-        zIndex: 1100,
-      }}
-    >
-      {label}
-    </motion.div>,
-    document.body,
   );
 }
 

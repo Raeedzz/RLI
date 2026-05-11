@@ -323,13 +323,40 @@ body { font-variant-numeric: tabular-nums; }
   color: var(--text-tertiary);
 }
 
-/* Running-agent loader: a 270° arc rotating linearly. Restrained — no
-   glow, no surrounding pulse. Stops within 200ms of agent going idle. */
+/* Running-agent loader: a thin partial-arc rotating at a constant
+   angular velocity. Linear easing only — any other curve produces
+   visible variance in angular speed that draws the eye. 1.2s per
+   revolution: slow enough to read as "calm activity," fast enough to
+   feel like motion. transform + opacity only, GPU-composited, no
+   layout cost. The prefers-reduced-motion fallback below freezes the
+   arc at its initial angle — still meaningful as an indicator, but
+   no motion. We deliberately don't ALSO swap the static geometry,
+   since the env-driven transition itself would be visible motion. */
 @keyframes rli-loader-spin {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
 }
-.rli-loader-spin {
-  animation: rli-loader-spin 1.4s linear infinite;
+.rli-loader {
+  animation: rli-loader-spin 1.2s linear infinite;
   transform-origin: 50% 50%;
+}
+/* Legacy alias — kept so any in-flight render that references the
+   old class name doesn't drop the spin during the rollout. Safe to
+   delete after one release. */
+.rli-loader-spin {
+  animation: rli-loader-spin 1.2s linear infinite;
+  transform-origin: 50% 50%;
+}
+
+/* Tab-strip "agent computing" dot. Pulses opacity only — no scale
+   transform, since scaling 6px dots makes them shimmer rather than
+   pulse. Eased so the peak sits at the middle of the loop, giving a
+   gentle "in / out / in / out" rhythm. 1.4s loop length picks up
+   continuity with the loader's 1.2s rotation without phase-locking. */
+@keyframes rli-tab-dot-pulse {
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 1; }
+}
+.rli-tab-dot-computing {
+  animation: rli-tab-dot-pulse 1.4s ease-in-out infinite;
 }

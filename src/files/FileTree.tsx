@@ -5,7 +5,7 @@ import {
   useGitStatus,
   type GitStatusMap,
 } from "@/hooks/useGitStatus";
-import { FileTypeIcon, fileTypeFor } from "./FileTypeIcon";
+import { FileTypeIcon } from "./FileTypeIcon";
 
 interface Props {
   root: string;
@@ -28,7 +28,14 @@ interface Node {
 }
 
 const INDENT = 12;
-const ROW_HEIGHT = 22;
+// Icons match the 16px scale used everywhere else in the app's
+// chrome (sidebar worktree icons, IconButton glyphs, settings gear,
+// etc.) so the file tree reads as one consistent surface with the
+// rail to its left. The 28px row holds a 16px icon with 6px of
+// breathing room above and below, keeping the vertical rhythm
+// from feeling cramped at the larger glyph size.
+const ROW_HEIGHT = 28;
+const ICON_SIZE = 16;
 // Matches the panel header's `padding: 0 var(--space-2)`. Both the
 // "FILES" caption and the row content sit on the same vertical axis
 // at 8px from the panel's left edge.
@@ -221,14 +228,13 @@ function Row({
 }) {
   const statusEntry = node.isDir ? undefined : gitStatus.get(node.path);
   const visual = statusVisual(statusEntry);
-  // Tint each filename with its file-type pigment so a glance at the
-  // tree distinguishes Cargo.toml (rust) from package.json (amber) from
-  // Dockerfile (slate) without needing to read the icon. Git status
-  // takes priority — added/modified/deleted should still pop.
-  const typeColor = !node.isDir ? fileTypeFor(node.name).color : null;
+  // Filenames stay neutral — the file-type pigment lives in the icon
+  // now. This keeps the list readable at a glance: one column of
+  // colored icons, one column of plain text. Git status still
+  // overrides when present (added/modified/deleted should pop).
   const nameColor = active
     ? "var(--text-primary)"
-    : (visual?.color ?? typeColor ?? "var(--text-secondary)");
+    : (visual?.color ?? "var(--text-secondary)");
   return (
     <button
       type="button"
@@ -247,9 +253,19 @@ function Row({
         alignItems: "center",
         paddingLeft: depth * INDENT + ROW_PADDING_LEFT_BASE,
         paddingRight: 8,
-        gap: 6,
+        gap: 8,
         fontFamily: "var(--font-sans)",
-        fontSize: "var(--text-xs)",
+        // Row font size locked to 13px and line-height to 1 so the
+        // text's bounding box matches its glyph height. Without
+        // lineHeight: 1, the inherited line-height (~1.4-1.5)
+        // inflates the text's flex item to ~18-19px while the icon
+        // sits at exactly 14px — visually the text floats above the
+        // icon's optical center even though alignItems: center
+        // matches their bounding-box centers. Pinning lineHeight: 1
+        // collapses the text box to its glyph dimensions so both
+        // items center on the same axis.
+        fontSize: 13,
+        lineHeight: 1,
         color: active
           ? "var(--text-primary)"
           : node.isDir
@@ -272,23 +288,40 @@ function Row({
     >
       <span
         style={{
-          width: 8,
+          // Match icon dimensions so the chevron occupies its own
+          // 14x14 column instead of an off-axis 10x?? span. Both
+          // folder and file rows reserve this column identically;
+          // for files the content is empty (opacity 0) but the
+          // box is the same width so icons line up across rows.
+          width: ICON_SIZE,
+          height: ICON_SIZE,
+          flexShrink: 0,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
           color: "var(--text-tertiary)",
           fontFamily: "var(--font-mono)",
-          fontSize: 9,
+          fontSize: 10,
+          lineHeight: 1,
           opacity: node.isDir ? 0.7 : 0,
         }}
         aria-hidden
       >
         {node.isDir ? (node.expanded ? "▾" : "▸") : ""}
       </span>
-      <FileTypeIcon name={node.name} isDir={node.isDir} open={node.expanded} />
+      <FileTypeIcon
+        name={node.name}
+        isDir={node.isDir}
+        open={node.expanded}
+        size={ICON_SIZE}
+      />
       <span
         style={{
           flex: 1,
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
+          lineHeight: 1,
           fontWeight: node.isDir
             ? "var(--weight-medium)"
             : "var(--weight-regular)",
