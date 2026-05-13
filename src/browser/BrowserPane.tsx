@@ -1,5 +1,6 @@
 import { motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { connectionsViewVariants } from "@/design/motion";
 import {
   browser,
@@ -21,10 +22,25 @@ interface Props {
    * empty and waits for the user.
    */
   initialUrl?: string;
+  /**
+   * Whether this BrowserPane is currently visible to the user. The
+   * RightPanel mounts the Browser pane behind `display: none` when
+   * another tab is active — there's no point burning a Tauri IPC
+   * round-trip every second to pull a screenshot the user can't see.
+   * Defaults to true so the standalone overlay use case (full-screen
+   * Browser drawer) keeps polling unconditionally.
+   */
+  isVisible?: boolean;
 }
 
-const SCREENSHOT_INTERVAL_MS = 1000;
-const STATUS_INTERVAL_MS = 1500;
+// One unified poll cadence. Previously the pane ran three independent
+// intervals (health 2s, status+console 1.5s, screenshot 1s). With 20
+// worktrees that's up to 60 IPC round-trips/sec just to keep one
+// preview alive. Coalescing into a single 1Hz tick that walks
+// health → status → console → screenshot in sequence drops the rate
+// to one tick/sec per visible Browser pane — and gates the entire
+// loop on document + pane visibility so backgrounded panes pay zero.
+const POLL_INTERVAL_MS = 1000;
 const COMMON_DEV_PORTS = [5173, 3000, 8080, 4321, 1420];
 
 // Console-pane resize bounds. 80px keeps the header row + a single
@@ -54,6 +70,33 @@ function clampConsoleHeight(h: number): number {
 }
 
 /**
+ * Address-bar heuristics — decides whether the user typed a URL or a
+ * search query. Mirrors Chrome's URL bar:
+ *
+ *  - Already has a scheme        → use as-is
+ *  - Bare port (digits only)     → http://localhost:<n>/
+ *  - Looks like a hostname       → prefix https://
+ *  - Anything else (has spaces,
+ *    no dot, etc.)               → Google search
+ *
+ * Without this guard, "react hooks" became `https://react hooks` which
+ * the daemon rejected, and nothing rendered — the user saw the empty
+ * state and assumed the in-app browser was broken.
+ */
+function resolveTarget(input: string): string {
+  if (/^https?:\/\//i.test(input)) return input;
+  if (/^\d+$/.test(input)) return `http://localhost:${input}/`;
+  // Hostname-shaped: only word chars / hyphens / dots / optional :port /
+  // optional path, no spaces, and must contain at least one dot to
+  // qualify (so "foo.com" yes, "foo" no).
+  const hostLike = /^[\w.-]+(:\d+)?(\/[^\s]*)?$/;
+  if (hostLike.test(input) && input.includes(".")) {
+    return `https://${input}`;
+  }
+  return `https://www.google.com/search?q=${encodeURIComponent(input)}`;
+}
+
+/**
  * In-house browser pane — drives the Rust-side browser daemon.
  *
  * URL bar at the top forwards /navigate. Clicks on the screenshot
@@ -62,13 +105,27 @@ function clampConsoleHeight(h: number): number {
  * is polled at 1Hz; polling pauses while the tab is hidden so background
  * windows don't burn CPU.
  */
-export function BrowserPane({ onClose, embedded = false, initialUrl }: Props) {
+export function BrowserPane({
+  onClose,
+  embedded = false,
+  initialUrl,
+  isVisible = true,
+}: Props) {
   const [health, setHealth] = useState<BrowserHealth | null>(null);
   const [status, setStatus] = useState<BrowserStatus | null>(null);
   const [logs, setLogs] = useState<BrowserLogEntry[]>([]);
   const [screenshotUrl, setScreenshotUrl] = useState<string | null>(null);
   const [urlInput, setUrlInput] = useState(initialUrl ?? "");
   const [focused, setFocused] = useState(false);
+  // Inline error surfaced under the URL bar when a navigation attempt
+  // fails (daemon rejects, can't bind, etc.). Cleared on the next
+  // successful navigate or status tick.
+  const [navError, setNavError] = useState<string | null>(null);
+  // True between the moment the user presses Enter and the moment the
+  // daemon's status reports `ready` for the new URL. Lets the Frame
+  // render a "loading…" hint instead of the stale "type a URL above"
+  // empty state while the first navigation is in flight.
+  const [navPending, setNavPending] = useState(false);
   // User-resizable console pane height. Persisted to localStorage so
   // a deliberately-tall console survives reloads and tab-switches.
   const [consoleHeight, setConsoleHeight] = useState<number>(loadConsoleHeight);
@@ -76,53 +133,136 @@ export function BrowserPane({ onClose, embedded = false, initialUrl }: Props) {
   const imgRef = useRef<HTMLImageElement | null>(null);
   const focusTrap = useRef<HTMLTextAreaElement | null>(null);
 
-  // Health check on mount, retry every 2s until daemon is up. We
-  // require multiple *consecutive* failures before flipping into the
-  // "daemon offline" UI: a single transient `AbortError` (the 3s
-  // fetch timeout firing during a layout reflow, a brief webview
-  // pause when the bottom panel collapses, etc.) shouldn't make the
-  // pane scream that the daemon is dead. We hold the previous
-  // `health` value steady during transient failures so the UI stays
-  // calm — only after `FAILURE_THRESHOLD` failures in a row do we
-  // surface the DaemonOffline state.
-  const FAILURE_THRESHOLD = 5;
+  // FAILURE_THRESHOLD before the "daemon offline" UI takes over. Each
+  // poll is gated by browser.health's own 10s timeout, so 10 ticks of
+  // failure ≈ 10s wall-time of consecutive failures. Combined with the
+  // `rli://browser-daemon-ready` event, a healthy daemon flips the
+  // pane to ready instantly and the offline UI essentially never
+  // appears on a working setup.
+  const FAILURE_THRESHOLD = 10;
   const failuresRef = useRef(0);
+  // Ref-mirror of the health.ok flag so the unified poll closure
+  // doesn't need a re-mounted effect every time health flips.
+  const healthOkRef = useRef(false);
+  // Same for status.ready — the screenshot leg of the poll only
+  // fires once a real page has loaded (avoids race against about:blank).
+  const statusReadyRef = useRef(false);
+  // Same for visibility — flipped by the parent + by
+  // document.visibilityState handler. The poll closure reads this
+  // every tick to no-op when the pane is backgrounded.
+  const isVisibleRef = useRef(isVisible);
+  useEffect(() => {
+    isVisibleRef.current = isVisible;
+  }, [isVisible]);
+
   const checkRef = useRef<() => void>(() => {});
   useEffect(() => {
     let cancelled = false;
-    const check = () => {
-      void browser.health().then((h) => {
-        if (cancelled) return;
-        if (h.ok) {
-          failuresRef.current = 0;
-          setHealth(h);
-        } else {
-          failuresRef.current += 1;
-          if (failuresRef.current >= FAILURE_THRESHOLD) {
-            setHealth(h);
-          }
-          // Otherwise leave `health` as it was. On first mount that
-          // means it stays `null` (showing "starting browser daemon…")
-          // and on a previously-ok daemon it stays `{ ok: true }` so
-          // the pane keeps rendering while we ride out the blip.
-        }
-      });
+
+    const checkHealth = async (): Promise<boolean> => {
+      const h = await browser.health();
+      if (cancelled) return false;
+      if (h.ok) {
+        failuresRef.current = 0;
+        healthOkRef.current = true;
+        setHealth(h);
+        return true;
+      }
+      failuresRef.current += 1;
+      healthOkRef.current = false;
+      if (failuresRef.current >= FAILURE_THRESHOLD) {
+        setHealth(h);
+      }
+      // Below threshold we leave the previous `health` value alone so
+      // the pane doesn't flash through the offline UI on a transient blip.
+      return false;
     };
-    checkRef.current = check;
-    check();
-    const t = window.setInterval(check, 2000);
+
+    const pollLive = async () => {
+      const s = await browser.status();
+      if (cancelled) return;
+      setStatus(s);
+      if (s) {
+        // Any successful status read implies the daemon is up and
+        // responsive, so a previously-shown nav error is stale. Clear
+        // it so the user isn't staring at a "couldn't reach daemon"
+        // banner over a working preview.
+        setNavError(null);
+        statusReadyRef.current = !!s.ready;
+      }
+      const c = await browser.console();
+      if (cancelled) return;
+      if (c) setLogs(c.entries.slice(-100));
+      if (statusReadyRef.current) {
+        // Screenshot URL refresh — the <img> reloads off this URL.
+        const u = await browser.screenshotUrl();
+        if (cancelled) return;
+        setScreenshotUrl(u);
+      }
+    };
+
+    /**
+     * One unified tick. Replaces the three previous overlapping
+     * setIntervals. Skips entirely when the pane isn't user-visible
+     * (display:none parent or backgrounded webview), and walks
+     * health → status → console → screenshot in sequence so the next
+     * leg can short-circuit on what the previous leg learned. Net
+     * effect at 20 idle worktrees: zero Tauri IPC traffic for Browser
+     * panes that aren't currently looking at the browser tab.
+     */
+    const tick = async () => {
+      if (cancelled) return;
+      // Background / hidden / display:none → idle. The visible check
+      // happens here per-tick (not at setup time) so the loop reacts
+      // immediately when the user flips back without us having to
+      // tear down and rebuild the interval.
+      if (!isVisibleRef.current) return;
+      if (document.visibilityState === "hidden") return;
+      if (!healthOkRef.current) {
+        await checkHealth();
+        return;
+      }
+      await pollLive();
+    };
+
+    // checkRef exposes a fast-path bootstrap call for the daemon-ready
+    // event and the manual retry button — runs the full tick once.
+    checkRef.current = () => void tick();
+
+    void tick();
+    const t = window.setInterval(() => void tick(), POLL_INTERVAL_MS);
+
+    // The daemon emits this event from its `start()` immediately after
+    // it has bound a port and published it to BrowserState. Without
+    // this, a slow boot could sit in the offline UI for a full
+    // FAILURE_THRESHOLD window before the next poll cycle even tries.
+    let unlistenReady: UnlistenFn | null = null;
+    void listen<number>("rli://browser-daemon-ready", () => {
+      if (cancelled) return;
+      invalidateBrowserBaseCache();
+      failuresRef.current = 0;
+      void tick();
+    }).then((u) => {
+      if (cancelled) {
+        u();
+      } else {
+        unlistenReady = u;
+      }
+    });
+
     return () => {
       cancelled = true;
       window.clearInterval(t);
+      if (unlistenReady) unlistenReady();
     };
-    // Setup-once; the interval handles ongoing rechecks. Re-running
-    // this effect on every health flip would tear down and rebuild
-    // the timer pointlessly.
+    // Setup-once. The closure captures only refs (health.ok,
+    // status.ready, isVisible) so it always reads the latest value
+    // without needing a re-mount on each flip.
   }, []);
+
   // Manual retry — bypasses the URL cache, resets the failure
-  // counter, and triggers an immediate re-check so the user can
-  // recover from the offline UI without waiting for the next
-  // interval tick.
+  // counter, and triggers an immediate poll so the user can recover
+  // from the offline UI without waiting for the next interval tick.
   const retryHealth = useCallback(() => {
     invalidateBrowserBaseCache();
     failuresRef.current = 0;
@@ -136,44 +276,6 @@ export function BrowserPane({ onClose, embedded = false, initialUrl }: Props) {
       void browser.navigate(initialUrl);
     }
   }, [health?.ok, initialUrl, status?.url]);
-
-  // Poll status + console while connected. Pause when the document is
-  // hidden (background window) — no point polling a screenshot the user
-  // can't see.
-  useEffect(() => {
-    if (!health?.ok) return;
-    let cancelled = false;
-    const poll = async () => {
-      if (document.visibilityState === "hidden") return;
-      const s = await browser.status();
-      if (!cancelled) setStatus(s);
-      const c = await browser.console();
-      if (!cancelled && c) setLogs(c.entries.slice(-100));
-    };
-    void poll();
-    const t = window.setInterval(() => void poll(), STATUS_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(t);
-    };
-  }, [health?.ok]);
-
-  // Refresh screenshot URL on a 1Hz tick (drives <img> reload).
-  useEffect(() => {
-    if (!health?.ok || !status?.ready) return;
-    let cancelled = false;
-    const tick = async () => {
-      if (document.visibilityState === "hidden") return;
-      const u = await browser.screenshotUrl();
-      if (!cancelled) setScreenshotUrl(u);
-    };
-    void tick();
-    const t = window.setInterval(() => void tick(), SCREENSHOT_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(t);
-    };
-  }, [health?.ok, status?.ready]);
 
   // Esc to close — overlay mode only. In embedded (in-pane) mode the
   // PaneFrame's × is the canonical way to close, and a global Esc would
@@ -193,12 +295,40 @@ export function BrowserPane({ onClose, embedded = false, initialUrl }: Props) {
   const handleNavigate = useCallback(async (raw: string) => {
     const trimmed = raw.trim();
     if (!trimmed) return;
-    // Bare port number → localhost:N.
-    let target = trimmed;
-    if (/^\d+$/.test(trimmed)) target = `http://localhost:${trimmed}/`;
-    else if (!/^https?:\/\//i.test(trimmed)) target = `https://${trimmed}`;
-    await browser.navigate(target);
+    const target = resolveTarget(trimmed);
+    setNavError(null);
+    setNavPending(true);
+    const result = await browser.navigate(target);
+    if (!result.ok) {
+      setNavPending(false);
+      // Show the daemon's actual error string. Previously this was a
+      // generic "Could not reach the browser daemon" regardless of
+      // cause; now the user sees the real chromiumoxide / ensure_chrome
+      // / fetch error, which is actionable.
+      setNavError(result.error);
+      return;
+    }
     setUrlInput(target);
+    // Kick a status fetch immediately so the Frame transitions out of
+    // the empty state without waiting for the next 1.5s tick. The
+    // regular interval still drives ongoing updates — this is just to
+    // close the gap between "Enter pressed" and "first screenshot".
+    const fresh = await browser.status();
+    if (fresh) setStatus(fresh);
+    setNavPending(false);
+  }, []);
+
+  const handleRestart = useCallback(async () => {
+    setNavError(null);
+    setStatus(null);
+    setScreenshotUrl(null);
+    setNavPending(true);
+    await browser.restart();
+    // The daemon will lazy-spawn a fresh Chrome on the next request.
+    // Kick a status read so the frame's "loading…" state clears once
+    // the new session is sitting at about:blank (or the user can
+    // navigate again from the URL bar).
+    setNavPending(false);
   }, []);
 
   const handleClick = useCallback(async (e: React.MouseEvent<HTMLImageElement>) => {
@@ -271,6 +401,7 @@ export function BrowserPane({ onClose, embedded = false, initialUrl }: Props) {
         onForward={() => void browser.forward()}
         onReload={() => void browser.reload()}
         onOpen={() => void browser.openInBrowser()}
+        onRestart={handleRestart}
         onClose={onClose}
         embedded={embedded}
         status={status}
@@ -283,11 +414,13 @@ export function BrowserPane({ onClose, embedded = false, initialUrl }: Props) {
       )}
       {health?.ok && (
         <>
+          {navError && <NavErrorBanner message={navError} onDismiss={() => setNavError(null)} />}
           <Frame
             status={status}
             screenshotUrl={screenshotUrl}
             imgRef={imgRef}
             focused={focused}
+            navPending={navPending}
             onClick={handleClick}
             onBlur={() => setFocused(false)}
           />
@@ -432,6 +565,7 @@ function UrlBar({
   onForward,
   onReload,
   onOpen,
+  onRestart,
   onClose,
   embedded,
   status,
@@ -444,6 +578,7 @@ function UrlBar({
   onForward: () => void;
   onReload: () => void;
   onOpen: () => void;
+  onRestart: () => void;
   onClose: () => void;
   embedded?: boolean;
   status: BrowserStatus | null;
@@ -489,7 +624,8 @@ function UrlBar({
           }
         }}
         placeholder={
-          status?.url ?? `localhost:${COMMON_DEV_PORTS[0]} or full URL`
+          status?.url ??
+          `URL, ${COMMON_DEV_PORTS[0]}, or search query — press Enter`
         }
         spellCheck={false}
         style={{
@@ -516,6 +652,13 @@ function UrlBar({
         }}
       />
 
+      {health?.ok && (
+        <NavBtn
+          label="⟳"
+          onClick={onRestart}
+          title="restart browser session (kills the headless Chrome process)"
+        />
+      )}
       {health?.ok && (
         <NavBtn label="↗" onClick={onOpen} title="open in real browser" />
       )}
@@ -596,11 +739,76 @@ function PortQuickList({
   );
 }
 
+/**
+ * Inline error banner that drops in between the URL bar and the Frame
+ * when `browser.navigate` fails. Previously the failure was swallowed
+ * and the user saw a stale empty state with no signal that anything
+ * went wrong — easy to misread as "the in-app browser doesn't work,
+ * I'll just open Chrome instead." Now they get a one-line "couldn't
+ * reach daemon" with a dismiss button.
+ */
+function NavErrorBanner({
+  message,
+  onDismiss,
+}: {
+  message: string;
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      role="alert"
+      style={{
+        flexShrink: 0,
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--space-2)",
+        padding: "6px var(--space-3)",
+        backgroundColor: "var(--surface-error-soft)",
+        borderBottom: "1px solid color-mix(in oklch, var(--state-error), transparent 70%)",
+        fontFamily: "var(--font-sans)",
+        fontSize: "var(--text-2xs)",
+        color: "var(--text-primary)",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: "var(--radius-pill)",
+          backgroundColor: "var(--state-error-bright)",
+          flexShrink: 0,
+        }}
+      />
+      <span style={{ flex: 1, minWidth: 0 }}>{message}</span>
+      <button
+        type="button"
+        onClick={onDismiss}
+        title="Dismiss"
+        aria-label="Dismiss"
+        style={{
+          height: 18,
+          padding: "0 6px",
+          backgroundColor: "transparent",
+          color: "var(--text-tertiary)",
+          fontFamily: "var(--font-mono)",
+          fontSize: "var(--text-2xs)",
+          borderRadius: "var(--radius-xs)",
+          cursor: "pointer",
+        }}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 function Frame({
   status,
   screenshotUrl,
   imgRef,
   focused,
+  navPending,
   onClick,
   onBlur,
 }: {
@@ -608,11 +816,20 @@ function Frame({
   screenshotUrl: string | null;
   imgRef: React.MutableRefObject<HTMLImageElement | null>;
   focused: boolean;
+  navPending: boolean;
   onClick: (e: React.MouseEvent<HTMLImageElement>) => void;
   onBlur: () => void;
 }) {
   if (!status?.ready || !screenshotUrl) {
-    return <Empty label="ready · type a URL above to load a page" />;
+    return (
+      <Empty
+        label={
+          navPending
+            ? "loading…"
+            : "ready · type a URL or search above"
+        }
+      />
+    );
   }
   return (
     <div

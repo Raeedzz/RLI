@@ -11,6 +11,12 @@ interface Props {
   frame: RenderFrame | null;
   /** Forward raw keystrokes to the PTY (alt-screen apps need everything). */
   onSendBytes: (bytes: Uint8Array) => void;
+  /**
+   * Whether to grab focus on mount. Defaults to true. Set to false
+   * for secondary BlockTerminals so the main column wins the focus
+   * race on worktree switch.
+   */
+  autoFocus?: boolean;
 }
 
 const encoder = new TextEncoder();
@@ -24,14 +30,15 @@ const encoder = new TextEncoder();
  * Special-key encoding (arrows, function keys, etc.) follows the
  * standard xterm sequences — tested against `vim` insert-mode + `htop`.
  */
-export function FullGrid({ frame, onSendBytes }: Props) {
+export function FullGrid({ frame, onSendBytes, autoFocus = true }: Props) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-focus the input when alt-screen mounts so the first keystroke
   // routes to vim/htop/claude without an extra click.
   useEffect(() => {
+    if (autoFocus === false) return;
     inputRef.current?.focus();
-  }, []);
+  }, [autoFocus]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (isGlobalChord(e)) return;

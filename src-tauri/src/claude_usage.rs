@@ -474,6 +474,60 @@ fn latest_transcript_in(dir: &Path) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
+/// Quick "is Claude actively working in this worktree" check, used to
+/// drive the sidebar / tab-strip spinner. Source of truth: the mtime of
+/// Claude's transcript file. Each turn, tool-call, and tool-result
+/// gets appended as a new line — so mtime advances exactly when Claude
+/// is processing. Between turns / while sitting at the prompt waiting
+/// for user input, mtime stays put.
+///
+/// This replaces the byte-rate heuristic in term.rs, which was
+/// fundamentally ambiguous (couldn't distinguish shell banner output,
+/// window resize repaints, or sub-process noise from actual agent
+/// work). Transcript mtime is the same signal Anthropic's own UI
+/// uses internally; it's the most authoritative answer to "is the
+/// agent doing something right now" that exists outside Claude.
+#[derive(Debug, Serialize)]
+pub struct ClaudeActiveStatus {
+    pub active: bool,
+    /// Milliseconds since the transcript file was last modified.
+    /// `None` if no transcript exists for this worktree yet.
+    pub ms_since_activity: Option<u64>,
+}
+
+/// How recent must the transcript mtime be for us to consider Claude
+/// actively working? 1500 ms is generous enough to span the gap
+/// between an assistant text turn and the subsequent tool-use line
+/// (which can take ~200–800 ms while the SDK decides) without
+/// blinking the spinner off mid-conversation. Anything older is
+/// either between user turns or a finished session.
+const CLAUDE_ACTIVE_WINDOW_MS: u64 = 1500;
+
+#[tauri::command]
+pub fn claude_active_status(project_cwd: String) -> ClaudeActiveStatus {
+    let Some(dir) = transcript_dir_for(&project_cwd) else {
+        return ClaudeActiveStatus { active: false, ms_since_activity: None };
+    };
+    let Some(path) = latest_transcript_in(&dir) else {
+        return ClaudeActiveStatus { active: false, ms_since_activity: None };
+    };
+    let Ok(meta) = fs::metadata(&path) else {
+        return ClaudeActiveStatus { active: false, ms_since_activity: None };
+    };
+    let Ok(mtime) = meta.modified() else {
+        return ClaudeActiveStatus { active: false, ms_since_activity: None };
+    };
+    let now = SystemTime::now();
+    let elapsed_ms = now
+        .duration_since(mtime)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    ClaudeActiveStatus {
+        active: elapsed_ms < CLAUDE_ACTIVE_WINDOW_MS,
+        ms_since_activity: Some(elapsed_ms),
+    }
+}
+
 /// Walk the transcript and pull out the last `n_user` user prompts
 /// plus all assistant turns interleaved with them.
 ///

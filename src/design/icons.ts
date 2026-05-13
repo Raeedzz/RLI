@@ -41,6 +41,10 @@ export {
   GitPullRequestIcon as IconPullRequest,
   GitCommitIcon as IconCommit,
   GithubIcon as IconGithub,
+  // Stacked `+` over `−` glyph used by the chrome's diff button.
+  // Reads as additions-and-deletions at a glance, distinct from the
+  // git-merge `IconDiff` used for branch-level operations.
+  PlusMinus01Icon as IconPlusMinus,
 
   // Actions
   Search01Icon as IconSearch,

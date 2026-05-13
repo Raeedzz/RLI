@@ -323,11 +323,13 @@ body { font-variant-numeric: tabular-nums; }
   color: var(--text-tertiary);
 }
 
-/* The running-agent loader is now driven by React (snake-wave grid
-   in `src/primitives/Loader.tsx`) rather than a CSS keyframe. No
-   global animation rule belongs here anymore — keeping one would
-   double-animate any descendant that happened to carry the legacy
-   `.rli-loader` class. */
+/* The running-agent loader is a 3×3 snake-wave grid (
+   `src/primitives/Loader.tsx`) driven by a scoped CSS keyframe
+   `.rli-loader-cell` defined in motion.css. The previous React-state
+   tick was vulnerable to main-thread stalls under load — the keyframe
+   version runs on the compositor and stays smooth regardless. No
+   global `.rli-loader` rule lives here; the new class is uniquely
+   named so nothing else inherits the animation accidentally. */
 
 /* Tab-strip "agent computing" dot. Pulses opacity only — no scale
    transform, since scaling 6px dots makes them shimmer rather than

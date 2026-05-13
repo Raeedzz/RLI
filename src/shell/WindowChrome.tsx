@@ -11,7 +11,12 @@ import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { SearchIcon } from "@/primitives/Icon";
-import { IconEdit, IconPullRequest, IconSparkles } from "@/design/icons";
+import {
+  IconEdit,
+  IconPlusMinus,
+  IconPullRequest,
+  IconSparkles,
+} from "@/design/icons";
 import { useIsFullscreen } from "@/hooks/useIsFullscreen";
 import {
   useActiveWorktree,
@@ -701,10 +706,9 @@ function SearchTrigger({ onOpen }: { onOpen: () => void }) {
  * `+N -M` button to the left of the PR action. Polls `git diff
  * --shortstat HEAD` so the counts include every uncommitted change
  * (staged + unstaged) in one number, matching what the
- * `AllChangesView` will show when clicked. Stays hidden when there
- * are no changes — there's nothing to diff against, so the slot just
- * collapses out of the header rather than sitting at `+0 -0` and
- * adding noise.
+ * `AllChangesView` will show when clicked. Always visible when a
+ * worktree is active — even at `0 0`, so the header has a stable
+ * shape and the user can still click through to review history.
  */
 function DiffTrigger({ worktree }: { worktree: Worktree | null }) {
   const dispatch = useAppDispatch();
@@ -748,7 +752,10 @@ function DiffTrigger({ worktree }: { worktree: Worktree | null }) {
     };
   }, [worktree, path]);
 
-  if (!worktree || !stat || stat.files === 0) return null;
+  if (!worktree) return null;
+  const insertions = stat?.insertions ?? 0;
+  const deletions = stat?.deletions ?? 0;
+  const files = stat?.files ?? 0;
 
   const openChanges = () => {
     // Reuse an open "all-changes" tab for this worktree if there is
@@ -781,13 +788,21 @@ function DiffTrigger({ worktree }: { worktree: Worktree | null }) {
       type="button"
       onClick={openChanges}
       data-tauri-drag-region={false}
-      title={`Review ${stat.files} file${stat.files === 1 ? "" : "s"} · +${stat.insertions} −${stat.deletions}`}
+      title={
+        files === 0
+          ? "No changes — open changes view"
+          : `Review ${files} file${files === 1 ? "" : "s"} · +${insertions} −${deletions}`
+      }
       aria-label="Review all changes"
       style={{
+        // Mirror ActionButton exactly so the diff and PR controls read
+        // as a single matched pair of chips in the chrome — same
+        // height, same padding, same font size, same icon size,
+        // same gap. Anything off-axis between them breaks the rail.
         height: 28,
         display: "inline-flex",
         alignItems: "center",
-        gap: 8,
+        gap: 6,
         padding: "0 12px",
         backgroundColor: "var(--surface-1)",
         border: "1px solid var(--border-default)",
@@ -797,6 +812,10 @@ function DiffTrigger({ worktree }: { worktree: Worktree | null }) {
         fontFamily: "var(--font-mono)",
         fontSize: "var(--text-xs)",
         fontWeight: "var(--weight-semibold)",
+        // Drop line-height to 1 at the button level so any vertical
+        // padding from the inherited body line-height can't push the
+        // numbers off the visual midline.
+        lineHeight: 1,
         letterSpacing: 0,
         transition:
           "background-color var(--motion-instant) var(--ease-out-quart), border-color var(--motion-instant) var(--ease-out-quart)",
@@ -810,21 +829,90 @@ function DiffTrigger({ worktree }: { worktree: Worktree | null }) {
         e.currentTarget.style.borderColor = "var(--border-default)";
       }}
     >
+      {/*
+        Every child of the button is wrapped in a flex box of the
+        exact same fixed height (13 — matching the icon's size) so
+        the button's `alignItems: center` has identical geometry on
+        every slot. Nothing can ride high or low because of font
+        ascent/descent quirks: each slot is its own 13px line-box
+        with the glyph centered inside.
+      */}
       <span
         aria-hidden
         style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
           color: "var(--text-tertiary)",
-          fontSize: "var(--text-2xs)",
+          height: 13,
+          flexShrink: 0,
         }}
       >
-        ±
+        <IconPlusMinus size={13} />
       </span>
-      <span className="tabular" style={{ color: "var(--diff-add-fg)" }}>
-        +{stat.insertions}
-      </span>
-      <span className="tabular" style={{ color: "var(--diff-remove-fg)" }}>
-        −{stat.deletions}
-      </span>
+      <DiffCount color="var(--diff-add-fg)" sign="+" value={insertions} />
+      <DiffCount color="var(--diff-remove-fg)" sign="−" value={deletions} />
     </button>
+  );
+}
+
+/**
+ * One half of the diff-button count strip. The sign and digit are
+ * rendered in the same 13px-tall flex box as the icon next to it, so
+ * all three slots — icon, `+N`, `−M` — share an identical vertical
+ * extent. The `−` glyph gets a half-pixel downward nudge because
+ * U+2212 in JetBrains Mono sits a hair above the math axis vs. `+`;
+ * the nudge applies to the sign only, never the digit, so the `5`
+ * in `+5` and the `5` in `−5` stay on the exact same baseline.
+ */
+function DiffCount({
+  color,
+  sign,
+  value,
+}: {
+  color: string;
+  sign: "+" | "−";
+  value: number;
+}) {
+  return (
+    <span
+      className="tabular"
+      style={{
+        color,
+        display: "inline-flex",
+        alignItems: "center",
+        height: 13,
+        lineHeight: 1,
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          height: 13,
+          // Optical compensation for the U+2212 minus, which renders
+          // ~0.5px above the math axis in JetBrains Mono while `+` is
+          // centered on it. Plus stays at 0.
+          transform: sign === "−" ? "translateY(0.5px)" : "none",
+          // 1px of room either side of the sign so it doesn't crowd
+          // the digit (no `+5` mashed-together feel) without breaking
+          // the tight-pairing intent.
+          marginRight: 1,
+        }}
+      >
+        {sign}
+      </span>
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          height: 13,
+        }}
+      >
+        {value}
+      </span>
+    </span>
   );
 }

@@ -41,3 +41,34 @@ impl BrowserState {
         if p == 0 { None } else { Some(p) }
     }
 }
+
+/// Frontend-facing port lookup. The React side calls this through
+/// `invoke()` to discover the daemon's actual bound port — it's the
+/// single source of truth, faster and more reliable than reading the
+/// port file (which can be missing or stale during the boot race).
+/// Returns `None` until the daemon has bound; callers should retry
+/// or fall back to the port file.
+#[tauri::command]
+pub fn browser_bound_port(state: tauri::State<'_, BrowserState>) -> Option<u16> {
+    state.port()
+}
+
+/// Drop the current Chrome session so the next request lazy-spawns a
+/// fresh one. Used by the BrowserPane's "restart browser" button to
+/// recover from a stuck or crashed Chrome process without restarting
+/// the whole app. The daemon stays running.
+///
+/// Returns `true` if a session was dropped, `false` if none was
+/// active. Both are non-error cases — `false` just means the next
+/// request was already going to lazy-spawn.
+#[tauri::command]
+pub async fn browser_restart(state: tauri::State<'_, BrowserState>) -> Result<bool, String> {
+    let mut guard = state.session.write().await;
+    let had_session = guard.is_some();
+    // Drop the existing session — chromiumoxide's Browser kill-on-drop
+    // tears down the child Chrome process. The Arc may have other
+    // outstanding clones if a request is mid-flight; those finish
+    // against the old session and then the Arc's refcount hits zero.
+    *guard = None;
+    Ok(had_session)
+}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { CanvasGrid, isCanvasRendererEnabled } from "./CanvasGrid";
 import { CellRow } from "./CellRow";
 import { formatCwd, formatDuration } from "./formatBlockMeta";
@@ -88,20 +88,42 @@ export function LiveBlock({
   const cwdLabel = formatCwd(cwd);
 
   // Live duration counter — same look as closed blocks but updated
-  // every 100ms so the user can see the command time accumulate.
+  // every animation frame so the user sees the command time accumulate
+  // smoothly. The label is written directly into a ref-bound <span>
+  // via `textContent`, never via React state. This avoids ~10
+  // unnecessary commits per second per running command — at 20 active
+  // panes that's ~200 component-level rerenders/s, all on the React
+  // critical path. rAF + DOM write puts the work on the compositor
+  // instead and frees the main thread for actual user input.
   const startRef = useRef<number>(Date.now());
-  const [tick, setTick] = useState(0);
+  const durationRef = useRef<HTMLSpanElement | null>(null);
   useEffect(() => {
     startRef.current = Date.now();
-    setTick(0);
-    const id = window.setInterval(
-      () => setTick((t) => t + 1),
-      100,
-    );
-    return () => window.clearInterval(id);
+    let cancelled = false;
+    let raf = 0;
+    let lastLabel = "";
+    const paint = () => {
+      if (cancelled) return;
+      const label = formatDuration(Date.now() - startRef.current);
+      if (label !== lastLabel) {
+        lastLabel = label;
+        const node = durationRef.current;
+        if (node) node.textContent = `(${label})`;
+      }
+      raf = requestAnimationFrame(paint);
+    };
+    // Prime once synchronously so the first paint already shows a
+    // sensible duration; rAF takes over after that.
+    paint();
+    return () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+    };
   }, [command]);
-  const elapsedLabel = formatDuration(Date.now() - startRef.current);
-  void tick;
+  // Initial label at first render. Subsequent updates are written
+  // directly into `durationRef.current` by the rAF loop — React never
+  // commits them.
+  const initialElapsedLabel = formatDuration(Date.now() - startRef.current);
 
   return (
     <div
@@ -120,7 +142,7 @@ export function LiveBlock({
         userSelect: "text",
       }}
     >
-      {(cwdLabel || elapsedLabel) && (
+      {(cwdLabel || initialElapsedLabel) && (
         <div
           style={{
             display: "flex",
@@ -133,7 +155,9 @@ export function LiveBlock({
           }}
         >
           {cwdLabel && <span>{cwdLabel}</span>}
-          {elapsedLabel && <span>({elapsedLabel})</span>}
+          {initialElapsedLabel && (
+            <span ref={durationRef}>({initialElapsedLabel})</span>
+          )}
           <span
             aria-label="running"
             style={{

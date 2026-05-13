@@ -1,4 +1,5 @@
 import {
+  memo,
   useEffect,
   useRef,
   useState,
@@ -37,7 +38,6 @@ import {
   type ArchiveRecord,
   type Project,
   type Tab,
-  type TabId,
   type Worktree,
 } from "@/state/types";
 import { openProjectDialog } from "@/lib/projectDialog";
@@ -49,6 +49,7 @@ import {
   worktreeRestore,
 } from "@/lib/worktrees";
 import { useToast } from "@/primitives/Toast";
+import { useTrackAgentActivity } from "@/state/agentActivityStore";
 
 /**
  * Left rail. Flat agent-card list — one card per worktree, regardless
@@ -392,11 +393,23 @@ function ProjectGroup({
 
       <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
         {worktrees.map((w) => (
+          // `isRunning` is derived INSIDE WorktreeRow via the
+          // singleton `agentActivityStore` (Claude transcript-mtime
+          // poll). The row subscribes per-instance via
+          // `useSyncExternalStore`, so only the affected row
+          // rerenders when its worktree's activity flips — and
+          // because the store is decoupled from the AppState
+          // context, unrelated state mutations (polling-driven count
+          // updates, badge changes in other worktrees, etc.) skip
+          // the row's render entirely. The React.memo wrapper still
+          // skips parent-triggered rerenders when the props below
+          // are reference-stable.
           <WorktreeRow
             key={w.id}
             worktree={w}
             project={project}
             isActive={activeWorktreeId === w.id}
+            archiveBehavior={state.settings.archiveBehavior}
           />
         ))}
       </ul>
@@ -667,18 +680,33 @@ function HistorySection({ records }: { records: ArchiveRecord[] }) {
    Worktree row — compact, indented under its project header.
    ------------------------------------------------------------------ */
 
-function WorktreeRow({
+const WorktreeRow = memo(function WorktreeRowImpl({
   worktree,
   project,
   isActive,
+  archiveBehavior,
 }: {
   worktree: Worktree;
   project: Project;
   isActive: boolean;
+  /**
+   * `state.settings.archiveBehavior` extracted at the parent. Same
+   * memoization reason as `isRunning`: passing only the single
+   * string we need lets shallow prop-equality work, instead of
+   * the row reading `useAppState().settings` and being subscribed
+   * to every settings touch (including unrelated ones).
+   */
+  archiveBehavior: "ask" | "stash" | "force";
 }) {
+  // Live "is Claude doing something in this worktree" flag, sourced
+  // from the singleton agentActivityStore which polls Claude's
+  // transcript-file mtime. Subscribing here (per-row) instead of
+  // deriving from props at the parent keeps the spinner state
+  // OUTSIDE the AppState context — unrelated dispatches don't touch
+  // it, and only rows whose own worktree's activity flipped
+  // rerender (the others stay memoized).
+  const isRunning = useTrackAgentActivity(worktree.id, worktree.path);
   const dispatch = useAppDispatch();
-  const settings = useAppState().settings;
-  const tabs = useAppState().tabs;
   const toast = useToast();
   const [hovering, setHovering] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -693,16 +721,6 @@ function WorktreeRow({
   const rowRef = useRef<HTMLLIElement>(null);
   const showTimerRef = useRef<number | null>(null);
   const hideTimerRef = useRef<number | null>(null);
-  // Sidebar spinner: only spins while at least one tab in this
-  // worktree is "computing" (frame-heartbeat says the agent is
-  // producing output). Distinct from "agent CLI open" (agentStatus
-  // === "running") — that flag stays true the whole time claude/codex
-  // is foregrounded, including at the prompt waiting for input, which
-  // would otherwise leave the spinner perma-spinning.
-  const isRunning = worktree.tabIds.some((id) => {
-    const t = tabs[id];
-    return t?.kind === "terminal" && t.badge === "computing";
-  });
 
   // Cancel any pending show/hide timers when the row unmounts. Without
   // this a fast scroll-then-mount could fire a setState into a dead
@@ -783,9 +801,9 @@ function WorktreeRow({
 
   const onArchive = async (e: MouseEvent) => {
     e.stopPropagation();
-    let stash = settings.archiveBehavior !== "force";
-    let force = settings.archiveBehavior === "force";
-    if (settings.archiveBehavior === "ask") {
+    let stash = archiveBehavior !== "force";
+    let force = archiveBehavior === "force";
+    if (archiveBehavior === "ask") {
       const choice = window.confirm(
         `Archive ${worktree.name}?\n\nOK = stash dirty changes (recoverable from History)\nCancel = abort`,
       );
@@ -1045,7 +1063,6 @@ function WorktreeRow({
             key={worktree.id}
             worktree={worktree}
             project={project}
-            tabs={tabs}
             anchor={cardAnchor}
             onMouseEnter={cancelTimers}
             onMouseLeave={scheduleClose}
@@ -1069,7 +1086,7 @@ function WorktreeRow({
       </AnimatePresence>
     </li>
   );
-}
+});
 
 /* ------------------------------------------------------------------
    Worktree hover card
@@ -1091,7 +1108,6 @@ function WorktreeRow({
 function WorktreeHoverCard({
   worktree,
   project,
-  tabs,
   anchor,
   onMouseEnter,
   onMouseLeave,
@@ -1099,12 +1115,19 @@ function WorktreeHoverCard({
 }: {
   worktree: Worktree;
   project: Project;
-  tabs: Record<TabId, Tab>;
   anchor: DOMRect;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
   onCreatePR: () => void;
 }) {
+  // Read tabs from app state HERE rather than via a prop on the
+  // WorktreeRow that owns this card. The hover card only mounts on
+  // user-intent hover (a relatively rare event), so its subscription
+  // to the full state is fine — but pushing the prop through
+  // WorktreeRow would have re-rendered every row in the sidebar on
+  // every tab-state change, defeating the memoization that wraps
+  // WorktreeRow.
+  const tabs = useAppState().tabs;
   // Pick the most recently active tab — its derived title is the
   // 3-5 word distillation the user wants in the bold slot, its full
   // summary is the longer line beneath.
@@ -1170,16 +1193,14 @@ function WorktreeHoverCard({
   const left = anchor.right + 8;
   const top = Math.max(8, anchor.top);
 
-  // The spinner mirrors the sidebar row's behavior: spin only while a
-  // tab in this worktree is genuinely *computing* (per the
-  // frame-heartbeat badge), not just because an agent CLI is sitting
-  // at a prompt. Otherwise the hover card would spin perma- whenever
-  // claude/codex is open, which defeats the whole point of the
-  // signal.
-  const isRunning = worktree.tabIds.some((id) => {
-    const t = tabs[id];
-    return t?.kind === "terminal" && t.badge === "computing";
-  });
+  // The spinner mirrors the sidebar row's behavior: spin only while
+  // Claude's transcript file for this worktree is being appended to —
+  // i.e., the agent is genuinely processing a turn. Otherwise the
+  // hover card would spin perma- whenever claude/codex is open, which
+  // defeats the whole point of the signal. Sourced from the same
+  // store as the sidebar row, so the two indicators can't disagree.
+  const isRunning = useTrackAgentActivity(worktree.id, worktree.path);
+  void tabs;
 
   return createPortal(
     <motion.div

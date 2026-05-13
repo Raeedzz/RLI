@@ -33,6 +33,13 @@ interface Props {
    * looks like the bottom of a big prompt "loading slowly."
    */
   bracketedPaste: boolean;
+  /**
+   * Whether to grab focus on mount. Defaults to true — the existing
+   * "open an agent and start typing" case. Set to false for secondary
+   * BlockTerminals so they don't steal focus from the main column
+   * on worktree switch.
+   */
+  autoFocus?: boolean;
 }
 
 const encoder = new TextEncoder();
@@ -53,7 +60,10 @@ const PASTE_END = encoder.encode("\x1b[201~");
  * so the textarea is invisible but focusable.
  */
 export const PtyPassthrough = forwardRef<PtyPassthroughHandle, Props>(
-  function PtyPassthrough({ onSendBytes, appCursor, bracketedPaste }, ref) {
+  function PtyPassthrough(
+    { onSendBytes, appCursor, bracketedPaste, autoFocus = true },
+    ref,
+  ) {
     const inputRef = useRef<HTMLTextAreaElement>(null);
     // Set on paste; cleared on the next onChange. Lets the input
     // handler wrap the value in OSC 200/201 markers without re-reading
@@ -66,8 +76,9 @@ export const PtyPassthrough = forwardRef<PtyPassthroughHandle, Props>(
     }));
 
     useEffect(() => {
+      if (autoFocus === false) return;
       inputRef.current?.focus();
-    }, []);
+    }, [autoFocus]);
 
     const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
       if (isGlobalChord(e)) return;

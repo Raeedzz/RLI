@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   IconPlus,
@@ -524,27 +524,6 @@ function tabLabel(tab: Tab): string {
 }
 
 /**
- * The 6px dot painted at the left of each tab. Three visual states
- * drive it for terminal tabs:
- *
- *   idle              — grey static dot. No agent computing.
- *   computing         — accent-colored dot pulsing opacity 0.45 ↔ 1
- *                       on a 1.4s ease-in-out loop. Pulses for as long
- *                       as the BlockTerminal frame-heartbeat says the
- *                       agent is producing output.
- *   finished-unseen   — accent-colored solid dot. The agent has gone
- *                       quiet but the user hasn't viewed this tab yet,
- *                       so the result is "unread."
- *
- * Non-terminal tab kinds fall back to the existing TabKindGlyph
- * (different colors per kind) since the badge concept only really
- * applies to live terminal sessions.
- *
- * Reduced motion: the keyframe animation collapses to zero-duration
- * via the global tokens.css rule, leaving the dot at its initial
- * opacity (0.45) — still visible as "computing", just not animated.
- */
-/**
  * Tab strip dot. One simple rule:
  *
  *   grey by default · red when the tab has unsaved edits
@@ -612,61 +591,150 @@ function TabContent({
   tab: Tab | null;
   projectPath: string;
 }) {
-  if (!tab) {
-    return (
-      <div
-        style={{
-          minHeight: 0,
-          display: "grid",
-          placeItems: "center",
-          color: "var(--text-tertiary)",
-          fontSize: "var(--text-xs)",
-        }}
-      >
-        No tab open. Press <Kbd>+</Kbd> to start a terminal.
-      </div>
-    );
-  }
-
+  // Terminal-kind tabs go through the always-mounted keepalive
+  // layer; non-terminal kinds (diff, markdown, all-changes,
+  // project-settings) mount on demand. The keepalive layer is
+  // ALWAYS rendered, even when the active tab is non-terminal —
+  // its children are display:none in that case, but they stay in
+  // the React tree so the user's PTYs (and their accumulated
+  // scrollback + agent state) survive a switch to a diff and back.
+  //
+  // This is the change that makes worktree switching seamless:
+  // before, the previous `key={tab.id}` on `<TerminalTabContent>`
+  // forced every worktree switch to unmount the old BlockTerminal
+  // and mount a new one. With the keepalive layer, switching
+  // worktrees just toggles `display: flex` / `display: none` on
+  // already-mounted terminals — no re-listen, no re-term_start,
+  // no React commit cascade for the BlockTerminal subtree.
   return (
     <div style={{ minHeight: 0, position: "relative", overflow: "hidden" }}>
       <ErrorBoundary>
-        {tab.kind === "terminal" ? (
-          // `key={tab.id}` forces a fresh BlockTerminal per tab. Without it,
-          // React reuses the same instance across tab switches and the
-          // child's local state (`foregroundIsAgent`, `activeCommand`,
-          // `altScreen`, …) leaks from the previous tab — which is how a
-          // new tab opened while another tab is running claude inherits
-          // `foregroundIsAgent=true` and the PromptInput never renders.
-          // The PTY itself survives unmount (useTerminalSession explicitly
-          // skips `term_close` on teardown), so the cost of remounting is
-          // a `term_start` re-emit of the cached grid — cheap and idempotent.
-          <TerminalTabContent key={tab.id} worktree={worktree} tab={tab} />
-        ) : tab.kind === "diff" ? (
-          <DiffTabContent
-            key={tab.id}
-            projectPath={projectPath}
-            filePath={tab.filePath}
-            staged={tab.staged}
-          />
-        ) : tab.kind === "all-changes" ? (
-          <AllChangesView key={tab.id} projectPath={projectPath} />
-        ) : tab.kind === "project-settings" ? (
-          <RepositorySettingsView key={tab.id} projectId={tab.projectId} />
-        ) : (
-          <MarkdownTabContent key={tab.id} tab={tab} />
+        <TerminalKeepaliveLayer
+          activeTerminalTabId={
+            tab && tab.kind === "terminal" ? tab.id : null
+          }
+          activeWorktree={worktree}
+        />
+        {!tab && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "grid",
+              placeItems: "center",
+              color: "var(--text-tertiary)",
+              fontSize: "var(--text-xs)",
+              backgroundColor: "var(--surface-2)",
+            }}
+          >
+            No tab open. Press <Kbd>+</Kbd> to start a terminal.
+          </div>
+        )}
+        {tab && tab.kind !== "terminal" && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              backgroundColor: "var(--surface-2)",
+              minHeight: 0,
+            }}
+          >
+            {tab.kind === "diff" ? (
+              <DiffTabContent
+                key={tab.id}
+                projectPath={projectPath}
+                filePath={tab.filePath}
+                staged={tab.staged}
+              />
+            ) : tab.kind === "all-changes" ? (
+              <AllChangesView key={tab.id} projectPath={projectPath} />
+            ) : tab.kind === "project-settings" ? (
+              <RepositorySettingsView
+                key={tab.id}
+                projectId={tab.projectId}
+              />
+            ) : (
+              <MarkdownTabContent key={tab.id} tab={tab} />
+            )}
+          </div>
         )}
       </ErrorBoundary>
     </div>
   );
 }
 
+/**
+ * Pre-mounts every terminal-kind tab in the ACTIVE worktree. Each
+ * one's BlockTerminal lives in an absolute-positioned slot inside
+ * this layer; only the slot whose tab.id matches `activeTerminalTabId`
+ * has `display: flex`, the rest have `display: none`. Tab switches
+ * within a worktree are a single CSS flip — no unmount + remount.
+ *
+ * Cross-worktree mount was the previous design but caused freezes
+ * and rerender cascades: every state dispatch went through every
+ * worktree's tabs simultaneously. Restricting the layer to the
+ * active worktree's tabs keeps the within-worktree win without
+ * paying the global tax. The Rust PTY survives worktree switches
+ * regardless (term_start is idempotent and re-emits the cached
+ * grid), so the worktree-switch round-trip is still cheap.
+ */
+function TerminalKeepaliveLayer({
+  activeTerminalTabId,
+  activeWorktree,
+}: {
+  activeTerminalTabId: string | null;
+  activeWorktree: Worktree;
+}) {
+  const state = useAppState();
+  const terminalSlots = useMemo<
+    Array<{ tab: TerminalTab; worktree: Worktree }>
+  >(() => {
+    const out: Array<{ tab: TerminalTab; worktree: Worktree }> = [];
+    for (const tabId of activeWorktree.tabIds) {
+      const t = state.tabs[tabId];
+      if (!t || t.kind !== "terminal") continue;
+      out.push({ tab: t, worktree: activeWorktree });
+    }
+    return out;
+  }, [activeWorktree, state.tabs]);
+
+  return (
+    <>
+      {terminalSlots.map(({ tab, worktree }) => {
+        const visible = tab.id === activeTerminalTabId;
+        return (
+          <div
+            key={tab.id}
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: visible ? "flex" : "none",
+              flexDirection: "column",
+              minHeight: 0,
+            }}
+          >
+            <TerminalTabContent
+              worktree={worktree}
+              tab={tab}
+              isVisible={visible}
+            />
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 function TerminalTabContent({
   worktree,
   tab,
+  isVisible,
 }: {
   worktree: Worktree;
   tab: TerminalTab;
+  isVisible: boolean;
 }) {
   const dispatch = useAppDispatch();
   const { settings } = useAppState();
@@ -678,16 +746,13 @@ function TerminalTabContent({
       autoSummarize={settings.autoSummarize}
       projectId={worktree.projectId}
       sessionId={worktree.id}
+      isVisible={isVisible}
       // Re-seed agent state on remount so an in-flight claude/codex
       // session doesn't briefly drop back to shell mode (which paints
       // PromptInput under the agent's own UI) when the user navigates
       // back to the tab.
       initialAgentRunning={tab.agentStatus === "running"}
       initialAgentCli={tab.detectedCli}
-      // Continue the pulsing dot across a tab switch — if frames stop
-      // arriving within ~1.5s of mount, the heartbeat in BlockTerminal
-      // will flip it back to false automatically.
-      initialComputing={tab.badge === "computing"}
       onAgentRunningChange={(running, cli) => {
         dispatch({
           type: "update-tab",
@@ -712,16 +777,6 @@ function TerminalTabContent({
             playCompletionSound(settings.completionSound);
           }
         }
-      }}
-      onComputingChange={(computing) => {
-        // Reducer picks the right badge: computing → pulsing, !computing
-        // → "finished-unseen" unless the tab is currently being viewed
-        // (then idle).
-        dispatch({
-          type: "set-tab-computing",
-          id: tab.id,
-          computing,
-        });
       }}
       onActivitySummaryChange={(summary) => {
         if (!summary) return;

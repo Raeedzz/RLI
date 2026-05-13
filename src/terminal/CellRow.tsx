@@ -25,10 +25,11 @@ interface Props {
  * with 5 colors is 5 DOM nodes, not 120.
  *
  * URLs in span text get split out into clickable `<a>` elements that
- * dispatch a `rli:open-url` event — the AppShell catches it and routes
- * the URL into the active session's in-app browser pane (opening one
- * if needed). That keeps `localhost:5173` and friends inside the CLI
- * instead of bouncing to the OS default browser.
+ * dispatch a `rli:open-url` event — the AppShell catches it and opens
+ * the URL in the user's default system browser. The in-app browser
+ * pane is reserved for URLs the user deliberately types or pastes
+ * into its address bar (dev-server previews), not for ambient links
+ * the agent happens to print.
  *
  * Memoized so React skips reconciling rows that didn't change between
  * frames (the wire-level diff already drops unchanged rows, but a fresh
@@ -115,7 +116,7 @@ function UrlSpan({ text, url }: { text: string; url: string }) {
         textUnderlineOffset: 2,
         cursor: "pointer",
       }}
-      title={`Open ${url} in the in-app browser pane`}
+      title={`Open ${url} in your default browser`}
     >
       {text}
     </a>

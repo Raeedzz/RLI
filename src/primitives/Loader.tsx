@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import type { CSSProperties } from "react";
 
 /**
  * "Agent running" snake-wave — a 3×3 grid of small squares with a
@@ -22,17 +22,24 @@ import { useEffect, useState } from "react";
  *     crest reads as a smooth rise-and-fall instead of a hard wrap.
  *
  * Motion:
- *   - One palette rotation per 150ms. Full cycle = 9 × 150ms = 1.35s.
- *   - `transition: background-color 150ms linear` on each cell so the
- *     color step doesn't snap — the whole grid drifts as one.
+ *   - Pure CSS keyframes. Each cell carries `--rli-loader-snake-pos`
+ *     (its 0..8 position along the spiral); the `.rli-loader-cell`
+ *     class runs a 1.35s keyframe walk through the palette with a
+ *     negative `animation-delay` derived from that position, so each
+ *     cell sits at its own phase and the wave reads as a single crest
+ *     drifting across the grid.
+ *   - The animation runs on the compositor thread, NOT the React
+ *     main thread. Under load (20+ agents streaming, tab-switch
+ *     storms, big diffs in flight) the loader stays visually
+ *     continuous — the previous React-state implementation could
+ *     stall for a frame whenever the commit queue backed up, which
+ *     read as "the spinner just stopped" to the user.
  *
  * Hardening:
- *   - React state drives the rotation, not raw DOM mutation. No
- *     references to globals, no `document.querySelector`, safe to
- *     mount many instances in parallel (each owns its own interval).
- *   - prefers-reduced-motion: the effect bails out and the grid
- *     freezes at step 0. The static snapshot still reads as the
- *     indicator's signature, just without motion.
+ *   - No setInterval, no React state, no document.querySelector. Each
+ *     instance is just nine spans with a class and a CSS variable.
+ *   - prefers-reduced-motion freezes every cell at a calm mid-palette
+ *     stop — the indicator still reads as "active", just motionless.
  *   - aria-hidden — decorative; the "running" state is conveyed by
  *     surrounding chrome (tab badge, hover card) with proper labels.
  *
@@ -41,43 +48,18 @@ import { useEffect, useState } from "react";
  * toast. One implementation, one motion grammar.
  */
 
-// Five steps of muted near-whites — very low chroma, ascending
-// lightness. The hue tracks the project's cool-tinted neutrals
-// (`hue 250`) so the crest matches the surface palette instead of
-// reading as a foreign color.
-const PALETTE_BASE = [
-  "oklch(36% 0.003 250)",
-  "oklch(54% 0.003 250)",
-  "oklch(72% 0.003 250)",
-  "oklch(86% 0.003 250)",
-  "oklch(96% 0.003 250)",
-];
-
-// 9-position palette: 0..4..0 mirrored. The crest rises then falls
-// instead of teleporting back to the dimmest stop.
-const PALETTE = [
-  PALETTE_BASE[0],
-  PALETTE_BASE[1],
-  PALETTE_BASE[2],
-  PALETTE_BASE[3],
-  PALETTE_BASE[4],
-  PALETTE_BASE[3],
-  PALETTE_BASE[2],
-  PALETTE_BASE[1],
-  PALETTE_BASE[0],
-];
-
 // Snake order: each entry is a 0..8 grid index, ordered along the
 // inward clockwise spiral. SNAKE_POS_BY_GRID[i] = "where in the snake
 // path does grid cell i sit?" — flipped form, pre-computed so we
 // don't search per cell on every render.
 const SNAKE_ORDER = [0, 1, 2, 5, 8, 7, 6, 3, 4];
-const SNAKE_POS_BY_GRID = SNAKE_ORDER.reduce<number[]>((acc, gridIdx, snakePos) => {
-  acc[gridIdx] = snakePos;
-  return acc;
-}, new Array(9));
-
-const TICK_MS = 150;
+const SNAKE_POS_BY_GRID = SNAKE_ORDER.reduce<number[]>(
+  (acc, gridIdx, snakePos) => {
+    acc[gridIdx] = snakePos;
+    return acc;
+  },
+  new Array(9),
+);
 
 export function Loader({
   size = 14,
@@ -85,21 +67,6 @@ export function Loader({
   /** Pixel size of the square slot. Default 14. */
   size?: number;
 }) {
-  const [step, setStep] = useState(0);
-
-  useEffect(() => {
-    if (
-      typeof window !== "undefined" &&
-      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
-    ) {
-      return;
-    }
-    const id = window.setInterval(() => {
-      setStep((s) => (s + 1) % PALETTE.length);
-    }, TICK_MS);
-    return () => window.clearInterval(id);
-  }, []);
-
   // Squares are integer-sized so they line up pixel-perfect on the
   // grid (CSS subpixel rounding can leave hairline seams between cells
   // otherwise). Minimum 2px so the wave is still visible at small sizes.
@@ -120,15 +87,15 @@ export function Loader({
     >
       {Array.from({ length: 9 }).map((_, gridIndex) => {
         const snakePos = SNAKE_POS_BY_GRID[gridIndex];
-        const color = PALETTE[(snakePos + step) % PALETTE.length];
         return (
           <span
             key={gridIndex}
-            style={{
-              backgroundColor: color,
-              transition: `background-color ${TICK_MS}ms linear`,
-              willChange: "background-color",
-            }}
+            className="rli-loader-cell"
+            style={
+              {
+                "--rli-loader-snake-pos": snakePos,
+              } as CSSProperties
+            }
           />
         );
       })}

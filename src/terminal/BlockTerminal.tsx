@@ -16,6 +16,14 @@ import { PtyPassthrough, type PtyPassthroughHandle } from "./PtyPassthrough";
 import { TerminalStatusBar } from "./TerminalStatusBar";
 import { useTerminalSession } from "./useTerminalSession";
 import { getHistory, setHistory as memSetHistory } from "./sessionMemory";
+import {
+  registerTerminalFocus,
+  unregisterTerminalFocus,
+} from "./terminalFocusRegistry";
+import {
+  setTerminalRunning,
+  clearTerminalRunning,
+} from "./terminalActivityStore";
 import { detectClaude } from "@/lib/claudeUsage";
 
 /** Command names that always run as an interactive TUI agent. */
@@ -107,19 +115,6 @@ interface Props {
    */
   onActivitySummaryChange?: (summary: string) => void;
   /**
-   * Fires when the agent's "actively computing" state flips. Tied to a
-   * frame-arrival heartbeat, gated on foregroundIsAgent — flips true
-   * once a frame lands while in agent mode, flips false after no
-   * frames for `COMPUTING_QUIET_MS`. Distinct from
-   * onAgentRunningChange, which only says "an agent CLI is open";
-   * this is "the agent is doing work *right now*."
-   *
-   * Wired into the tab strip's badge dot: pulses blue while
-   * computing, solid blue when an unviewed result is waiting, grey
-   * when truly idle.
-   */
-  onComputingChange?: (computing: boolean) => void;
-  /**
    * Whether the parent already knows the foregrounded process is an
    * interactive agent. Set when re-mounting a tab whose PTY has been
    * running claude/codex/etc. before the user switched away — without
@@ -130,14 +125,26 @@ interface Props {
   /** Detected CLI to seed `activeCommand` from on mount. */
   initialAgentCli?: DetectedAgentCli;
   /**
-   * Whether the parent already knows this tab was actively computing
-   * before the BlockTerminal remounted. Without this seed, a tab the
-   * user switches back to mid-stream resets the pulsing dot to idle
-   * until the next prompt submission — the heartbeat would then need
-   * to re-discover the in-flight work. Setting it from `tab.badge ===
-   * "computing"` continues the pulse seamlessly across the remount.
+   * Whether this terminal should pull keyboard focus on its own mount.
+   * Defaults to true — preserves the "open a new tab, start typing"
+   * behavior for main-column terminals. Passed false from the
+   * right-panel secondary terminals so they never steal focus from
+   * the main column on worktree switch (the user's symptom: "cursor
+   * lands in the side view, not the main one"). The inner
+   * PromptInput / PtyPassthrough / FullGrid all forward this flag.
    */
-  initialComputing?: boolean;
+  autoFocus?: boolean;
+  /**
+   * Whether this terminal is currently the active/visible one in
+   * its containing layout. The `TerminalKeepaliveLayer` in
+   * MainColumn pre-mounts every terminal across every worktree and
+   * toggles `display: none` for inactive ones; passing `isVisible`
+   * down lets `useTerminalSession` skip React state updates while
+   * hidden so the hidden BlockTerminals do zero work even when
+   * their PTYs emit frame events. Defaults to true so standalone
+   * (non-keepalive) uses keep working.
+   */
+  isVisible?: boolean;
 }
 
 const DEFAULT_ROWS = 32;
@@ -171,10 +178,10 @@ export function BlockTerminal({
   onClaudeDetected,
   onAgentRunningChange,
   onActivitySummaryChange,
-  onComputingChange,
   initialAgentRunning = false,
   initialAgentCli = null,
-  initialComputing = false,
+  autoFocus = true,
+  isVisible = true,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<PromptInputHandle>(null);
@@ -212,10 +219,6 @@ export function BlockTerminal({
   useEffect(() => {
     onActivitySummaryChangeRef.current = onActivitySummaryChange;
   }, [onActivitySummaryChange]);
-  const onComputingChangeRef = useRef(onComputingChange);
-  useEffect(() => {
-    onComputingChangeRef.current = onComputingChange;
-  }, [onComputingChange]);
   // For direct-launched claude sessions, fire the detected callback
   // on mount — there's no banner to sniff because we ARE the agent.
   useEffect(() => {
@@ -273,6 +276,32 @@ export function BlockTerminal({
       onAgentRunningChangeRef.current?.(foregroundIsAgent, cli);
     }
   }, [foregroundIsAgent, activeCommand, command]);
+
+  // Foreground-mode ref so the registered focus closure always reads
+  // the latest value without forcing a re-registration on every flip.
+  // The registry is keyed by the stable tab id; the closure picks
+  // PromptInput vs PtyPassthrough at the moment focus is requested.
+  const foregroundIsAgentRef = useRef(foregroundIsAgent);
+  useEffect(() => {
+    foregroundIsAgentRef.current = foregroundIsAgent;
+  }, [foregroundIsAgent]);
+
+  // Register a focus function for this terminal's tab id, so the
+  // global `useFocusActiveTerminal` hook can send focus here whenever
+  // the user switches to this terminal's worktree. Mirrors the
+  // mouseUp-on-empty-area click-to-refocus logic below: in agent mode
+  // we focus the PtyPassthrough invisible input (forwards every key
+  // straight to the PTY); in shell mode we focus PromptInput's textarea.
+  useEffect(() => {
+    registerTerminalFocus(id, () => {
+      if (foregroundIsAgentRef.current) {
+        passthroughRef.current?.focus();
+      } else {
+        promptRef.current?.focus();
+      }
+    });
+    return () => unregisterTerminalFocus(id);
+  }, [id]);
 
   // While a Claude-Code session is foregrounded, the launch command
   // ("claude") tells you nothing about what's actually happening. Ask
@@ -367,6 +396,7 @@ export function BlockTerminal({
     cols: DEFAULT_COLS,
     projectId,
     sessionId,
+    isVisible,
   });
 
   // PTY died (process crashed, backend restarted on a Rust hot-reload,
@@ -380,94 +410,27 @@ export function BlockTerminal({
     sniffBufferRef.current = "";
   }, [exited, foregroundIsAgent]);
 
+  // Push every OSC 133 command-running edge into the per-PTY activity
+  // store so the sidebar spinner reflects "this worktree has a command
+  // actively running right now". Mirrors Warp's per-block spinner
+  // semantics: spin only between OSC 133 C (start) and D (done), not
+  // while the user is sitting at the shell prompt or while a TUI agent
+  // is idle inside its own input box. Clearing on unmount keeps the
+  // store from holding stale entries for closed sessions.
+  const commandRunning = liveFrame?.command_running ?? false;
+  useEffect(() => {
+    setTerminalRunning(id, commandRunning && !exited);
+  }, [id, commandRunning, exited]);
+  useEffect(() => {
+    return () => clearTerminalRunning(id);
+  }, [id]);
+
   // `altScreen` covers vim/htop; `foregroundIsAgent` covers
   // claude/codex/etc. that render in the normal screen. Both hide
   // PromptInput + status bar so the agent's own UI owns the surface.
   // After the PTY exits, downshift back to shell-mode chrome regardless
   // of what the last frame's flags were — those readings are stale.
   const agentMode = !exited && (altScreen || foregroundIsAgent);
-
-  // ── Agent computing heartbeat ─────────────────────────────────────
-  // "Computing" is gated on a SUBMISSION event, not on raw frame
-  // activity. Frames also flow while the user is typing into the
-  // agent's input box (each keystroke redraws the input area), and
-  // we explicitly don't want the dot to pulse while the user is
-  // composing — only after they've actually pressed Enter.
-  //
-  // State machine:
-  //   - isComputing flips TRUE when the user presses plain Enter
-  //     while in agent mode (PtyPassthrough.onSendBytes sees the CR
-  //     byte and calls `markPromptSubmitted`). Also true on mount
-  //     when `initialComputing` is set — that's how we survive a
-  //     BlockTerminal remount mid-agent-work.
-  //   - While true, the heartbeat tick checks frame staleness. If no
-  //     new frame has arrived for COMPUTING_QUIET_MS, the agent has
-  //     gone quiet → flip FALSE.
-  //   - Frames during the active window keep bumping lastFrameAtRef,
-  //     so a long-running agent stream keeps computing=true
-  //     indefinitely.
-  //
-  // Agent-mode exit (Ctrl+C, `/exit`, PTY death) hard-resets to
-  // false so the reducer's "finished-unseen" branch can fire for
-  // background tabs the user has navigated away from.
-  const lastFrameAtRef = useRef<number>(Date.now());
-  const lastFrameSeqRef = useRef<number>(-1);
-  useEffect(() => {
-    if (!liveFrame) return;
-    if (liveFrame.seq === lastFrameSeqRef.current) return;
-    lastFrameSeqRef.current = liveFrame.seq;
-    lastFrameAtRef.current = Date.now();
-  }, [liveFrame]);
-
-  const COMPUTING_QUIET_MS = 1500;
-  const HEARTBEAT_INTERVAL_MS = 400;
-  // initialComputing prop seeds this so a tab remounted while the
-  // agent is still working continues to pulse instead of resetting
-  // to idle until the next user submission. If the agent is actually
-  // quiet on remount, the heartbeat will flip this to false within
-  // COMPUTING_QUIET_MS — short-lived stale state, self-correcting.
-  const [isComputing, setIsComputing] = useState(() => initialComputing);
-
-  // Called by the PtyPassthrough byte wrapper below whenever the user
-  // presses plain Enter (CR, 0x0d) while in agent mode. That's our
-  // "user submitted a prompt to the agent" event.
-  const markPromptSubmitted = useCallback(() => {
-    lastFrameAtRef.current = Date.now();
-    setIsComputing((cur) => (cur ? cur : true));
-  }, []);
-
-  // When the agent exits cleanly OR the PTY dies, hard-reset
-  // computing to false so the badge doesn't sit pulsing forever on a
-  // dead session.
-  useEffect(() => {
-    if (!agentMode && isComputing) {
-      setIsComputing(false);
-    }
-  }, [agentMode, isComputing]);
-
-  // While computing is true, watch the frame heartbeat for quiet.
-  // We only run the interval when needed — when computing is false
-  // there's nothing to time out, and we'd be paying for a 400ms
-  // wakeup loop in every BlockTerminal for no reason.
-  useEffect(() => {
-    if (!isComputing) return;
-    const id = window.setInterval(() => {
-      const sinceFrame = Date.now() - lastFrameAtRef.current;
-      if (sinceFrame >= COMPUTING_QUIET_MS) {
-        setIsComputing(false);
-      }
-    }, HEARTBEAT_INTERVAL_MS);
-    return () => window.clearInterval(id);
-  }, [isComputing]);
-
-  // Propagate state changes to the parent — single source of truth
-  // is local; the parent's job is to dispatch to the reducer.
-  const lastReportedComputingRef = useRef<boolean | null>(null);
-  useEffect(() => {
-    if (lastReportedComputingRef.current === isComputing) return;
-    lastReportedComputingRef.current = isComputing;
-    onComputingChangeRef.current?.(isComputing);
-  }, [isComputing]);
 
   // Bell visualization — a brief, soft pulse on the input zone every
   // time the shell emits BEL. We just track "is currently flashing"
@@ -543,9 +506,30 @@ export function BlockTerminal({
       void resize(rows, cols).catch(() => {});
     };
     compute();
-    const observer = new ResizeObserver(compute);
+    // ResizeObserver fires synchronously on every layout commit — during
+    // an output burst (claude streaming, a `seq 1 100000`, the user
+    // dragging the splitter) that can mean dozens of fires per second
+    // per terminal. Even though `compute` short-circuits on unchanged
+    // dimensions, each fire still calls `getBoundingClientRect()` which
+    // forces a layout flush. Coalescing through rAF means: many fires
+    // in the same frame collapse into one bounding-rect read on the
+    // next paint, and at the (small) cost of a ≤16ms delay we save
+    // (N - 1) layout flushes per resize storm. At 20 panes this is the
+    // difference between smooth dragging and visible jank.
+    let rafId = 0;
+    const scheduleCompute = () => {
+      if (rafId) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = 0;
+        compute();
+      });
+    };
+    const observer = new ResizeObserver(scheduleCompute);
     observer.observe(el);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      if (rafId) cancelAnimationFrame(rafId);
+    };
   }, [resize, agentMode, foregroundIsAgent]);
 
   // Sniff the live frame for the Claude banner so the 5h usage bar
@@ -714,6 +698,42 @@ export function BlockTerminal({
     };
   }, []);
 
+  // Authoritative agent-mode exit: a newly-CLOSED block while we're
+  // foregrounding an agent means the shell observed OSC 133 D for
+  // that agent command — i.e. the agent process exited (clean exit,
+  // Ctrl+C, crash, whatever). The debounce above is the slow / soft
+  // path that watches `command_running` edges; this is the hard
+  // path that fires the moment the block boundary lands.
+  //
+  // Without this, an unlucky sequence of transient `command_running`
+  // flips during the agent's last redraw could keep cancelling the
+  // debounce and we'd be stuck in agent mode forever — exactly the
+  // "I Ctrl+C'd claude and the input box never came back" symptom.
+  // The shell-level block-close signal can't be reordered against
+  // the agent process exit, so this is the safest "agent is really
+  // gone" trigger we have.
+  const lastBlockCountRef = useRef(blocks.length);
+  useEffect(() => {
+    if (!foregroundIsAgent) {
+      lastBlockCountRef.current = blocks.length;
+      return;
+    }
+    if (blocks.length > lastBlockCountRef.current) {
+      lastBlockCountRef.current = blocks.length;
+      // Cancel any in-flight debounce timer — we're firing the
+      // transition now and don't want a delayed flip racing later.
+      if (exitDebounceRef.current !== null) {
+        window.clearTimeout(exitDebounceRef.current);
+        exitDebounceRef.current = null;
+      }
+      setForegroundIsAgent(false);
+      sniffBufferRef.current = "";
+      // Same focus restoration the debounce path does, so the user
+      // can immediately start typing into the recovered PromptInput.
+      setTimeout(() => promptRef.current?.focus(), 0);
+    }
+  }, [blocks.length, foregroundIsAgent]);
+
   // Bracketed-paste passthrough. zsh + most modern shells set DECSET
   // 2004 by default (their line editor strips the markers and treats
   // pasted text literally — no auto-execute on embedded \n). We wrap
@@ -819,7 +839,11 @@ export function BlockTerminal({
             <CanvasGrid frame={liveFrame} onSendBytes={sendBytes} />
           </div>
         ) : (
-          <FullGrid frame={liveFrame} onSendBytes={sendBytes} />
+          <FullGrid
+            frame={liveFrame}
+            onSendBytes={sendBytes}
+            autoFocus={autoFocus}
+          />
         ))}
 
       {/* One scroll container for everything that isn't alt-screen.
@@ -876,25 +900,16 @@ export function BlockTerminal({
           historyLength={history.length}
           historyAt={historyAt}
           cwd={effectiveCwd}
+          autoFocus={autoFocus}
         />
       )}
       {foregroundIsAgent && !altScreen && (
         <PtyPassthrough
           ref={passthroughRef}
-          onSendBytes={(b) => {
-            // Plain Enter (CR, 0x0d) is the "submit a prompt to the
-            // agent" signal. Shift+Enter sends LF (0x0a) for multi-line
-            // composition — those don't count. Bracketed-paste blocks
-            // wrap their payload in OSC 200/201 so a stray CR inside
-            // pasted text doesn't satisfy `b.length === 1` and won't
-            // false-trigger the spinner.
-            if (b.length === 1 && b[0] === 0x0d) {
-              markPromptSubmitted();
-            }
-            void sendBytes(b);
-          }}
+          onSendBytes={(b) => void sendBytes(b)}
           appCursor={liveFrame?.app_cursor ?? false}
           bracketedPaste={liveFrame?.bracketed_paste ?? false}
+          autoFocus={autoFocus}
         />
       )}
     </div>

@@ -30,7 +30,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
@@ -87,6 +87,16 @@ pub async fn start<R: Runtime>(app: AppHandle<R>) -> Result<u16, String> {
         .bound_port
         .store(port, std::sync::atomic::Ordering::Relaxed);
     write_port_file(&app, port);
+
+    // Tell the frontend the daemon is up. Without this event, React's
+    // health-check polling runs on a 2s interval and a 10s timeout,
+    // so a slow boot can briefly land in the DaemonOffline UI even
+    // though everything is fine. The BrowserPane listens for this
+    // event and fires an immediate health probe on receipt, so the
+    // moment the daemon binds the UI flips to ready.
+    if let Err(e) = app.emit("rli://browser-daemon-ready", port) {
+        eprintln!("[browser daemon] failed to emit ready event: {e}");
+    }
 
     let router = Router::new()
         .route("/health", get(health))
@@ -164,11 +174,38 @@ fn write_port_file<R: Runtime>(app: &AppHandle<R>, port: u16) {
     // directory the frontend never read, so any non-default port the
     // daemon ended up on (4001+, e.g. after a port collision) was
     // invisible — the frontend kept trying :4000 and timed out.
-    let Ok(dir) = app.path().app_data_dir() else { return };
-    if std::fs::create_dir_all(&dir).is_err() {
+    //
+    // Every step now logs on failure. The previous all-silent version
+    // meant a missing/unwritable port file looked identical to a happy
+    // path from the user's perspective; React fell back to :4000,
+    // every fetch timed out, and there was no signal anywhere as to
+    // why. The `browser_bound_port` Tauri command in mod.rs is the
+    // primary discovery channel now, but the file is still useful for
+    // out-of-process tools (curl, agent scripts) so we want it written
+    // and we want to know when it isn't.
+    let dir = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!(
+                "[browser daemon] could not resolve app_data_dir for port file: {e}"
+            );
+            return;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!(
+            "[browser daemon] could not create {} for port file: {e}",
+            dir.display()
+        );
         return;
     }
-    let _ = std::fs::write(dir.join("browser-port"), port.to_string());
+    let path = dir.join("browser-port");
+    if let Err(e) = std::fs::write(&path, port.to_string()) {
+        eprintln!(
+            "[browser daemon] could not write port file {}: {e}",
+            path.display()
+        );
+    }
 }
 
 /* ------------------------------------------------------------------

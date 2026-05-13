@@ -170,6 +170,52 @@
 }
 
 /* ------------------------------------------------------------------
+   Running-agent snake-wave loader cell.
+
+   The Loader primitive renders a 3×3 grid of `<span class="rli-loader-cell">`.
+   Each cell carries a `--rli-loader-snake-pos` custom property (0..8)
+   giving its position along the inward-clockwise spiral, and the
+   keyframe walks the full palette over 1.35s with a negative
+   `animation-delay` per cell so each one sits at its own phase.
+
+   This used to be React state with setInterval(150ms). Under load —
+   20+ agents streaming, tab-switch storms, big diffs in flight — the
+   React commit could be starved for a frame and the animation stalled
+   or vanished. Moving the entire cycle to CSS keyframes runs the
+   animation on the compositor thread; the loader is now visually
+   continuous regardless of how busy React is.
+
+   Scope: only `.rli-loader-cell` carries this animation. Nothing else
+   in the codebase uses this class name, and the prior class
+   (`.rli-loader`) is intentionally NOT defined anywhere so the legacy
+   double-animate hazard called out in tokens.css doesn't return.
+   ------------------------------------------------------------------ */
+
+@keyframes rli-loader-snake-wave {
+  0%      { background-color: oklch(36% 0.003 250); }
+  11.111% { background-color: oklch(54% 0.003 250); }
+  22.222% { background-color: oklch(72% 0.003 250); }
+  33.333% { background-color: oklch(86% 0.003 250); }
+  44.444% { background-color: oklch(96% 0.003 250); }
+  55.555% { background-color: oklch(86% 0.003 250); }
+  66.666% { background-color: oklch(72% 0.003 250); }
+  77.777% { background-color: oklch(54% 0.003 250); }
+  88.888% { background-color: oklch(36% 0.003 250); }
+  100%    { background-color: oklch(36% 0.003 250); }
+}
+
+.rli-loader-cell {
+  background-color: oklch(36% 0.003 250);
+  animation: rli-loader-snake-wave 1.35s linear infinite;
+  /* `--rli-loader-snake-pos` is 0..8 set inline per cell. A negative
+     delay equal to (pos / 9 of the cycle) starts each cell at its
+     own phase, so the wave reads as one continuous crest across the
+     grid even though every cell runs the same animation. */
+  animation-delay: calc(var(--rli-loader-snake-pos, 0) * -150ms);
+  will-change: background-color;
+}
+
+/* ------------------------------------------------------------------
    Reduced motion — strip everything spatial.
    This block REINFORCES the global one in tokens.css for the
    specifically-named animations above.
@@ -183,6 +229,12 @@
   .rli-loading-dots > span {
     animation: none;
     opacity: 0.6;
+  }
+  .rli-loader-cell {
+    animation: none;
+    /* freeze at the brightest mid-palette stop — reads as "still
+       active" without motion. */
+    background-color: oklch(72% 0.003 250);
   }
   .rli-press:active {
     transform: none;

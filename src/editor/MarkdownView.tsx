@@ -1,7 +1,8 @@
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 import { useEditor, EditorContent, type Editor as TiptapEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "tiptap-markdown";
+import { invoke } from "@tauri-apps/api/core";
 import { Editor } from "./Editor";
 import { useAppState } from "@/state/AppState";
 
@@ -90,8 +91,35 @@ function RichView({
     }
   }, [editor, content]);
 
+  // Anchor-click delegation: any `<a href="http(s)://…">` inside the
+  // rich view should route to the user's default system browser, not
+  // navigate the Tauri webview itself (which would replace our app
+  // shell with the page) or land in the built-in browser pane (that
+  // pane is reserved for URLs the user deliberately pastes into its
+  // address bar — markdown links are ambient, not deliberate). Using
+  // delegation rather than wiring it on each rendered anchor because
+  // TipTap re-renders the DOM frequently and we don't want to chase
+  // listener attachment per node.
+  const onContainerClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    const anchor = target.closest("a");
+    if (!anchor) return;
+    const href = anchor.getAttribute("href");
+    if (!href) return;
+    if (!/^https?:\/\//i.test(href)) return;
+    e.preventDefault();
+    void invoke("system_open", { path: href }).catch(() => {
+      try {
+        window.open(href, "_blank");
+      } catch {
+        /* no-op */
+      }
+    });
+  }, []);
+
   return (
     <div
+      onClick={onContainerClick}
       style={{
         height: "100%",
         width: "100%",

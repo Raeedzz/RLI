@@ -36,6 +36,16 @@ interface Props {
    * autocomplete. Falls back to no completion when not provided.
    */
   cwd?: string;
+  /**
+   * Whether this input should focus itself on mount. Defaults to true
+   * for the standard "open a tab and start typing" case. Set to false
+   * for instances rendered in the right-panel secondary terminals so
+   * they don't compete with the main column for focus on worktree
+   * switch. (The secondary terminals all mount alongside the main
+   * one — without this gate the last one to mount wins and the user
+   * ends up typing into the side view.)
+   */
+  autoFocus?: boolean;
 }
 
 const COMPLETION_LIMIT = 8;
@@ -310,6 +320,7 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
       historyAt,
       onAgentNewLine,
       cwd,
+      autoFocus = true,
     },
     ref,
   ) {
@@ -346,11 +357,21 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
 
     // Auto-focus on mount so the first keystroke after a pane opens
     // lands in the input. Without this, Enter (and every other key)
-    // is silently dropped until the user thinks to click first —
-    // matches the auto-focus behavior in PtyPassthrough / FullGrid.
+    // is silently dropped until the user thinks to click first.
+    //
+    // CRITICAL: `autoFocus` defaults to true so existing main-column
+    // BlockTerminals keep their "open a new tab and start typing"
+    // behavior. The secondary right-panel BlockTerminals pass
+    // `autoFocus={false}` so they never compete for focus with the
+    // main column on worktree switch. Without that gate, the
+    // secondary panel's PromptInput would mount AFTER the main
+    // column's (it's rendered later in the AppShell tree) and steal
+    // focus every time the user switched worktrees — the user-facing
+    // complaint: "cursor lands in the side view, not the main one".
     useEffect(() => {
+      if (autoFocus === false) return;
       textareaRef.current?.focus();
-    }, []);
+    }, [autoFocus]);
 
     const submit = () => {
       const text = value;

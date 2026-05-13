@@ -1,12 +1,10 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   IconCheck,
   IconChevronDown,
-  IconMore,
   IconPlus,
-  IconPullRequest,
   IconPush,
   IconSparkles,
 } from "@/design/icons";
@@ -68,16 +66,15 @@ export function RightPanel() {
 
 function UpperPanel({ worktree }: { worktree: Worktree }) {
   const dispatch = useAppDispatch();
-  const state = useAppState();
 
-  // Keep `worktree.changeCount` (the badge on the Changes tab + the
-  // sidebar's `+N` indicator) fresh whether or not the Changes view
-  // is currently visible. ChangesView still runs its own poll for the
-  // entries list, but its dispatch only fires while that view is
-  // mounted — without this hook the badge sits stale on any tab the
-  // user hasn't visited recently. Running here in UpperPanel covers
-  // every tab the user could be looking at for the active worktree.
-  useChangeCountPolling(worktree.id, worktree.path);
+  // Single source of truth for this worktree's git status. Polls
+  // once at 4s, dispatches `set-change-count` so the tab badge and
+  // sidebar `+N` indicator stay fresh, AND surfaces the full entries
+  // list so ChangesView can render the file rows without running a
+  // duplicate poll of its own. Previously UpperPanel and ChangesView
+  // each had their own 4s poll on the same `git.status` call — two
+  // IPC round-trips, twice the work, possible to drift out of sync.
+  const status = useWorktreeStatus(worktree.id, worktree.path);
 
   return (
     <div
@@ -117,50 +114,47 @@ function UpperPanel({ worktree }: { worktree: Worktree }) {
           tab="browser"
           active={worktree.rightPanel === "browser"}
         />
-        <span style={{ flex: 1 }} />
-        <button
-          type="button"
-          title="Create pull request"
-          onClick={() =>
-            dispatch({ type: "set-pr-dialog", worktreeId: worktree.id })
-          }
-          style={hoverableIcon(false)}
-        >
-          <IconPullRequest size={14} />
-        </button>
-        <button type="button" title="More" style={hoverableIcon(false)}>
-          <IconMore size={14} />
-        </button>
       </div>
 
+      {/*
+        All three panes stay mounted across right-panel tab switches.
+        Inactive panes are hidden with `display: none` — they keep
+        their scroll position, their internal state (composer text,
+        expanded folders, console scroll), and the BrowserPane keeps
+        its long-lived screenshot polling and Chrome session alive.
+        Flipping tabs is now instant: zero remount cost, zero refetch
+        flash. Previously Files and Changes remounted on every switch,
+        which threw away expanded-folder state and re-ran git.status
+        every time.
+
+        FilesView's FileTree is lazy (reads only on expand), so the
+        always-mounted cost is negligible. ChangesView reads its data
+        from props (no poll of its own anymore). BrowserPane's polling
+        already pauses on `document.visibilityState`.
+       */}
       <div style={{ minHeight: 0, overflow: "hidden", position: "relative" }}>
-        {worktree.rightPanel === "files" && (
+        <PaneSlot active={worktree.rightPanel === "files"}>
           <FilesView worktree={worktree} />
-        )}
-        {worktree.rightPanel === "changes" && (
-          <ChangesView worktree={worktree} />
-        )}
-        {/*
-          BrowserPane stays mounted across right-panel tab switches.
-          Its Rust-side Chrome session is long-lived anyway, but the
-          React state (health, status, screenshot URL, console
-          history, focused, user-set console height) is expensive to
-          rebuild and slow to "load in" on every switch back. Hiding
-          via display:none keeps the layout, the polling timers, the
-          screenshot <img>, and the console scroll position alive in
-          the background — so flipping to Browser feels instant
-          instead of going through the "starting browser daemon…"
-          hint every time.
-         */}
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            display: worktree.rightPanel === "browser" ? "flex" : "none",
-          }}
-        >
+        </PaneSlot>
+        <PaneSlot active={worktree.rightPanel === "changes"}>
+          <ChangesView
+            worktree={worktree}
+            entries={status.entries}
+            ahead={status.ahead}
+            error={status.error}
+            refresh={status.refresh}
+          />
+        </PaneSlot>
+        <PaneSlot active={worktree.rightPanel === "browser"}>
           <BrowserPane
             embedded
+            // Passing the active-pane flag through tells BrowserPane
+            // to skip its 1Hz health/status/screenshot tick when the
+            // pane is sitting behind display:none. With 20 worktrees
+            // this is the difference between zero browser IPC traffic
+            // (every other tab is on Files or Changes) and 20 IPC
+            // round-trips per second for previews nobody is watching.
+            isVisible={worktree.rightPanel === "browser"}
             onClose={() =>
               dispatch({
                 type: "set-right-panel",
@@ -169,10 +163,39 @@ function UpperPanel({ worktree }: { worktree: Worktree }) {
               })
             }
           />
-        </div>
+        </PaneSlot>
       </div>
+    </div>
+  );
+}
 
-      {state.prDialogOpen ? null : null}
+/**
+ * Absolute-positioned wrapper used to mount every right-panel pane
+ * once and toggle visibility via `display`. Browser used to be the
+ * only pane with this treatment — extending it to Files and Changes
+ * eliminates the remount-on-switch tax that the user complained about
+ * ("going from browser to git tree" felt slow). Each pane gets
+ * `pointer-events: none` + `display: none` when inactive so neither
+ * focus nor accidental clicks hit the hidden tree.
+ */
+function PaneSlot({
+  active,
+  children,
+}: {
+  active: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        display: active ? "flex" : "none",
+        flexDirection: "column",
+        minHeight: 0,
+      }}
+    >
+      {children}
     </div>
   );
 }
@@ -359,47 +382,88 @@ function relPath(abs: string, root: string): string {
 }
 
 /**
- * Polls `git status` for a worktree and pushes the entry count into
- * `worktree.changeCount` so the Changes-tab badge and sidebar `+N`
- * indicator stay current.
+ * One poll per worktree, shared by every consumer that needs git
+ * status. UpperPanel runs this hook; ChangesView reads `entries`,
+ * `ahead`, `error`, `refresh` from props. Before this consolidation
+ * UpperPanel ran a count-only poll and ChangesView ran a separate
+ * entries poll, both at 4s cadence — two `git.status` IPC calls
+ * with the same payload, doubling the Tauri traffic for nothing.
  *
- * Two trigger paths:
- *  - 4-second polling — bounded cadence so the badge tracks ambient
- *    edits the user makes outside of GLI (e.g. via VS Code).
- *  - `rli-git-refresh` window event — emitted by the commit / push /
- *    merge paths so the count updates within ~50ms instead of waiting
- *    for the next tick.
+ * Returns the live entries+ahead+error so anyone passing the result
+ * into a child can render diff rows without spinning up their own
+ * poll. The count is dispatched into worktree state for the badge.
  *
- * Mounted at the `UpperPanel` level (always live for the active
- * worktree) rather than inside `ChangesView` (only mounts while the
- * user is on that tab). ChangesView still runs its own poll for the
- * entries list, but doesn't need to drive the count anymore.
+ * Refresh hooks:
+ *   - 4 s interval — ambient edits made outside GLI (e.g. VS Code,
+ *     manual `git checkout`) land in the badge within one tick.
+ *   - `rli-git-refresh` CustomEvent — emitted by commit / push /
+ *     merge paths so the UI doesn't lag the action by 4 s.
+ *   - `refresh()` return — imperative re-poll for callers that just
+ *     ran a write op and want the panel to land before the next tick.
  */
-function useChangeCountPolling(worktreeId: string, worktreePath: string) {
+interface WorktreeStatusState {
+  entries: StatusEntry[];
+  ahead: number;
+  error: string | null;
+  refresh: () => Promise<void>;
+}
+
+function useWorktreeStatus(
+  worktreeId: string,
+  worktreePath: string,
+): WorktreeStatusState {
   const dispatch = useAppDispatch();
+  const [entries, setEntries] = useState<StatusEntry[]>([]);
+  const [ahead, setAhead] = useState<number>(0);
+  const [error, setError] = useState<string | null>(null);
+
+  // Stable refresh fn — the dependent effect re-creates it on
+  // worktreePath change, but consumers (ChangesView) call it from
+  // event handlers without needing to re-run their useCallbacks.
+  const pathRef = useRef(worktreePath);
+  useEffect(() => {
+    pathRef.current = worktreePath;
+  }, [worktreePath]);
+
+  const refresh = useCallback(async () => {
+    const path = pathRef.current;
+    try {
+      const result = await git.status(path);
+      // Don't land if the path has rotated underneath us (worktree
+      // switch in flight) — the next effect will fire a fresh poll
+      // against the new path.
+      if (path !== pathRef.current) return;
+      setEntries(result.entries);
+      setAhead(result.ahead);
+      setError(null);
+      dispatch({
+        type: "set-change-count",
+        worktreeId,
+        count: result.entries.length,
+      });
+    } catch (e) {
+      if (path !== pathRef.current) return;
+      setError(String(e));
+    }
+  }, [worktreeId, dispatch]);
+
   useEffect(() => {
     let cancelled = false;
-    const poll = async () => {
-      try {
-        const result = await git.status(worktreePath);
-        if (cancelled) return;
-        dispatch({
-          type: "set-change-count",
-          worktreeId,
-          count: result.entries.length,
-        });
-      } catch {
-        // Swallow — the next tick or refresh nudge will retry. A
-        // failing git status (e.g. mid-rebase, locked index) shouldn't
-        // bubble into the chrome.
-      }
+    const tick = async () => {
+      if (cancelled) return;
+      await refresh();
     };
-    void poll();
-    const t = window.setInterval(poll, 4000);
+    // Blank stale state on worktree change so the user never sees
+    // the previous worktree's entries for a frame.
+    setEntries([]);
+    setAhead(0);
+    setError(null);
+    void tick();
+    const t = window.setInterval(() => void tick(), 4000);
     const onRefresh = (e: Event) => {
       const detail = (e as CustomEvent<{ cwd?: string }>).detail;
       if (!detail?.cwd || detail.cwd === worktreePath) {
-        void poll();
+        void tick();
       }
     };
     window.addEventListener("rli-git-refresh", onRefresh);
@@ -408,67 +472,33 @@ function useChangeCountPolling(worktreeId: string, worktreePath: string) {
       window.clearInterval(t);
       window.removeEventListener("rli-git-refresh", onRefresh);
     };
-  }, [worktreeId, worktreePath, dispatch]);
+  }, [worktreeId, worktreePath, refresh]);
+
+  return { entries, ahead, error, refresh };
 }
 
 /* ------------------------------------------------------------------
    Changes view — git status + click → open diff tab in main column.
    ------------------------------------------------------------------ */
 
-function ChangesView({ worktree }: { worktree: Worktree }) {
+function ChangesView({
+  worktree,
+  entries,
+  ahead,
+  error,
+  refresh,
+}: {
+  worktree: Worktree;
+  entries: StatusEntry[];
+  ahead: number;
+  error: string | null;
+  refresh: () => Promise<void>;
+}) {
   const dispatch = useAppDispatch();
   const state = useAppState();
   const toast = useToast();
-  const [entries, setEntries] = useState<StatusEntry[]>([]);
-  const [ahead, setAhead] = useState<number>(0);
-  const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string>("");
   const [busy, setBusy] = useState<null | "stage" | "unstage" | "commit" | "push" | "draft">(null);
-
-  const refresh = useCallback(async () => {
-    try {
-      const result = await git.status(worktree.path);
-      setEntries(result.entries);
-      setAhead(result.ahead);
-      setError(null);
-      // changeCount is dispatched by `useChangeCountPolling` in the
-      // parent UpperPanel — running it here too would just race.
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [worktree.path]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const result = await git.status(worktree.path);
-        if (cancelled) return;
-        setEntries(result.entries);
-        setAhead(result.ahead);
-        setError(null);
-      } catch (e) {
-        if (!cancelled) setError(String(e));
-      }
-    };
-    void poll();
-    const t = window.setInterval(poll, 4000);
-    // External nudges from the merge / push paths so the panel doesn't
-    // sit on a stale "uncommitted" row for up to 4s after the user has
-    // already gotten everything onto main.
-    const onRefresh = (e: Event) => {
-      const detail = (e as CustomEvent<{ cwd?: string }>).detail;
-      if (!detail?.cwd || detail.cwd === worktree.path) {
-        void poll();
-      }
-    };
-    window.addEventListener("rli-git-refresh", onRefresh);
-    return () => {
-      cancelled = true;
-      window.clearInterval(t);
-      window.removeEventListener("rli-git-refresh", onRefresh);
-    };
-  }, [worktree.id, worktree.path, dispatch]);
 
   const stagedCount = useMemo(
     () => entries.filter((e) => e.staged).length,
@@ -1724,6 +1754,16 @@ function SecondaryTerminals({ worktree }: { worktree: Worktree }) {
               cwd={worktree.path}
               projectId={worktree.projectId}
               sessionId={`${worktree.id}:${ptyId}`}
+              // Secondary terminals never auto-focus on mount. They
+              // sit in the right panel; only the user explicitly
+              // clicking into them should pull focus. Without this,
+              // every worktree switch (which remounts the right
+              // panel's secondary terminals) races the main column
+              // for focus and wins, putting the cursor in the side
+              // view instead of the main one. The user clicked into
+              // a worktree — that means "I want to type in the main
+              // terminal," full stop.
+              autoFocus={false}
             />
           </div>
         );

@@ -25,6 +25,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event as AlacEvent, EventListener};
@@ -36,10 +38,152 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use alacritty_terminal::Term;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State, Wry};
 
 const SCROLLBACK_LIMIT: usize = 10_000;
-const FRAME_THROTTLE: Duration = Duration::from_millis(16); // ~60 Hz
+/// Frame throttle while the session is visible to the user AND the
+/// GLI window has focus. 16 ms ≈ one display frame at 60 Hz.
+const FRAME_THROTTLE_VISIBLE: Duration = Duration::from_millis(16);
+/// Frame throttle while the session is currently NOT shown anywhere
+/// in the UI but the GLI window is otherwise focused. Kept close to
+/// the visible cadence (32 ms ≈ 30 Hz) so that a worktree-switch
+/// race between the user starting to type and `term_set_visible_set`
+/// landing on the backend doesn't introduce a perceptible delay
+/// before the freshly-active terminal starts echoing keystrokes.
+/// The previous 250 ms value visibly stalled the first 1–2 frames
+/// after every switch.
+const FRAME_THROTTLE_HIDDEN: Duration = Duration::from_millis(32);
+/// Frame throttle while the GLI window is BACKGROUNDED (user is on
+/// another app). The webview's JS context is suspended by macOS, so
+/// every event we emit just queues in V8's message buffer until the
+/// user comes back — and then JS has to drain the entire backlog
+/// before it can repaint anything. Dropping to 1 Hz keeps the queue
+/// bounded so window-focus return is instant. This is the most
+/// restrictive of the three throttles and applies regardless of the
+/// per-session visibility flag.
+const FRAME_THROTTLE_UNFOCUSED: Duration = Duration::from_millis(1000);
+
+/// True when the GLI main window currently has user focus. Updated
+/// from the window event listener in `lib.rs`. Defaults to true so
+/// cold-start (before any focus events have fired) runs at full
+/// cadence.
+static APP_FOCUSED: AtomicBool = AtomicBool::new(true);
+
+/// Called from the window event listener whenever the main window's
+/// focus state flips. Backend frame emit throttles accordingly.
+pub fn set_app_focused(focused: bool) {
+    APP_FOCUSED.store(focused, Ordering::Relaxed);
+}
+
+/// Combined throttle policy: window focus dominates, then per-session
+/// visibility. Used by `maybe_flush` to decide whether to emit.
+fn session_frame_throttle(session_visible: bool) -> Duration {
+    if !APP_FOCUSED.load(Ordering::Relaxed) {
+        return FRAME_THROTTLE_UNFOCUSED;
+    }
+    if session_visible {
+        FRAME_THROTTLE_VISIBLE
+    } else {
+        FRAME_THROTTLE_HIDDEN
+    }
+}
+
+/// Reach into every live session and trigger one `maybe_flush` so
+/// the frontend sees the latest grid as soon as the window comes
+/// back to focus, instead of waiting for the next reader-loop tick
+/// (which only fires on PTY output — idle terminals would stay
+/// stale otherwise). Called from the window-focus listener in
+/// `lib.rs` on the `Focused(true)` transition.
+pub fn flush_all_sessions(app: &AppHandle<Wry>, state: &TerminalState) {
+    let snapshot: Vec<(String, Arc<Mutex<Session>>)> = {
+        let sessions = match state.sessions.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        sessions
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    };
+    for (id, arc) in snapshot {
+        if let Ok(mut s) = arc.lock() {
+            // Reset last_flush so the throttle gate doesn't suppress
+            // the post-focus catch-up emit.
+            s.last_flush = Instant::now() - FRAME_THROTTLE_VISIBLE;
+            maybe_flush(&mut s, app, &id);
+        }
+    }
+}
+
+/// Update which terminal sessions are currently visible to the user.
+/// Called from the frontend whenever the active worktree, active tab,
+/// or secondary terminal selection changes. The set is small — usually
+/// 1 to 2 PTYs — but the impact is large: every session NOT in the
+/// set drops to `FRAME_THROTTLE_HIDDEN` (4 Hz), so 20 streaming agents
+/// with only 1 visible at a time generates ~120 events/sec total
+/// instead of the previous ~1200.
+///
+/// Transitions: any session that just became visible immediately
+/// gets one catch-up frame so the user sees current state on switch,
+/// instead of waiting up to 250 ms for the next throttled emit.
+#[tauri::command]
+pub fn term_set_visible_set(
+    app: AppHandle<Wry>,
+    state: State<TerminalState>,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    let visible: std::collections::HashSet<String> = ids.into_iter().collect();
+    let snapshot: Vec<(String, Arc<Mutex<Session>>)> = {
+        let sessions = state.sessions.lock().map_err(|e| e.to_string())?;
+        sessions
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    };
+    for (id, arc) in snapshot {
+        if let Ok(mut s) = arc.lock() {
+            let was_visible = s.visible;
+            let now_visible = visible.contains(&id);
+            s.visible = now_visible;
+            if now_visible && !was_visible {
+                // Just became visible — push a catch-up frame so the
+                // user sees current state without waiting for the
+                // next throttled emit. Reset last_flush so the gate
+                // doesn't suppress this one.
+                s.last_flush = Instant::now() - FRAME_THROTTLE_VISIBLE;
+                maybe_flush(&mut s, &app, &id);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Return the set of session ids whose `last_command_running` is
+/// currently true — i.e. the PTYs sitting between an OSC 133 C marker
+/// (command start) and the next D marker (command done). The frontend
+/// polls this every ~300 ms from a singleton store; the sidebar reads
+/// the resulting per-PTY flags to light up worktree spinners for
+/// terminals that aren't currently mounted in React (the scoped
+/// keepalive only mounts the active worktree's terminals, so without
+/// this backend signal a `npm run build` in a background worktree
+/// would have no path to report its running state).
+#[tauri::command]
+pub fn term_running_session_ids(state: State<TerminalState>) -> Vec<String> {
+    let snapshot: Vec<(String, Arc<Mutex<Session>>)> = match state.sessions.lock() {
+        Ok(s) => s.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for (id, arc) in snapshot {
+        if let Ok(s) = arc.lock() {
+            if s.last_command_running {
+                out.push(id);
+            }
+        }
+    }
+    out
+}
 
 /* ------------------------------------------------------------------
    State container — one entry per running PTY session.
@@ -61,7 +205,7 @@ struct Session {
     /// Last full snapshot we sent to the frontend. We diff against this so
     /// only changed rows go over the wire.
     last_snapshot: Vec<RowSnapshot>,
-    /// When we last flushed a frame — used for the 16 ms throttle.
+    /// When we last flushed a frame — used for the throttle.
     last_flush: Instant,
     /// Last `command_running` value we emitted. We send a frame every
     /// time this flips even when no rows are dirty — otherwise the
@@ -74,6 +218,27 @@ struct Session {
     /// dedupe rAF flushes (skip if seq unchanged) and detect dropped
     /// frames for backpressure.
     next_frame_seq: u64,
+    /// Whether the frontend currently has this session visible
+    /// (active tab in main column, or active secondary terminal).
+    /// Drives the per-session frame throttle alongside the window
+    /// focus flag. Defaults to true so the first emit after
+    /// term_start runs at full cadence — the frontend will report
+    /// the real visible set on the next `term_set_visible_set`.
+    visible: bool,
+    /// Direct-to-frontend channel for terminal frames. Replaces the
+    /// old `app.emit("term://{id}/frame", ...)` broadcast path for
+    /// the single hottest event source in the app (60 Hz × N
+    /// sessions). With `Channel`, each frame flows straight to its
+    /// one registered React listener — no event-bus serialisation,
+    /// no topic-name string filtering on the JS side. The five
+    /// other low-frequency emits (block, cwd, bell, exit, title)
+    /// stay on the broadcast path; their volume is tiny.
+    ///
+    /// Replaced on every `term_start` re-mount so a BlockTerminal
+    /// remount points the backend at the new React listener; the
+    /// old channel goes dead and any in-flight send is silently
+    /// dropped.
+    frame_channel: Channel<RenderFrame>,
 }
 
 /* ------------------------------------------------------------------
@@ -148,8 +313,20 @@ impl Dimensions for Dims {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     pub text: String,
-    pub fg: String,    // CSS color string (e.g. "#abc123" or "currentColor")
-    pub bg: String,
+    // fg/bg are Cow<'static, str> so the common cases — named
+    // colors, the 16 ANSI palette entries, and the "default fg/bg"
+    // fallbacks — emit ZERO per-cell allocations. Only true 24-bit
+    // truecolor (rare) and the 6×6×6 cube past index 15 allocate
+    // an owned `String`. With typical agent output (Claude, codex,
+    // shell ls output) using named or low-index colors, this drops
+    // the snapshot_grid allocation count from ~2 per cell to ~0,
+    // which at 20 PTYs × 1920 cells per snapshot = thousands of
+    // saved allocations per second.
+    //
+    // Serde serializes Cow<str> as a plain JSON string, so the
+    // wire contract is unchanged.
+    pub fg: Cow<'static, str>,
+    pub bg: Cow<'static, str>,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
@@ -509,20 +686,22 @@ fn percent_decode(s: &str) -> String {
    shipped with, plus passes through 24-bit truecolor RGB.
    ------------------------------------------------------------------ */
 
-fn color_to_css(c: Color, fallback: &str) -> String {
+fn color_to_css(c: Color, fallback: &'static str) -> Cow<'static, str> {
     match c {
-        Color::Spec(Rgb { r, g, b }) => format!("#{:02x}{:02x}{:02x}", r, g, b),
-        Color::Indexed(i) => indexed_color(i, fallback),
+        Color::Spec(Rgb { r, g, b }) => {
+            Cow::Owned(format!("#{:02x}{:02x}{:02x}", r, g, b))
+        }
+        Color::Indexed(i) => indexed_color(i),
         Color::Named(named) => named_color(named, fallback),
     }
 }
 
-fn indexed_color(i: u8, _fallback: &str) -> String {
+fn indexed_color(i: u8) -> Cow<'static, str> {
     if i < 16 {
-        return ANSI_16[i as usize].into();
+        return Cow::Borrowed(ANSI_16[i as usize]);
     }
     if (16..=231).contains(&i) {
-        // 6×6×6 cube
+        // 6×6×6 cube — computed, must allocate.
         let n = i - 16;
         let r = (n / 36) % 6;
         let g = (n / 6) % 6;
@@ -534,42 +713,42 @@ fn indexed_color(i: u8, _fallback: &str) -> String {
                 55 + c * 40
             }
         };
-        return format!(
+        return Cow::Owned(format!(
             "#{:02x}{:02x}{:02x}",
             conv(r),
             conv(g),
             conv(b)
-        );
+        ));
     }
     // 232..=255 grayscale
     let level = 8 + (i - 232) * 10;
-    format!("#{level:02x}{level:02x}{level:02x}")
+    Cow::Owned(format!("#{level:02x}{level:02x}{level:02x}"))
 }
 
-fn named_color(c: NamedColor, fallback: &str) -> String {
+fn named_color(c: NamedColor, fallback: &'static str) -> Cow<'static, str> {
     match c {
-        NamedColor::Foreground => "var(--text-primary)".into(),
-        NamedColor::Background => "var(--surface-0)".into(),
-        NamedColor::Cursor => "var(--accent-bright)".into(),
-        NamedColor::DimBlack => ANSI_16[0].into(),
-        NamedColor::Black => ANSI_16[0].into(),
-        NamedColor::BrightBlack => ANSI_16[8].into(),
-        NamedColor::DimRed | NamedColor::Red => ANSI_16[1].into(),
-        NamedColor::BrightRed => ANSI_16[9].into(),
-        NamedColor::DimGreen | NamedColor::Green => ANSI_16[2].into(),
-        NamedColor::BrightGreen => ANSI_16[10].into(),
-        NamedColor::DimYellow | NamedColor::Yellow => ANSI_16[3].into(),
-        NamedColor::BrightYellow => ANSI_16[11].into(),
-        NamedColor::DimBlue | NamedColor::Blue => ANSI_16[4].into(),
-        NamedColor::BrightBlue => ANSI_16[12].into(),
-        NamedColor::DimMagenta | NamedColor::Magenta => ANSI_16[5].into(),
-        NamedColor::BrightMagenta => ANSI_16[13].into(),
-        NamedColor::DimCyan | NamedColor::Cyan => ANSI_16[6].into(),
-        NamedColor::BrightCyan => ANSI_16[14].into(),
-        NamedColor::DimWhite | NamedColor::White => ANSI_16[7].into(),
-        NamedColor::BrightWhite => ANSI_16[15].into(),
-        NamedColor::BrightForeground => "var(--text-primary)".into(),
-        _ => fallback.into(),
+        NamedColor::Foreground => Cow::Borrowed("var(--text-primary)"),
+        NamedColor::Background => Cow::Borrowed("var(--surface-0)"),
+        NamedColor::Cursor => Cow::Borrowed("var(--accent-bright)"),
+        NamedColor::DimBlack => Cow::Borrowed(ANSI_16[0]),
+        NamedColor::Black => Cow::Borrowed(ANSI_16[0]),
+        NamedColor::BrightBlack => Cow::Borrowed(ANSI_16[8]),
+        NamedColor::DimRed | NamedColor::Red => Cow::Borrowed(ANSI_16[1]),
+        NamedColor::BrightRed => Cow::Borrowed(ANSI_16[9]),
+        NamedColor::DimGreen | NamedColor::Green => Cow::Borrowed(ANSI_16[2]),
+        NamedColor::BrightGreen => Cow::Borrowed(ANSI_16[10]),
+        NamedColor::DimYellow | NamedColor::Yellow => Cow::Borrowed(ANSI_16[3]),
+        NamedColor::BrightYellow => Cow::Borrowed(ANSI_16[11]),
+        NamedColor::DimBlue | NamedColor::Blue => Cow::Borrowed(ANSI_16[4]),
+        NamedColor::BrightBlue => Cow::Borrowed(ANSI_16[12]),
+        NamedColor::DimMagenta | NamedColor::Magenta => Cow::Borrowed(ANSI_16[5]),
+        NamedColor::BrightMagenta => Cow::Borrowed(ANSI_16[13]),
+        NamedColor::DimCyan | NamedColor::Cyan => Cow::Borrowed(ANSI_16[6]),
+        NamedColor::BrightCyan => Cow::Borrowed(ANSI_16[14]),
+        NamedColor::DimWhite | NamedColor::White => Cow::Borrowed(ANSI_16[7]),
+        NamedColor::BrightWhite => Cow::Borrowed(ANSI_16[15]),
+        NamedColor::BrightForeground => Cow::Borrowed("var(--text-primary)"),
+        _ => Cow::Borrowed(fallback),
     }
 }
 
@@ -807,6 +986,11 @@ pub fn term_start(
     app: AppHandle<Wry>,
     state: State<TerminalState>,
     args: StartArgs,
+    // Frame channel must be a top-level command arg — `Channel<T>`
+    // implements `CommandArg` for IPC deserialization, but it does
+    // NOT implement Deserialize, so it can't sit inside a nested
+    // struct. The frontend invokes with `{ args: {...}, frameChannel }`.
+    frame_channel: Channel<RenderFrame>,
 ) -> Result<(), String> {
     // Idempotent path: if a PTY with this id is already alive, reuse
     // it and re-emit the full grid as a single "all rows dirty" frame
@@ -820,6 +1004,11 @@ pub fn term_start(
         if let Some(existing) = sessions.get(&args.id).cloned() {
             drop(sessions);
             if let Ok(mut s) = existing.lock() {
+                // Replace the channel — the old one belonged to the
+                // previous BlockTerminal mount which is now gone.
+                // Any further frame emit needs to land on the freshly
+                // mounted React listener, which owns this new channel.
+                s.frame_channel = frame_channel.clone();
                 let snapshot = snapshot_grid(&s.term);
                 let cursor = s.term.grid().cursor.point;
                 let dirty: Vec<DirtyRow> = snapshot
@@ -845,7 +1034,7 @@ pub fn term_start(
                     bracketed_paste: s.term.mode().contains(TermMode::BRACKETED_PASTE),
                     dirty,
                 };
-                let _ = app.emit(&format!("term://{}/frame", args.id), &frame);
+                let _ = s.frame_channel.send(frame);
             }
             return Ok(());
         }
@@ -960,10 +1149,12 @@ pub fn term_start(
         cols: args.cols,
         rows: args.rows,
         last_snapshot: initial_snapshot,
-        last_flush: Instant::now() - FRAME_THROTTLE,
+        last_flush: Instant::now() - FRAME_THROTTLE_VISIBLE,
+        visible: true,
         last_command_running: false,
         segmenter: BlockSegmenter::new(),
         next_frame_seq: 0,
+        frame_channel,
     }));
 
     {
@@ -1149,7 +1340,7 @@ fn maybe_flush(s: &mut Session, app: &AppHandle<Wry>, id: &str) {
     // and never get re-flushed because zsh's empty PROMPT produces
     // no further bytes for the reader loop to wake on. Frontend
     // would stay stuck in agent mode with PromptInput hidden.
-    if !cmd_running_changed && s.last_flush.elapsed() < FRAME_THROTTLE {
+    if !cmd_running_changed && s.last_flush.elapsed() < session_frame_throttle(s.visible) {
         return;
     }
     let snapshot = snapshot_grid(&s.term);
@@ -1173,10 +1364,11 @@ fn maybe_flush(s: &mut Session, app: &AppHandle<Wry>, id: &str) {
         bracketed_paste: s.term.mode().contains(TermMode::BRACKETED_PASTE),
         dirty,
     };
-    let _ = app.emit(&format!("term://{id}/frame"), &frame);
+    let _ = s.frame_channel.send(frame);
     s.last_snapshot = snapshot;
     s.last_flush = Instant::now();
     s.last_command_running = cmd_running;
+    let _ = (app, id);
 }
 
 /* ------------------------------------------------------------------
@@ -1201,6 +1393,126 @@ fn classify_spawn_error(command: &str, raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ---------- JS ↔ Rust wire format contract ----------
+       These tests lock the JSON shape the frontend sends when it
+       calls `invoke("term_start", ...)` (and friends). They exist
+       because we hit a runtime bug where the JS side sent
+       `frameChannel` as a top-level arg key while the Rust command
+       expected `frame_channel` — Tauri's name-matching for
+       `Channel<T>` args doesn't auto-convert across the case
+       boundary, so the bug only surfaced as a "missing required key"
+       error the moment a terminal tried to start. Locking the shape
+       here means a future schema change has to update BOTH the Rust
+       side AND the matching test in lockstep, with the JSON fixture
+       acting as the source of truth that the frontend's
+       `src/lib/tauri/term.ts` wrapper mirrors.
+       ----------------------------------------------------------- */
+
+    /// The exact JSON shape `useTerminalSession` sends inside the
+    /// `args` value when invoking `term_start`. Mirror of the
+    /// TypeScript `TermStartArgs` interface in
+    /// `src/lib/tauri/term.ts`. If you change either, change both
+    /// AND keep this test passing.
+    #[test]
+    fn term_start_args_match_frontend_wire_format() {
+        let json = serde_json::json!({
+            "id": "pty_test",
+            "command": "zsh",
+            "args": ["-l"],
+            "cwd": "/tmp/gli-test",
+            "rows": 24,
+            "cols": 80,
+            "project_id": "p_test",
+            "session_id": "s_test"
+        });
+        let parsed: StartArgs = serde_json::from_value(json)
+            .expect("frontend wire format must deserialize into StartArgs");
+        assert_eq!(parsed.id, "pty_test");
+        assert_eq!(parsed.command, "zsh");
+        assert_eq!(parsed.args, vec!["-l".to_string()]);
+        assert_eq!(parsed.cwd.as_deref(), Some("/tmp/gli-test"));
+        assert_eq!(parsed.rows, 24);
+        assert_eq!(parsed.cols, 80);
+        assert_eq!(parsed.project_id.as_deref(), Some("p_test"));
+        assert_eq!(parsed.session_id.as_deref(), Some("s_test"));
+    }
+
+    /// The optional fields (`cwd`, `project_id`, `session_id`)
+    /// must accept being omitted from the JSON. Frontend
+    /// `useTerminalSession` can pass `undefined` for any of them,
+    /// which serializes to a missing key.
+    #[test]
+    fn term_start_args_optional_fields_can_be_absent() {
+        let json = serde_json::json!({
+            "id": "pty_no_opts",
+            "command": "zsh",
+            "args": [],
+            "rows": 24,
+            "cols": 80,
+        });
+        let parsed: StartArgs = serde_json::from_value(json)
+            .expect("absent optional fields must still deserialize");
+        assert!(parsed.cwd.is_none());
+        assert!(parsed.project_id.is_none());
+        assert!(parsed.session_id.is_none());
+    }
+
+    /// The frontend MUST send snake_case keys inside the `args`
+    /// value. camelCase would silently drop the field on the Rust
+    /// side because serde defaults to snake_case matching for the
+    /// struct (no `#[serde(rename_all = "camelCase")]` here). This
+    /// guards against someone "fixing" the field names to camelCase
+    /// in a future refactor.
+    #[test]
+    fn term_start_args_reject_camel_case_keys() {
+        let json = serde_json::json!({
+            "id": "pty_x",
+            "command": "zsh",
+            "args": [],
+            "rows": 24,
+            "cols": 80,
+            // intentionally camelCase — must not be picked up.
+            "projectId": "p_x",
+            "sessionId": "s_x",
+        });
+        let parsed: StartArgs = serde_json::from_value(json)
+            .expect("unknown camelCase keys are ignored, not errors");
+        // The snake_case fields stay None because the camelCase
+        // versions didn't match — this is the property we want.
+        assert!(parsed.project_id.is_none());
+        assert!(parsed.session_id.is_none());
+    }
+
+    /// Compile-time guard: the `term_start` command keeps the exact
+    /// signature the frontend wrapper depends on. If a future
+    /// refactor renames or reorders parameters here, this fails to
+    /// compile — making the schema change loud instead of silently
+    /// breaking the IPC at runtime. The function pointer assignment
+    /// has no runtime effect; it exists purely for the type check.
+    #[test]
+    fn term_start_signature_is_stable() {
+        let _f: fn(
+            tauri::AppHandle<tauri::Wry>,
+            tauri::State<TerminalState>,
+            StartArgs,
+            tauri::ipc::Channel<RenderFrame>,
+        ) -> Result<(), String> = term_start;
+    }
+
+    /// Same guard for the visibility-set command. The frontend
+    /// `termSetVisibleSet` wrapper invokes with `{ ids: string[] }`,
+    /// matching this signature; if the Rust signature drifts (e.g.
+    /// renames the param or accepts a struct instead), the wrapper
+    /// must update too — and this test catches the gap.
+    #[test]
+    fn term_set_visible_set_signature_is_stable() {
+        let _f: fn(
+            tauri::AppHandle<tauri::Wry>,
+            tauri::State<TerminalState>,
+            Vec<String>,
+        ) -> Result<(), String> = term_set_visible_set;
+    }
 
     /* ---------- BlockSegmenter ---------- */
 

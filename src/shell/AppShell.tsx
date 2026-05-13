@@ -10,6 +10,10 @@ import { SearchOverlay } from "@/palette/SearchOverlay";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useSpatialNavigation } from "@/hooks/useSpatialNavigation";
 import { useOpenUrlInBrowser } from "@/hooks/useOpenUrlInBrowser";
+import { useFocusActiveTerminal } from "@/hooks/useFocusActiveTerminal";
+import { useVisibleTerminalSet } from "@/hooks/useVisibleTerminalSet";
+import { useTerminalRunningPoll } from "@/terminal/terminalActivityStore";
+import { useClaudeHookSubscription } from "@/state/agentActivityStore";
 import { useAppDispatch, useAppState } from "@/state/AppState";
 import {
   RIGHT_DEFAULT,
@@ -48,6 +52,10 @@ export function AppShell() {
   useKeyboardShortcuts();
   useSpatialNavigation();
   useOpenUrlInBrowser();
+  useFocusActiveTerminal();
+  useVisibleTerminalSet();
+  useTerminalRunningPoll();
+  useClaudeHookSubscription();
   const {
     sidebarCollapsed,
     rightPanelCollapsed,

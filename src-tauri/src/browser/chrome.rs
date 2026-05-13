@@ -62,6 +62,12 @@ struct Inner {
     console: VecDeque<LogEntry>,
     last_url: Option<String>,
     last_title: Option<String>,
+    /// Flipped on after the first `navigate` call's `wait_for_navigation`
+    /// future resolves (or its 8s timeout fires). `Status::ready` keys
+    /// off this rather than `page.is_some()` so the frontend's
+    /// screenshot polling doesn't fire against the `about:blank` page
+    /// that `ensure_page` minted before the user's URL load finished.
+    nav_completed: bool,
 }
 
 /// Owns the spawned Chrome child. Killing happens on drop. We keep
@@ -104,11 +110,21 @@ impl ChromeSession {
             .map_err(|e| format!("create profile root: {e}"))?;
         let user_data_dir = data_root.join(format!("p-{pid}"));
 
+        // Be explicit about headless mode. chromiumoxide's
+        // BrowserConfig defaults to legacy `--headless`, and the
+        // ambient `.args(["--headless=new", …])` we used to layer on
+        // top meant the spawned Chrome got *both* flags. Chrome handles
+        // duplicates with last-wins, but the redundancy is asking for
+        // trouble — and on some macOS Chrome builds, the combination
+        // briefly flashes a real window on first launch before the
+        // headless backend kicks in. Calling `.new_headless_mode()`
+        // makes chromiumoxide emit `--headless=new` once and only once,
+        // so the user never sees a real Chrome window.
         let config = BrowserConfig::builder()
             .chrome_executable(chrome_path)
             .user_data_dir(&user_data_dir)
+            .new_headless_mode()
             .args([
-                "--headless=new",
                 "--disable-gpu",
                 "--no-first-run",
                 "--no-default-browser-check",
@@ -153,6 +169,7 @@ impl ChromeSession {
             console: VecDeque::with_capacity(CONSOLE_BUFFER_CAP + 1),
             last_url: None,
             last_title: None,
+            nav_completed: false,
         }));
 
         Ok(Self {
@@ -233,6 +250,11 @@ impl ChromeSession {
         let mut g = self.inner.lock().await;
         g.last_url = url_now;
         g.last_title = title_now;
+        // First successful navigate flips ready=true for the frontend.
+        // Subsequent navigates keep it true (the page is still a real
+        // page; the URL just changed). We never flip back to false
+        // without a full session restart via `browser_restart`.
+        g.nav_completed = true;
         Ok(())
     }
 
@@ -325,11 +347,12 @@ impl ChromeSession {
 
     pub async fn status(&self) -> Status {
         let g = self.inner.lock().await;
-        let ready = g.page.is_some();
+        // ready means "a real URL has been loaded", not just "a page
+        // object exists" — see Inner::nav_completed for why.
         Status {
             url: g.last_url.clone(),
             title: g.last_title.clone(),
-            ready,
+            ready: g.nav_completed,
         }
     }
 

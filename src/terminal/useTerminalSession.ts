@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { termResize, termStart } from "@/lib/tauri/term";
 import {
   getAltScreen,
   getBellTick,
@@ -42,6 +43,31 @@ interface Args {
   projectId?: string;
   /** Active session id. Mirrors `GLI_SESSION_ID` / `RLI_SESSION_ID` in PTY env. */
   sessionId?: string;
+  /**
+   * Whether this terminal is currently visible to the user (i.e. the
+   * active tab in the active worktree). The TerminalKeepaliveLayer
+   * pre-mounts every terminal across every worktree, so most
+   * BlockTerminals are mounted but hidden behind `display: none`.
+   * When hidden, we still receive frame events from the backend's
+   * Channel (at the per-session 4 Hz hidden cadence set by A3), but
+   * we MUST NOT call `setLiveFrame` / `setAltScreen` / etc. — those
+   * trigger React commits that propagate down through CellRow /
+   * FullGrid subtrees, doing real vdom work even though nothing
+   * paints. With 19 hidden terminals × 4 Hz × N rows of vdom work,
+   * that's the single biggest contributor to "switching feels
+   * sluggish" after the keepalive layer was added.
+   *
+   * Behavior:
+   *   - While `false`: frame events update `rowsRef` and
+   *     `pendingFrameRef` in place (cheap), but no React state
+   *     changes fire.
+   *   - When `false → true`: schedule a flush so the freshly-
+   *     visible terminal's React state catches up to whatever's
+   *     in the refs in one commit.
+   *   - Default `true` so callers that don't pass it (legacy /
+   *     standalone uses) keep working as before.
+   */
+  isVisible?: boolean;
 }
 
 interface SessionApi {
@@ -116,6 +142,28 @@ export function useTerminalSession(opts: Args): SessionApi {
   const rafIdRef = useRef<number | null>(null);
   const pendingFrameRef = useRef<RenderFrame | null>(null);
 
+  // Mirror of the `isVisible` prop into a ref so the long-lived
+  // onFrame closure inside the main effect can read the latest
+  // value without re-mounting. The visibility-flip effect (right
+  // below) keeps this in sync and schedules a flush on the
+  // `false → true` edge.
+  const isVisible = opts.isVisible ?? true;
+  const isVisibleRef = useRef(isVisible);
+  // Bridge into the main effect's flushFrame closure so the
+  // visibility-flip effect can request a flush. The main effect
+  // assigns this on each run.
+  const requestFlushRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    const wasVisible = isVisibleRef.current;
+    isVisibleRef.current = isVisible;
+    // On false → true, push whatever's in the refs into React state
+    // so the freshly-visible terminal catches up in a single commit.
+    if (isVisible && !wasVisible) {
+      requestFlushRef.current();
+    }
+  }, [isVisible]);
+
   useEffect(() => {
     let cancelled = false;
     const unlisten: UnlistenFn[] = [];
@@ -128,7 +176,11 @@ export function useTerminalSession(opts: Args): SessionApi {
     const flushFrame = () => {
       rafIdRef.current = null;
       if (cancelled) return;
-      const frame = pendingFrameRef.current;
+      // Prefer the pending frame (latest from the backend); fall
+      // back to lastFrameRef so a flush triggered by visibility-flip
+      // (with no new frame since hidden) still hydrates React state
+      // from the cached snapshot.
+      const frame = pendingFrameRef.current ?? lastFrameRef.current;
       if (!frame) return;
       pendingFrameRef.current = null;
       const rows = rowsRef.current;
@@ -148,6 +200,13 @@ export function useTerminalSession(opts: Args): SessionApi {
       memSetRows(opts.id, rows);
     };
 
+    // Expose the flush trigger to the outer visibility-flip effect.
+    requestFlushRef.current = () => {
+      if (cancelled) return;
+      if (rafIdRef.current !== null) return;
+      rafIdRef.current = requestAnimationFrame(flushFrame);
+    };
+
     const onFrame = (frame: RenderFrame) => {
       if (cancelled) return;
       // Apply the dirty rows to the canonical row map immediately —
@@ -165,6 +224,17 @@ export function useTerminalSession(opts: Args): SessionApi {
       // (cursor, alt-screen, command_running) — exactly what the
       // user would see anyway.
       pendingFrameRef.current = frame;
+      // Visibility gate. While the terminal is hidden (its
+      // BlockTerminal lives behind display:none in the keepalive
+      // layer), we still update the refs above so the cached
+      // grid + last-frame meta stays current — but we DO NOT
+      // schedule a React commit. The setLiveFrame chain inside
+      // flushFrame would otherwise force a re-render of CellRow /
+      // FullGrid subtrees for every hidden terminal, doing real
+      // vdom work at the backend's hidden cadence (4 Hz × N).
+      // The visibility-flip effect calls requestFlushRef on
+      // false → true to apply the cached state in one commit.
+      if (!isVisibleRef.current) return;
       if (rafIdRef.current === null) {
         rafIdRef.current = requestAnimationFrame(flushFrame);
       }
@@ -214,32 +284,42 @@ export function useTerminalSession(opts: Args): SessionApi {
       memSetExited(opts.id, true);
     };
 
+    // Frame events flow over a dedicated Tauri Channel instead of the
+    // global event bus. With 20 PTYs streaming, this saves the
+    // per-event topic-name string dispatch overhead AND avoids
+    // serializing through the broadcast `app.emit` path on the Rust
+    // side. The channel is one-shot per BlockTerminal mount — when
+    // this effect tears down, the channel is dropped and the backend's
+    // next `send()` silently fails (a no-op). On remount, a new
+    // channel is created and passed to term_start, which updates the
+    // Session's stored channel before re-emitting the catch-up frame.
+    const frameChannel = new Channel<RenderFrame>();
+    frameChannel.onmessage = (frame) => onFrame(frame);
+
     (async () => {
       try {
-        unlisten.push(
-          await listen<RenderFrame>(`term://${opts.id}/frame`, (e) =>
-            onFrame(e.payload),
-          ),
-        );
-        unlisten.push(
-          await listen<ClosedBlock>(`term://${opts.id}/block`, (e) =>
+        // Register the four remaining low-frequency listeners (block,
+        // cwd, bell, exit) in parallel. Each `await listen()` is a
+        // Tauri IPC round-trip; doing them sequentially used to cost
+        // ~25–100 ms on every BlockTerminal mount before any frames
+        // could land. Promise.all collapses the latency to one
+        // round-trip.
+        const listeners = await Promise.all([
+          listen<ClosedBlock>(`term://${opts.id}/block`, (e) =>
             onBlock(e.payload),
           ),
-        );
-        unlisten.push(
-          await listen<string>(`term://${opts.id}/cwd`, (e) =>
-            onCwd(e.payload),
-          ),
-        );
-        unlisten.push(
-          await listen(`term://${opts.id}/bell`, onBell),
-        );
-        unlisten.push(
-          await listen(`term://${opts.id}/exit`, onExit),
-        );
+          listen<string>(`term://${opts.id}/cwd`, (e) => onCwd(e.payload)),
+          listen(`term://${opts.id}/bell`, onBell),
+          listen(`term://${opts.id}/exit`, onExit),
+        ]);
+        if (cancelled) {
+          for (const fn of listeners) fn();
+          return;
+        }
+        for (const fn of listeners) unlisten.push(fn);
 
-        await invoke("term_start", {
-          args: {
+        await termStart(
+          {
             id: opts.id,
             command: opts.command,
             args: opts.args ?? [],
@@ -249,7 +329,8 @@ export function useTerminalSession(opts: Args): SessionApi {
             project_id: opts.projectId,
             session_id: opts.sessionId,
           },
-        });
+          frameChannel,
+        );
       } catch (err) {
         // Surface as a synthetic block so the user sees the error.
         if (!cancelled) {
@@ -306,7 +387,7 @@ export function useTerminalSession(opts: Args): SessionApi {
   };
 
   const resize = async (rows: number, cols: number) => {
-    await invoke("term_resize", { id: opts.id, rows, cols });
+    await termResize(opts.id, rows, cols);
   };
 
   return {

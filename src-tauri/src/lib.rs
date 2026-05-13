@@ -11,6 +11,7 @@
 /// Per-feature plumbing lives in `crate::*` modules — registered below.
 #[cfg(target_os = "macos")]
 mod browser;
+mod claude_hooks;
 mod claude_usage;
 mod connections;
 mod fs;
@@ -35,7 +36,8 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(TerminalState::default());
+        .manage(TerminalState::default())
+        .manage(claude_hooks::ClaudeHookState::default());
 
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -53,7 +55,50 @@ pub fn run() {
                 }
             });
 
+            // Window-focus → terminal-frame cadence gate. When the
+            // user switches to another app, macOS WKWebView suspends
+            // the JS context. Any term frame events we emit during
+            // that window queue up in V8's message buffer and only
+            // drain when the user comes back — and with 20+ agents
+            // streaming at 60 Hz, that backlog can be tens of
+            // thousands of events deep. JS spends a "frozen forever"
+            // window draining it before it can repaint.
+            //
+            // The fix is to track the window's focus state and emit
+            // backend frames at 1 Hz while unfocused (vs the normal
+            // 60 Hz). On focus return, we additionally do one
+            // immediate flush of every active session so idle
+            // terminals don't appear stuck on stale content.
+            use tauri::Manager as _;
+            if let Some(window) = app.get_webview_window("main") {
+                let handle_for_focus = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Focused(focused) = event {
+                        term::set_app_focused(*focused);
+                        if *focused {
+                            if let Some(state) =
+                                handle_for_focus.try_state::<term::TerminalState>()
+                            {
+                                term::flush_all_sessions(
+                                    &handle_for_focus,
+                                    state.inner(),
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+
             migrate_legacy_app_data();
+
+            // Install the Claude Code hook script + register entries in
+            // `~/.claude/settings.json`, then bind the Unix socket the
+            // script will write to on every hook fire. Idempotent — the
+            // installer no-ops if our entries are already present, and
+            // the socket server unlinks any stale path before binding.
+            claude_hooks::install_hooks();
+            claude_hooks::start_socket_server(app.handle().clone());
+
             Ok(())
         });
 
@@ -64,9 +109,13 @@ pub fn run() {
             term::term_input,
             term::term_resize,
             term::term_close,
+            term::term_set_visible_set,
+            term::term_running_session_ids,
             // Claude usage (real, from ~/.claude/projects transcripts)
             claude_usage::claude_usage_status,
             claude_usage::claude_activity_summary,
+            claude_usage::claude_active_status,
+            claude_hooks::claude_sessions,
             // Git (Task #8)
             git::git_status,
             git::git_diff,
@@ -117,6 +166,13 @@ pub fn run() {
             state::state_save,
             state::state_load,
             state::state_clear,
+            // In-app browser (macOS only). Stubs on other platforms
+            // would just live elsewhere; keep them inside the cfg so
+            // non-macOS builds don't get unresolved-symbol errors.
+            #[cfg(target_os = "macos")]
+            browser::browser_bound_port,
+            #[cfg(target_os = "macos")]
+            browser::browser_restart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GLI");
