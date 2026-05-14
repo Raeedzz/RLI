@@ -17,7 +17,8 @@
 //! `helper_agent.rs` and `src/lib/git.ts::aiCommitMessage`.
 
 use std::path::Path;
-use std::process::Output;
+use std::process::{Output, Stdio};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -338,12 +339,44 @@ pub async fn git_commit(cwd: String, message: String) -> Result<String, String> 
     run(&cwd, &["commit", "-m", &message]).await
 }
 
+/// Env vars we set on every network-touching git command so it can
+/// never block on a credential prompt. The UI's "Pushing" button can
+/// only return to idle when the Tauri command resolves; if git hangs
+/// on a hidden askpass/passphrase prompt the spinner sticks forever.
+/// With these set, missing credentials fail fast and the toast layer
+/// shows the actual error.
+///
+///   * `GIT_TERMINAL_PROMPT=0` — disables git's own username/password
+///     prompts (refuses the auth attempt instead of blocking on tty).
+///   * `GIT_ASKPASS=` / `SSH_ASKPASS=` — neutralizes any external
+///     askpass helper (Keychain Access, gnome-keyring, custom scripts).
+///   * `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` — disables SSH's
+///     interactive password / passphrase prompt for key-based pushes.
+///
+/// Tuple list (rather than mutating a Command directly) so the rule
+/// is unit-testable without spawning a process.
+const NON_INTERACTIVE_GIT_ENV: &[(&str, &str)] = &[
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_ASKPASS", ""),
+    ("SSH_ASKPASS", ""),
+    ("GIT_SSH_COMMAND", "ssh -o BatchMode=yes"),
+];
+
+/// Wall-clock limit for `git push`. Set high enough that a slow push
+/// over a poor connection completes, but low enough that a genuinely
+/// hung command surfaces to the user instead of looking dead. 60s is
+/// the same ceiling the GitHub git client uses.
+const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[tauri::command]
 pub async fn git_push(
     cwd: String,
     remote: Option<String>,
     branch: Option<String>,
 ) -> Result<String, String> {
+    if !Path::new(&cwd).exists() {
+        return Err(format!("cwd does not exist: {cwd}"));
+    }
     let mut args: Vec<&str> = vec!["push"];
     let remote_owned;
     let branch_owned;
@@ -355,7 +388,60 @@ pub async fn git_push(
             args.push(&branch_owned);
         }
     }
-    run(&cwd, &args).await
+
+    let mut command = Command::new("git");
+    command
+        .args(&args)
+        .current_dir(&cwd)
+        // Close stdin so git can never block on a read (some flows ask
+        // for confirmation via stdin even when askpass is suppressed).
+        .stdin(Stdio::null());
+    for (k, v) in NON_INTERACTIVE_GIT_ENV {
+        command.env(k, v);
+    }
+
+    let output = tokio::time::timeout(PUSH_TIMEOUT, command.output())
+        .await
+        .map_err(|_| {
+            format!(
+                "git push timed out after {}s — check the remote URL, credentials, or network",
+                PUSH_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|e| format!("spawn git: {e}"))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(explain_push_error(&stderr))
+    }
+}
+
+/// Translate a raw `git push` stderr into a user-actionable message.
+/// Plain bubble-up is fine for most failures, but the two we see
+/// repeatedly in support — SSH auth and unreachable remote — get
+/// expanded hints because the raw line ("Permission denied
+/// (publickey)") doesn't tell a non-git-expert user what to do.
+fn explain_push_error(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if stderr.contains("Permission denied (publickey)") {
+        format!(
+            "git rejected your SSH key. To fix:\n\
+             • Make sure the key is registered with the remote (e.g. github.com/settings/keys).\n\
+             • Make sure ssh-agent has it loaded — run `ssh-add ~/.ssh/id_ed25519` (or your key path) from a terminal.\n\
+             • If push works from your terminal but not from GLI, relaunch GLI from a terminal as a workaround — GLI tries to pick up SSH_AUTH_SOCK automatically but if it failed, launching from a terminal is the bypass.\n\n\
+             Original: {trimmed}"
+        )
+    } else if stderr.contains("Could not resolve host") {
+        format!("Couldn't reach the remote host. Check your network connection.\n\nOriginal: {trimmed}")
+    } else if stderr.contains("Updates were rejected because the remote contains work") {
+        format!(
+            "Remote has commits you don't. Pull (or rebase) first, then push again.\n\nOriginal: {trimmed}"
+        )
+    } else {
+        format!("git push failed: {trimmed}")
+    }
 }
 
 /* ------------------------------------------------------------------
@@ -748,5 +834,94 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].subject, "good");
         assert_eq!(entries[1].subject, "also good");
+    }
+
+    /* ---------- git_push: stuck-Pushing UI guard ---------- */
+
+    /// Every known channel git can use to prompt for credentials is
+    /// suppressed before we shell out. Missing any of these and the UI
+    /// can sit on "Pushing" forever waiting for a tty prompt no one
+    /// will ever see — the bug this list is meant to prevent.
+    #[test]
+    fn non_interactive_env_covers_every_prompt_source() {
+        let env: std::collections::HashMap<&str, &str> =
+            NON_INTERACTIVE_GIT_ENV.iter().copied().collect();
+
+        // git's own HTTPS username/password prompt.
+        assert_eq!(env.get("GIT_TERMINAL_PROMPT"), Some(&"0"));
+
+        // External askpass helpers — empty string means "no helper".
+        assert!(env.contains_key("GIT_ASKPASS"));
+        assert!(env.contains_key("SSH_ASKPASS"));
+
+        // SSH key passphrase + host-key prompts.
+        let ssh = env.get("GIT_SSH_COMMAND").expect("GIT_SSH_COMMAND set");
+        assert!(
+            ssh.contains("BatchMode=yes"),
+            "GIT_SSH_COMMAND must include -o BatchMode=yes to suppress ssh prompts (got {ssh:?})"
+        );
+    }
+
+    /// The publickey-denied case must surface as something a non-git
+    /// expert can act on. Verifying the raw stderr is included
+    /// verbatim — surface area for the user to paste into a bug
+    /// report — plus our actionable hints.
+    #[test]
+    fn explain_push_error_translates_publickey_denial() {
+        let raw = "git@github.com: Permission denied (publickey).\n\
+                   fatal: Could not read from remote repository. Please make sure you have the correct access rights and the repository exists.";
+        let msg = explain_push_error(raw);
+        // Mentions SSH at all.
+        assert!(msg.to_lowercase().contains("ssh"));
+        // At least one of the concrete hints.
+        assert!(
+            msg.contains("ssh-add") || msg.contains("/settings/keys"),
+            "expected an actionable SSH hint in message, got: {msg}"
+        );
+        // Preserves the original git output verbatim (trimmed).
+        assert!(msg.contains(raw.trim()));
+    }
+
+    #[test]
+    fn explain_push_error_translates_unreachable_host() {
+        let raw = "fatal: Could not resolve host: github.com";
+        let msg = explain_push_error(raw);
+        assert!(msg.to_lowercase().contains("network"));
+        assert!(msg.contains(raw));
+    }
+
+    #[test]
+    fn explain_push_error_translates_non_fast_forward() {
+        let raw = "! [rejected]        main -> main (fetch first)\n\
+                   error: failed to push some refs to 'origin'\n\
+                   hint: Updates were rejected because the remote contains work that you do not have locally.";
+        let msg = explain_push_error(raw);
+        assert!(msg.to_lowercase().contains("pull") || msg.to_lowercase().contains("rebase"));
+        assert!(msg.contains(raw.trim()));
+    }
+
+    /// Unknown errors should pass through with the raw stderr intact.
+    /// We never want to swallow a useful git message just because we
+    /// haven't catalogued it.
+    #[test]
+    fn explain_push_error_passes_unknown_errors_through() {
+        let raw = "fatal: some entirely new failure we have not seen yet";
+        let msg = explain_push_error(raw);
+        assert!(msg.contains(raw));
+    }
+
+    /// 60s is the upper bound that lets the user know the operation
+    /// died versus thinking it's still running. Encoded so a refactor
+    /// can't quietly relax it.
+    #[test]
+    fn push_timeout_is_at_most_one_minute() {
+        assert!(
+            PUSH_TIMEOUT <= Duration::from_secs(60),
+            "PUSH_TIMEOUT must stay ≤60s so a hung push surfaces to the UI quickly"
+        );
+        assert!(
+            PUSH_TIMEOUT >= Duration::from_secs(15),
+            "PUSH_TIMEOUT must be ≥15s so a real slow push isn't killed mid-upload"
+        );
     }
 }

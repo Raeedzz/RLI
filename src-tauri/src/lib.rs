@@ -29,6 +29,9 @@ use term::TerminalState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    inherit_login_shell_env();
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
@@ -236,3 +239,169 @@ fn migrate_legacy_app_data() {
 
 #[cfg(not(target_os = "macos"))]
 fn migrate_legacy_app_data() {}
+
+/// Pull SSH_AUTH_SOCK and PATH from the user's login shell into our
+/// own process env, so child processes (git, ssh, claude, codex,
+/// gemini) inherit them.
+///
+/// Why this exists: when GLI is launched from Finder / Dock /
+/// Spotlight on macOS, launchd hands it a near-empty environment.
+/// `SSH_AUTH_SOCK` is missing, so `git push` over SSH can't reach
+/// ssh-agent and falls back to passphrase-prompting the key file —
+/// which our `BatchMode=yes` setting then refuses, producing
+/// `Permission denied (publickey)` even when the user has a working
+/// SSH setup that pushes fine from their terminal. PATH is usually
+/// trimmed to `/usr/bin:/bin:/usr/sbin:/sbin`, hiding homebrew /
+/// asdf / mise-installed binaries.
+///
+/// The fix is the same fix VS Code's macOS bundle has shipped for
+/// years: spawn the user's login shell once at startup, ask it for
+/// its env, and copy the keys we care about into our own.
+#[cfg(target_os = "macos")]
+fn inherit_login_shell_env() {
+    let env = match read_login_shell_env() {
+        Some(e) => e,
+        None => return,
+    };
+
+    // SSH_AUTH_SOCK: required for ssh-agent–backed git pushes.
+    // Don't overwrite if we already have one (e.g. user launched
+    // GLI from a terminal where it was already set).
+    if std::env::var_os("SSH_AUTH_SOCK").is_none() {
+        if let Some(sock) = env.get("SSH_AUTH_SOCK") {
+            if !sock.is_empty() && std::path::Path::new(sock).exists() {
+                std::env::set_var("SSH_AUTH_SOCK", sock);
+                eprintln!("[gli] inherited SSH_AUTH_SOCK from login shell");
+            }
+        }
+    }
+
+    // PATH: merge, login-shell first. Without this, spawned `git` /
+    // `claude` / `codex` / `gemini` may be unfindable when GLI is
+    // launched outside a terminal.
+    if let Some(shell_path) = env.get("PATH") {
+        if !shell_path.is_empty() {
+            let current = std::env::var("PATH").unwrap_or_default();
+            std::env::set_var("PATH", merge_path(shell_path, &current));
+        }
+    }
+}
+
+/// Spawn the user's login shell with `-l -i -c env` and parse the
+/// dumped environment. Returns None on any error (no $SHELL, shell
+/// not found, non-zero exit). Login-shell flags chosen to mirror what
+/// VS Code's `shell-env` helper does: `-l` so login dotfiles run
+/// (.zprofile, .bash_profile), `-i` so interactive ones do too
+/// (.zshrc, .bashrc) — between them they cover every realistic
+/// user-customization path.
+#[cfg(target_os = "macos")]
+fn read_login_shell_env() -> Option<std::collections::HashMap<String, String>> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let output = std::process::Command::new(&shell)
+        .args(["-l", "-i", "-c", "env"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        eprintln!(
+            "[gli] login-shell env probe exited {} — leaving env alone",
+            output.status.code().unwrap_or(-1)
+        );
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    Some(parse_env_dump(&text))
+}
+
+/// Parse `env`-style output into a (name → value) map. Values may
+/// contain `=` (e.g. `URL=foo?a=b`), so we split on the FIRST `=` only.
+fn parse_env_dump(text: &str) -> std::collections::HashMap<String, String> {
+    text.lines()
+        .filter_map(|line| {
+            let (k, v) = line.split_once('=')?;
+            if k.is_empty() {
+                return None;
+            }
+            Some((k.to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+/// Merge two colon-separated PATH-style lists. Entries from
+/// `primary` win on duplicates (preserved at their earlier position).
+/// Empty entries are skipped — they'd mean "current directory" which
+/// is a security smell when inherited from arbitrary env.
+fn merge_path(primary: &str, secondary: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<&str> = Vec::new();
+    for entry in primary.split(':').chain(secondary.split(':')) {
+        if entry.is_empty() {
+            continue;
+        }
+        if seen.insert(entry.to_string()) {
+            out.push(entry);
+        }
+    }
+    out.join(":")
+}
+
+#[cfg(test)]
+mod env_inherit_tests {
+    use super::*;
+
+    #[test]
+    fn parse_env_dump_basic() {
+        let text = "FOO=bar\nBAZ=qux\n";
+        let env = parse_env_dump(text);
+        assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(env.get("BAZ").map(String::as_str), Some("qux"));
+    }
+
+    #[test]
+    fn parse_env_dump_values_can_contain_equals() {
+        // URLs / connection strings frequently include `=`.
+        let text = "DATABASE_URL=postgres://u:p@h/db?sslmode=require\n";
+        let env = parse_env_dump(text);
+        assert_eq!(
+            env.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://u:p@h/db?sslmode=require")
+        );
+    }
+
+    #[test]
+    fn parse_env_dump_skips_malformed_and_empty() {
+        let text = "GOOD=1\n\n=novalue\nNOEQ\nALSO=ok\n";
+        let env = parse_env_dump(text);
+        assert_eq!(env.len(), 2);
+        assert!(env.contains_key("GOOD"));
+        assert!(env.contains_key("ALSO"));
+    }
+
+    #[test]
+    fn parse_env_dump_preserves_empty_values() {
+        // An exported-but-empty var (`export FOO=`) should round-trip.
+        let text = "FOO=\nBAR=value\n";
+        let env = parse_env_dump(text);
+        assert_eq!(env.get("FOO").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn merge_path_dedups_primary_wins() {
+        let merged = merge_path("/opt/homebrew/bin:/usr/local/bin", "/usr/bin:/opt/homebrew/bin");
+        // /opt/homebrew/bin should appear once, in primary's position.
+        assert_eq!(merged, "/opt/homebrew/bin:/usr/local/bin:/usr/bin");
+    }
+
+    #[test]
+    fn merge_path_skips_empty_entries() {
+        // ::foo:: would otherwise add a "" entry meaning current dir.
+        let merged = merge_path("/a::/b", "::/c::");
+        assert_eq!(merged, "/a:/b:/c");
+    }
+
+    #[test]
+    fn merge_path_handles_either_side_empty() {
+        assert_eq!(merge_path("", "/a:/b"), "/a:/b");
+        assert_eq!(merge_path("/a:/b", ""), "/a:/b");
+        assert_eq!(merge_path("", ""), "");
+    }
+}
