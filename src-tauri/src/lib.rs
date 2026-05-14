@@ -11,7 +11,7 @@
 /// Per-feature plumbing lives in `crate::*` modules — registered below.
 #[cfg(target_os = "macos")]
 mod browser;
-mod claude_hooks;
+mod agent_hooks;
 mod claude_usage;
 mod connections;
 mod fs;
@@ -37,7 +37,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(TerminalState::default())
-        .manage(claude_hooks::ClaudeHookState::default());
+        .manage(agent_hooks::AgentHookState::default());
 
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -91,13 +91,14 @@ pub fn run() {
 
             migrate_legacy_app_data();
 
-            // Install the Claude Code hook script + register entries in
-            // `~/.claude/settings.json`, then bind the Unix socket the
-            // script will write to on every hook fire. Idempotent — the
-            // installer no-ops if our entries are already present, and
-            // the socket server unlinks any stale path before binding.
-            claude_hooks::install_hooks();
-            claude_hooks::start_socket_server(app.handle().clone());
+            // Install per-CLI hook scripts (Claude / Codex / Gemini)
+            // + register entries in each tool's settings, then bind
+            // the shared Unix socket the scripts will write to on
+            // every fire. Idempotent — installer no-ops on existing
+            // entries; socket server unlinks any stale path first.
+            // CLIs that aren't installed are silently skipped.
+            agent_hooks::install_hooks();
+            agent_hooks::start_socket_server(app.handle().clone());
 
             Ok(())
         });
@@ -115,7 +116,7 @@ pub fn run() {
             claude_usage::claude_usage_status,
             claude_usage::claude_activity_summary,
             claude_usage::claude_active_status,
-            claude_hooks::claude_sessions,
+            agent_hooks::agent_sessions,
             // Git (Task #8)
             git::git_status,
             git::git_diff,
@@ -188,23 +189,48 @@ pub fn run() {
 fn migrate_legacy_app_data() {
     let Some(home) = dirs::home_dir() else { return };
     let support = home.join("Library").join("Application Support");
-    let old = support.join("dev.raeedz.rli");
-    let new = support.join("dev.raeedz.gli");
-    if !old.exists() || new.exists() {
-        return;
+
+    // Bundle-id rename: dev.raeedz.rli → dev.raeedz.gli. Tauri's
+    // `app_data_dir()` resolves off the bundle identifier so a rename
+    // would otherwise orphan state.json and the worktrees archive.
+    let bundle_old = support.join("dev.raeedz.rli");
+    let bundle_new = support.join("dev.raeedz.gli");
+    if bundle_old.exists() && !bundle_new.exists() {
+        if let Err(e) = std::fs::rename(&bundle_old, &bundle_new) {
+            eprintln!(
+                "[migrate] couldn't rename {} → {}: {e}",
+                bundle_old.display(),
+                bundle_new.display()
+            );
+        } else {
+            eprintln!(
+                "[migrate] moved app data {} → {}",
+                bundle_old.display(),
+                bundle_new.display()
+            );
+        }
     }
-    if let Err(e) = std::fs::rename(&old, &new) {
-        eprintln!(
-            "[migrate] couldn't rename {} → {}: {e}",
-            old.display(),
-            new.display()
-        );
-    } else {
-        eprintln!(
-            "[migrate] moved app data {} → {}",
-            old.display(),
-            new.display()
-        );
+
+    // Shared-cache rename: ~/Library/Application Support/RLI → GLI.
+    // Holds the downloaded Chrome-for-Testing binary + per-PID chrome
+    // profiles. Rename in place so the user doesn't re-download a
+    // ~200 MB Chrome on first launch under the new name.
+    let cache_old = support.join("RLI");
+    let cache_new = support.join("GLI");
+    if cache_old.exists() && !cache_new.exists() {
+        if let Err(e) = std::fs::rename(&cache_old, &cache_new) {
+            eprintln!(
+                "[migrate] couldn't rename {} → {}: {e}",
+                cache_old.display(),
+                cache_new.display()
+            );
+        } else {
+            eprintln!(
+                "[migrate] moved cache {} → {}",
+                cache_old.display(),
+                cache_new.display()
+            );
+        }
     }
 }
 

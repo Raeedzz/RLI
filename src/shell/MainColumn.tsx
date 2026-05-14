@@ -324,7 +324,7 @@ function TabButton({
       </button>
       {active && (
         <motion.span
-          layoutId="rli-active-tab-underline"
+          layoutId="gli-active-tab-underline"
           style={{
             position: "absolute",
             left: 8,
@@ -828,7 +828,7 @@ async function notifyAgentFinished(worktreeName: string, tabTitle: string) {
     if (perm !== "granted") return;
     new Notification(`${worktreeName} · agent idle`, {
       body: tabTitle,
-      tag: `rli-agent-idle-${worktreeName}-${tabTitle}`,
+      tag: `gli-agent-idle-${worktreeName}-${tabTitle}`,
     });
   } catch {
     // Best-effort; notifications are nice-to-have.

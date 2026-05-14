@@ -20,7 +20,7 @@ export function IconButton({
   return (
     <button
       type="button"
-      className="rli-press"
+      className="gli-press"
       {...rest}
       style={{
         width: dim,

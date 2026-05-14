@@ -194,7 +194,7 @@ export function AskCard({
 
 function LoadingDots() {
   return (
-    <div className="rli-loading-dots">
+    <div className="gli-loading-dots">
       <span>·</span>
       <span>·</span>
       <span>·</span>

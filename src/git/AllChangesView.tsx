@@ -47,10 +47,10 @@ export function AllChangesView({ projectPath }: { projectPath: string }) {
       const detail = (e as CustomEvent<{ cwd?: string }>).detail;
       if (!detail?.cwd || detail.cwd === projectPath) refresh();
     };
-    window.addEventListener("rli-git-refresh", onRefresh);
+    window.addEventListener("gli-git-refresh", onRefresh);
     return () => {
       cancelled = true;
-      window.removeEventListener("rli-git-refresh", onRefresh);
+      window.removeEventListener("gli-git-refresh", onRefresh);
     };
   }, [projectPath]);
 

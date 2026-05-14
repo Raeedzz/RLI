@@ -80,8 +80,8 @@ export const t = {
    Shared layoutId constants
    ------------------------------------------------------------------ */
 
-export const LAYOUT_TAB_INDICATOR    = "rli-active-tab";
-export const LAYOUT_PROJECT_STRIP    = "rli-active-project";
+export const LAYOUT_TAB_INDICATOR    = "gli-active-tab";
+export const LAYOUT_PROJECT_STRIP    = "gli-active-project";
 
 /* ------------------------------------------------------------------
    Surface variants
@@ -269,7 +269,7 @@ export function useTabIndicatorTransition(): Transition {
    ------------------------------------------------------------------ */
 
 export const css = {
-  pulse:        "rli-pulse",        // streaming agent status dot
-  loadingDots:  "rli-loading-dots", // three-dot loading indicator
-  pressDown:    "rli-press",        // button :active scale-down
+  pulse:        "gli-pulse",        // streaming agent status dot
+  loadingDots:  "gli-loading-dots", // three-dot loading indicator
+  pressDown:    "gli-press",        // button :active scale-down
 };

@@ -97,7 +97,7 @@ pub struct ClaudeUsageStatus {
     pub real_seven_day_percent: Option<f32>,
     /// Real reset wall-clock millis for the 5h window, when available.
     pub real_five_hour_resets_ms: Option<i64>,
-    /// When the rli-usage-capture.sh hook last wrote the cache file,
+    /// When the gli-usage-capture.sh hook last wrote the cache file,
     /// in epoch millis. Used by the frontend to age out stale data.
     pub real_captured_at_ms: Option<i64>,
 }
@@ -289,7 +289,7 @@ pub fn claude_usage_status() -> Result<ClaudeUsageStatus, String> {
     // (Claude Code feeds them to the statusLine command), so they
     // exactly match what claude.ai's settings page shows.
     if let Some(home) = dirs::home_dir() {
-        let cache = home.join(".claude").join("cache").join("rli-usage.json");
+        let cache = home.join(".claude").join("cache").join("gli-usage.json");
         if let Ok(bytes) = fs::read(&cache) {
             if let Ok(c) = serde_json::from_slice::<CapturedUsage>(&bytes) {
                 // Some capture scripts (older versions, or the one

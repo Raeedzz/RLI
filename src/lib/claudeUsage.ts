@@ -46,7 +46,7 @@ export const CLAUDE_PLAN_BUDGETS: Record<ClaudePlanTier, number> = {
 
 export type ClaudePlanTier = "pro" | "max5" | "max20";
 
-const PLAN_STORAGE_KEY = "rli.claudePlan";
+const PLAN_STORAGE_KEY = "gli.claudePlan";
 
 export function readClaudePlan(): ClaudePlanTier {
   try {

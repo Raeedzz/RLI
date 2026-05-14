@@ -245,7 +245,7 @@ function buildTooltip(s: ClaudeUsageStatus, d: ClaudeUsageDerived): string {
       `Claude ${planLabel(d.plan)} · ${d.percentUsedLabel} used · resets in ${d.remainingLabel}`,
     );
     lines.push(
-      `source: estimate (install ~/.claude/hooks/rli-usage-capture.sh for exact %)`,
+      `source: estimate (install ~/.claude/hooks/gli-usage-capture.sh for exact %)`,
     );
   }
   lines.push(

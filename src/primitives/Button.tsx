@@ -44,7 +44,7 @@ export function Button({
   return (
     <button
       type="button"
-      className="rli-press"
+      className="gli-press"
       {...rest}
       style={{
         height,

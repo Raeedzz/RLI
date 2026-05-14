@@ -54,7 +54,7 @@ fn cft_platform() -> &'static str {
 
 /// Where we cache the downloaded Chrome-for-Testing.
 fn cache_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("RLI").join("chrome").join(cft_platform()))
+    dirs::data_dir().map(|d| d.join("GLI").join("chrome").join(cft_platform()))
 }
 
 fn cft_executable_in(dir: &Path) -> PathBuf {
@@ -70,10 +70,15 @@ fn cft_executable_in(dir: &Path) -> PathBuf {
 /// Walk known locations, return the first existing Chrome binary, or
 /// `None` if nothing is installed yet.
 pub fn locate_chrome() -> Option<PathBuf> {
-    if let Ok(env_path) = std::env::var("RLI_CHROME_PATH") {
-        let p = PathBuf::from(env_path);
-        if p.is_file() {
-            return Some(p);
+    // Accept both env-var spellings during the RLI → GLI rename. New
+    // code should set GLI_CHROME_PATH; RLI_CHROME_PATH stays so an
+    // already-configured shell keeps working.
+    for var in ["GLI_CHROME_PATH", "RLI_CHROME_PATH"] {
+        if let Ok(env_path) = std::env::var(var) {
+            let p = PathBuf::from(env_path);
+            if p.is_file() {
+                return Some(p);
+            }
         }
     }
     let candidates = [

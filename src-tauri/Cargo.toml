@@ -40,6 +40,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 futures = "0.3"
 dirs = "5"
+libc = "0.2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 base64 = "0.22"
 

@@ -5,13 +5,13 @@
 //!
 //! Archive convention:
 //!   - JSON metadata: `<app_data_dir>/archive/<projectId>/<worktreeId>.json`
-//!   - Optional stash: `git stash push -u -m "rli-archive-<worktreeId>"` ran
+//!   - Optional stash: `git stash push -u -m "gli-archive-<worktreeId>"` ran
 //!     in the worktree before `git worktree remove`. Restores apply the
 //!     matching stash.
 //!   - Branch deletion is opt-in (deleteBranch flag).
 //!
 //! Worktree checkouts live under `<app_data_dir>/worktrees/<projectId>/<id>`
-//! so they don't pollute the user's repo with `.rli/sessions/...` dirs.
+//! so they don't pollute the user's repo with `.gli/sessions/...` dirs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -398,7 +398,7 @@ pub async fn worktree_archive(
     }
     let mut stash_ref = None;
     if stash {
-        let msg = format!("rli-archive-{}", worktree_id);
+        let msg = format!("gli-archive-{}", worktree_id);
         // Best effort — clean worktree → no stash → git returns non-zero.
         let _ = git(&path, &["stash", "push", "-u", "-m", &msg]).await;
         stash_ref = Some(msg);

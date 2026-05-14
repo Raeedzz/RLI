@@ -157,10 +157,10 @@ function BranchActionButton({ worktree }: { worktree: Worktree | null }) {
       const detail = (e as CustomEvent<{ cwd?: string }>).detail;
       if (!detail?.cwd || detail.cwd === path) void refresh();
     };
-    window.addEventListener("rli-git-refresh", onGitRefresh);
+    window.addEventListener("gli-git-refresh", onGitRefresh);
     return () => {
       window.clearInterval(t);
-      window.removeEventListener("rli-git-refresh", onGitRefresh);
+      window.removeEventListener("gli-git-refresh", onGitRefresh);
     };
   }, [canQuery, refresh, path]);
 
@@ -197,7 +197,7 @@ function BranchActionButton({ worktree }: { worktree: Worktree | null }) {
       // worktree's git state may have shifted after the server-side
       // merge, so they can drop stale "uncommitted changes" rows.
       window.dispatchEvent(
-        new CustomEvent("rli-git-refresh", { detail: { cwd: path } }),
+        new CustomEvent("gli-git-refresh", { detail: { cwd: path } }),
       );
       toast.show({ message: `Merged PR #${pr.number} into ${branch === "master" ? "master" : "main"}.` });
       await refresh();
@@ -218,7 +218,7 @@ function BranchActionButton({ worktree }: { worktree: Worktree | null }) {
       );
       if (!result.conflicts) {
         window.dispatchEvent(
-          new CustomEvent("rli-git-refresh", { detail: { cwd: path } }),
+          new CustomEvent("gli-git-refresh", { detail: { cwd: path } }),
         );
         toast.show({
           message: result.alreadyUpToDate
@@ -744,11 +744,11 @@ function DiffTrigger({ worktree }: { worktree: Worktree | null }) {
       const detail = (e as CustomEvent<{ cwd?: string }>).detail;
       if (!detail?.cwd || detail.cwd === path) void poll();
     };
-    window.addEventListener("rli-git-refresh", onRefresh);
+    window.addEventListener("gli-git-refresh", onRefresh);
     return () => {
       cancelled = true;
       window.clearInterval(t);
-      window.removeEventListener("rli-git-refresh", onRefresh);
+      window.removeEventListener("gli-git-refresh", onRefresh);
     };
   }, [worktree, path]);
 

@@ -855,7 +855,7 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
               color: "transparent",
               caretColor: "var(--accent-bright)",
             }}
-            className="rli-prompt-input"
+            className="gli-prompt-input"
           />
         </PromptHighlight>
         <div

@@ -41,8 +41,8 @@ const DEFAULT_PTY_SECONDARY = "pty_default_secondary";
 const DEFAULT_PROJECT: Project = {
   id: DEFAULT_PROJECT_ID,
   path: "/Users/raeedz/Developer/RLI",
-  name: "RLI",
-  glyph: "R",
+  name: "GLI",
+  glyph: "G",
   faviconDataUri: null,
   pinned: false,
   expanded: true,

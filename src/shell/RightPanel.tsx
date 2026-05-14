@@ -466,11 +466,11 @@ function useWorktreeStatus(
         void tick();
       }
     };
-    window.addEventListener("rli-git-refresh", onRefresh);
+    window.addEventListener("gli-git-refresh", onRefresh);
     return () => {
       cancelled = true;
       window.clearInterval(t);
-      window.removeEventListener("rli-git-refresh", onRefresh);
+      window.removeEventListener("gli-git-refresh", onRefresh);
     };
   }, [worktreeId, worktreePath, refresh]);
 
@@ -585,7 +585,7 @@ function ChangesView({
       setMessage("");
       await refresh();
       window.dispatchEvent(
-        new CustomEvent("rli-git-refresh", {
+        new CustomEvent("gli-git-refresh", {
           detail: { cwd: worktree.path },
         }),
       );
@@ -603,7 +603,7 @@ function ChangesView({
       toast.show({ message: "Pushed." });
       await refresh();
       window.dispatchEvent(
-        new CustomEvent("rli-git-refresh", {
+        new CustomEvent("gli-git-refresh", {
           detail: { cwd: worktree.path },
         }),
       );
@@ -636,7 +636,7 @@ function ChangesView({
       setMessage("");
       await refresh();
       window.dispatchEvent(
-        new CustomEvent("rli-git-refresh", {
+        new CustomEvent("gli-git-refresh", {
           detail: { cwd: worktree.path },
         }),
       );
@@ -651,7 +651,7 @@ function ChangesView({
       toast.show({ message: "Committed & pushed." });
       await refresh();
       window.dispatchEvent(
-        new CustomEvent("rli-git-refresh", {
+        new CustomEvent("gli-git-refresh", {
           detail: { cwd: worktree.path },
         }),
       );

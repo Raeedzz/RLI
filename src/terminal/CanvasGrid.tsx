@@ -272,7 +272,7 @@ export function isCanvasRendererEnabled(): boolean {
     }
     if (
       typeof localStorage !== "undefined" &&
-      localStorage.getItem("rli.renderer") === "canvas"
+      localStorage.getItem("gli.renderer") === "canvas"
     ) {
       return true;
     }

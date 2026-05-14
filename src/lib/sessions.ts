@@ -13,7 +13,7 @@ import type { Session } from "@/state/types";
  * "name from first prompt" path lives in Task #13's session-naming side
  * which can call into this module once it has a slug.
  *
- * The worktree convention: `<projectRoot>/.rli/sessions/<slug>` with a
+ * The worktree convention: `<projectRoot>/.gli/sessions/<slug>` with a
  * branch named `rli/<slug>` off the project's current branch.
  */
 
@@ -28,8 +28,8 @@ export async function createWorktree(opts: {
   slug: string;
 }): Promise<{ worktreePath: string; branch: string }> {
   const { projectPath, slug } = opts;
-  const worktreePath = `${projectPath}/.rli/sessions/${slug}`;
-  const branch = `rli/${slug}`;
+  const worktreePath = `${projectPath}/.gli/sessions/${slug}`;
+  const branch = `gli/${slug}`;
   await git.worktreeAdd(projectPath, worktreePath, branch);
   return { worktreePath, branch };
 }

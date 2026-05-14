@@ -22,8 +22,8 @@ import type { CSSProperties } from "react";
  *     crest reads as a smooth rise-and-fall instead of a hard wrap.
  *
  * Motion:
- *   - Pure CSS keyframes. Each cell carries `--rli-loader-snake-pos`
- *     (its 0..8 position along the spiral); the `.rli-loader-cell`
+ *   - Pure CSS keyframes. Each cell carries `--gli-loader-snake-pos`
+ *     (its 0..8 position along the spiral); the `.gli-loader-cell`
  *     class runs a 1.35s keyframe walk through the palette with a
  *     negative `animation-delay` derived from that position, so each
  *     cell sits at its own phase and the wave reads as a single crest
@@ -90,10 +90,10 @@ export function Loader({
         return (
           <span
             key={gridIndex}
-            className="rli-loader-cell"
+            className="gli-loader-cell"
             style={
               {
-                "--rli-loader-snake-pos": snakePos,
+                "--gli-loader-snake-pos": snakePos,
               } as CSSProperties
             }
           />

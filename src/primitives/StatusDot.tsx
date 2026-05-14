@@ -31,7 +31,7 @@ const STATUS_COLOR: Record<SessionStatus, string> = {
  *   - `running` falsy   → the supplied `color` (or the status-derived
  *                         fallback). The "back to its colour" state.
  *
- * Pulses opacity when `status === "streaming"` (CSS keyframe `rli-pulse`
+ * Pulses opacity when `status === "streaming"` (CSS keyframe `gli-pulse`
  * from motion.css).
  */
 export function StatusDot({ status, color, running, size = 6 }: Props) {
@@ -49,7 +49,7 @@ export function StatusDot({ status, color, running, size = 6 }: Props) {
 
   return (
     <span
-      className={status === "streaming" ? "rli-pulse" : undefined}
+      className={status === "streaming" ? "gli-pulse" : undefined}
       style={style}
       aria-label={running ? "agent running" : `agent ${status}`}
     />

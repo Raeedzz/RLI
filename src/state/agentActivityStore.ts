@@ -1,49 +1,52 @@
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { useAppState } from "@/state/AppState";
-import { useAnyTerminalRunning } from "@/terminal/terminalActivityStore";
 
 /**
- * Singleton, app-lifetime-scoped store that drives the sidebar/tab
- * spinner. Source of truth: Claude Code's native hook system. The
- * Rust side installs a small shell script into `~/.claude/hooks/`,
- * registers it for every interesting event (UserPromptSubmit,
- * PreToolUse, Stop, …), and forwards each fired event to a Unix
- * socket. The socket server normalizes the event into a
- * `SessionStatus` and emits a `claude://session/state` Tauri event
- * that this store listens for.
+ * Singleton, app-lifetime-scoped store that drives the worktree
+ * spinner. Source of truth: agent CLI hook systems (Claude Code,
+ * OpenAI Codex CLI, Google Gemini CLI). The Rust side installs a
+ * small shell script into each agent's hooks directory, registers it
+ * for every interesting event (turn start, tool use, turn end, …),
+ * and forwards each fired event to a single Unix socket. The socket
+ * server normalizes the event into a `SessionStatus` and emits an
+ * `agent://session/state` Tauri event that this store listens for.
  *
- * Replaces the prior transcript-mtime polling approach: hooks are
- * push-based so we know the exact moment a turn starts and the exact
- * moment it ends, with no 300 ms poll-window jitter. We also see
- * states polling can't see — `Compacting` (auto-summarization in
- * progress) and `Waiting` (paused on a permission prompt).
+ * The spinner reflects ONLY this hook signal. Any OSC 133 / shell
+ * command state lives in `terminalActivityStore` and is reserved for
+ * the per-block command indicator inside the terminal pane — never
+ * for the worktree spinner. Mixing the two (OSC 133 as a fallback)
+ * caused the spinner to fire for every `ls` and every long-running
+ * `npm run dev`, and pinned it on for the lifetime of a Claude TUI
+ * even when the agent was idle at its input box. Pure hook events
+ * are the only signal that cleanly toggles on "agent is computing"
+ * and off "agent is awaiting user input".
  *
  * Architecture:
  *
- *   Claude Code  ─[hook event]─▶  ~/.claude/hooks/gli-claude-hook.sh
- *                                         │  (JSON envelope)
- *                                         ▼
- *                              /tmp/gli-claude.sock
- *                                         │
- *                                         ▼
- *                            Rust ClaudeHookState (HashMap by session_id)
- *                                         │
- *                                         ▼
- *                          "claude://session/state" Tauri event
- *                                         │
- *                                         ▼
- *                          this module's `sessions` Map
- *                                         │
- *                                         ▼
- *                   `useTrackAgentActivity(worktree)` → spinner
+ *   claude / codex / gemini  ─[hook event]─▶  ~/.<cli>/hooks/gli-<cli>-hook.sh
+ *                                                    │  (JSON envelope)
+ *                                                    ▼
+ *                                         /tmp/gli-agent.sock
+ *                                                    │
+ *                                                    ▼
+ *                                      Rust AgentHookState
+ *                                      (HashMap by provider:session_id)
+ *                                                    │
+ *                                                    ▼
+ *                                  "agent://session/state" Tauri event
+ *                                                    │
+ *                                                    ▼
+ *                                  this module's `sessions` Map
+ *                                                    │
+ *                                                    ▼
+ *                          `useTrackAgentActivity(cwd)` → spinner
  *
  * Worktree mapping happens here in the frontend: each `SessionRecord`
- * carries its `cwd` (set on every hook fire), and we match it to
- * `worktree.path` in `useTrackAgentActivity`. That keeps the Rust
- * side ignorant of worktree state — it just knows about sessions —
- * while the React side can still surface a per-worktree spinner.
+ * carries its `cwd` (set on every hook fire) and a `provider` tag
+ * (claude / codex / gemini). The UI doesn't care which provider —
+ * any working session whose cwd is at or below the worktree path
+ * lights the spinner.
  */
 
 type SessionStatus =
@@ -53,28 +56,21 @@ type SessionStatus =
   | "idle"
   | "ended";
 
-/**
- * Per-worktree snapshot. Encoded as a single object so consumers
- * only need ONE `useSyncExternalStore` call — keeping the React
- * hook count stable across renders. (Two separate hooks for "is
- * running" and "has session" caused a `hook.getSnapshot is null`
- * crash during HMR because component instances that mounted with
- * one hook saw two on rerender.)
- */
-type WorktreeSpinnerState = {
-  /** True when at least one session for this path is working/compacting. */
-  running: boolean;
-  /** True when ANY session is registered for this path, any status. */
-  hasSession: boolean;
-};
+type Provider = "claude" | "codex" | "gemini";
 
 export interface SessionRecord {
+  provider: Provider;
   session_id: string;
   cwd: string;
   status: SessionStatus;
   last_event: string;
   last_tool: string;
   updated_at_ms: number;
+}
+
+/** Composite key — two providers can legitimately reuse a session_id. */
+function sessionKey(rec: { provider: Provider; session_id: string }): string {
+  return `${rec.provider}:${rec.session_id}`;
 }
 
 const sessions = new Map<string, SessionRecord>();
@@ -92,25 +88,24 @@ function notifyAll() {
 }
 
 function applyRecord(record: SessionRecord) {
-  // Debug: visible in the devtools console so we can confirm hook
-  // events are arriving from the Rust socket.
   // eslint-disable-next-line no-console
   console.debug(
-    "[claude-hook]",
+    `[agent-hook ${record.provider}]`,
     record.last_event,
     "→",
     record.status,
     "cwd=",
     record.cwd,
   );
+  const key = sessionKey(record);
   // SessionEnd / Ended evicts so a long-lived app doesn't accumulate
   // dead sessions. The Rust side already drops Ended from its own
   // map; we mirror that here.
   if (record.status === "ended") {
-    if (sessions.delete(record.session_id)) notifyAll();
+    if (sessions.delete(key)) notifyAll();
     return;
   }
-  const prev = sessions.get(record.session_id);
+  const prev = sessions.get(key);
   if (
     prev &&
     prev.status === record.status &&
@@ -123,34 +118,34 @@ function applyRecord(record: SessionRecord) {
     prev.updated_at_ms = record.updated_at_ms;
     return;
   }
-  sessions.set(record.session_id, record);
+  sessions.set(key, record);
   notifyAll();
 }
 
 async function bootstrap() {
   if (bootstrapped) return;
   bootstrapped = true;
-  // Initial snapshot in case the user starts GLI while a Claude
+  // Initial snapshot in case the user starts GLI while an agent
   // session is already mid-turn — the hook events for that turn
   // have already fired and we'd otherwise have nothing in the map
   // until the next event.
   try {
-    const initial = await invoke<SessionRecord[]>("claude_sessions");
-    for (const rec of initial) sessions.set(rec.session_id, rec);
+    const initial = await invoke<SessionRecord[]>("agent_sessions");
+    for (const rec of initial) sessions.set(sessionKey(rec), rec);
     if (initial.length) notifyAll();
   } catch {
     // Backend not ready — the listener below will catch up.
   }
   try {
     unlistenFn = await listen<SessionRecord>(
-      "claude://session/state",
+      "agent://session/state",
       (e) => applyRecord(e.payload),
     );
   } catch {
     // Listener bind failure is fatal-but-silent: the rest of the app
     // works without spinners. Surface via console for diagnosis.
     // eslint-disable-next-line no-console
-    console.warn("gli claude hook listener bind failed");
+    console.warn("gli agent hook listener bind failed");
   }
 }
 
@@ -158,17 +153,17 @@ async function bootstrap() {
  * Mount once at app shell level. Lazily bootstraps the listener +
  * initial snapshot on first call; subsequent calls are no-ops.
  */
-export function useClaudeHookSubscription(): void {
+export function useAgentHookSubscription(): void {
   useEffect(() => {
     void bootstrap();
-    // We deliberately don't unbind on unmount — the listener is
-    // app-lifetime. If the AppShell ever unmounts (it doesn't), the
-    // Tauri Channel just sits idle until app exit.
     return () => {
       void unlistenFn;
     };
   }, []);
 }
+
+/** @deprecated kept as an alias during the rename; prefer useAgentHookSubscription. */
+export const useClaudeHookSubscription = useAgentHookSubscription;
 
 /**
  * Path-prefix match. Strips a single trailing slash on both sides so
@@ -189,109 +184,58 @@ function cwdMatchesWorktree(cwd: string, worktreePath: string): boolean {
 }
 
 /**
- * Compute both spinner-relevant booleans for a worktree path in a
- * single pass over the session map. Cached by `worktreePath` so
- * `useSyncExternalStore` sees a stable reference across renders
- * when the underlying state hasn't changed — required to avoid
- * tear warnings and unnecessary rerenders.
+ * Spinner-relevant boolean per worktree path. Cached so
+ * `useSyncExternalStore` sees a stable reference across renders when
+ * the underlying state hasn't changed.
  */
-const snapshotCache = new Map<string, WorktreeSpinnerState>();
+const snapshotCache = new Map<string, boolean>();
 let snapshotGeneration = 0;
 let lastNotifiedGeneration = 0;
 
-function computeSpinnerState(worktreePath: string): WorktreeSpinnerState {
-  let running = false;
-  let hasSession = false;
-  if (worktreePath) {
-    for (const rec of sessions.values()) {
-      if (!cwdMatchesWorktree(rec.cwd, worktreePath)) continue;
-      hasSession = true;
-      if (rec.status === "working" || rec.status === "compacting") {
-        running = true;
-        break;
-      }
-    }
+function computeRunning(worktreePath: string): boolean {
+  if (!worktreePath) return false;
+  for (const rec of sessions.values()) {
+    if (!cwdMatchesWorktree(rec.cwd, worktreePath)) continue;
+    if (rec.status === "working" || rec.status === "compacting") return true;
   }
-  return { running, hasSession };
+  return false;
 }
 
-function getCachedSpinnerState(worktreePath: string): WorktreeSpinnerState {
-  // Invalidate the cache on every state generation bump. We can't
-  // selectively invalidate only the paths whose sessions changed
-  // because `cwdMatchesWorktree` is a prefix match — any session
-  // event can affect multiple worktree paths.
+function getCachedRunning(worktreePath: string): boolean {
+  // Invalidate cache on every state generation bump. Prefix matching
+  // means a single session event can affect multiple worktree paths,
+  // so we clear globally rather than per-path.
   if (lastNotifiedGeneration !== snapshotGeneration) {
     snapshotCache.clear();
     lastNotifiedGeneration = snapshotGeneration;
   }
   const cached = snapshotCache.get(worktreePath);
-  if (cached) return cached;
-  const fresh = computeSpinnerState(worktreePath);
+  if (cached !== undefined) return cached;
+  const fresh = computeRunning(worktreePath);
   snapshotCache.set(worktreePath, fresh);
   return fresh;
 }
 
-function useSpinnerState(worktreePath: string): WorktreeSpinnerState {
+/**
+ * Spinner signal for a worktree. ONLY sourced from agent CLI hook
+ * events — no OSC 133, no per-tab agentStatus, no transcript mtime
+ * polling. Returns true iff at least one Claude/Codex/Gemini session
+ * whose cwd is at-or-below `cwd` is in the `working` (or
+ * `compacting`) state.
+ *
+ * The first arg used to be a worktreeId; it's kept positional for
+ * call-site stability but is now unused.
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function useTrackAgentActivity(_worktreeId: string, cwd: string): boolean {
   return useSyncExternalStore(
     (notify) => {
       listeners.add(notify);
       return () => listeners.delete(notify);
     },
-    () => getCachedSpinnerState(worktreePath),
-    () => getCachedSpinnerState(worktreePath),
+    () => getCachedRunning(cwd),
+    () => getCachedRunning(cwd),
   );
-}
-
-/**
- * Spinner signal for a worktree. Two OR'd sources, both push-based:
- *
- *   1. Claude Code hook events (`claude://session/state`). The
- *      authoritative agent signal. Goes "working" on UserPromptSubmit /
- *      PreToolUse and back to "waiting" on Stop / SubagentStop.
- *      Doesn't fire while the agent is idle at its input box.
- *
- *   2. Per-PTY OSC 133 `command_running` (terminalActivityStore).
- *      Catches non-Claude work — `npm run build`, `pytest`, etc.
- *      Toggles off the moment the shell prompt returns.
- *
- * The `worktreeId` arg is kept in the signature for API stability
- * with previous callers; matching happens by `cwd === worktree.path`.
- */
-export function useTrackAgentActivity(
-  worktreeId: string,
-  cwd: string,
-): boolean {
-  // ONE external-store hook (HMR-safe — hook count stays stable
-  // across renders).
-  const { running: hookRunning, hasSession: hasHookSession } =
-    useSpinnerState(cwd);
-  const state = useAppState();
-  const worktree = state.worktrees[worktreeId];
-  // OSC 133 fallback ids. Tab-level exclusion (`agentStatus`) alone
-  // isn't sufficient because with the scoped keepalive layer,
-  // background-worktree tabs aren't mounted — their `agentStatus`
-  // never flips. The hook-session check below handles that case.
-  const ptyIds = useMemo<string[]>(() => {
-    if (!worktree) return [];
-    const ids: string[] = [];
-    for (const tabId of worktree.tabIds) {
-      const t = state.tabs[tabId];
-      if (!t || t.kind !== "terminal") continue;
-      if (t.agentStatus === "running") continue;
-      ids.push(t.ptyId);
-    }
-    return ids;
-  }, [worktree, state.tabs]);
-  const commandRunning = useAnyTerminalRunning(ptyIds);
-  // If there's any Claude hook session for this worktree, trust the
-  // hook stream completely and ignore OSC 133 — the `claude` binary
-  // keeps OSC 133 `command_running` true for its entire lifetime
-  // (including idle at the input prompt), which would pin the
-  // spinner on. Only fall back to OSC 133 when no hook session is
-  // registered, i.e. pure shell work like `npm run build` / `pytest`
-  // where OSC 133 toggles cleanly on command boundaries.
-  if (hasHookSession) return hookRunning;
-  return commandRunning;
 }
 
 // Re-exported for tests / scripts that want to inspect store state.

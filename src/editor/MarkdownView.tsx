@@ -71,10 +71,10 @@ function RichView({
     },
     editorProps: {
       attributes: {
-        // The .rli-markdown class slots in the same prose styling the
+        // The .gli-markdown class slots in the same prose styling the
         // old preview used — headings, code blocks, tables, lists.
         // ProseMirror appends its own contenteditable + outline.
-        class: "rli-markdown rli-rich-editor",
+        class: "gli-markdown gli-rich-editor",
       },
     },
   });

@@ -12,13 +12,13 @@
    Opacity-only — never scale (scale on a status dot reads as alarm).
    ------------------------------------------------------------------ */
 
-@keyframes rli-pulse {
+@keyframes gli-pulse {
   0%, 100% { opacity: 0.55; }
   50%      { opacity: 1; }
 }
 
-.rli-pulse {
-  animation: rli-pulse 1.4s var(--ease-in-out) infinite;
+.gli-pulse {
+  animation: gli-pulse 1.4s var(--ease-in-out) infinite;
   will-change: opacity;
 }
 
@@ -31,7 +31,7 @@
    a rolling wave.
    ------------------------------------------------------------------ */
 
-.rli-loading-dots {
+.gli-loading-dots {
   display: inline-flex;
   gap: 3px;
   align-items: baseline;
@@ -41,13 +41,13 @@
   color: var(--text-secondary);
 }
 
-.rli-loading-dots > span {
+.gli-loading-dots > span {
   animation: rli-loading-dot 1.2s var(--ease-in-out) infinite;
   will-change: opacity;
 }
-.rli-loading-dots > span:nth-child(1) { animation-delay:    0ms; }
-.rli-loading-dots > span:nth-child(2) { animation-delay:  200ms; }
-.rli-loading-dots > span:nth-child(3) { animation-delay:  400ms; }
+.gli-loading-dots > span:nth-child(1) { animation-delay:    0ms; }
+.gli-loading-dots > span:nth-child(2) { animation-delay:  200ms; }
+.gli-loading-dots > span:nth-child(3) { animation-delay:  400ms; }
 
 @keyframes rli-loading-dot {
   0%, 100% { opacity: 0.25; }
@@ -61,13 +61,13 @@
    only the press.
    ------------------------------------------------------------------ */
 
-.rli-press {
+.gli-press {
   transition:
     transform var(--motion-fast) var(--ease-out-quart),
     background-color var(--motion-instant) var(--ease-out-quart);
   will-change: transform;
 }
-.rli-press:active {
+.gli-press:active {
   transform: scale(0.97);
   transition:
     transform 80ms var(--ease-in-quart),
@@ -129,7 +129,7 @@
    semantics on a focusable wrapper).
    ------------------------------------------------------------------ */
 
-.rli-pane-focused {
+.gli-pane-focused {
   box-shadow: inset 0 0 0 1px var(--accent-muted);
   transition: box-shadow var(--motion-instant) var(--ease-out-quart);
 }
@@ -139,10 +139,10 @@
    Applied via JS class while a drag is hovering a valid target.
    ------------------------------------------------------------------ */
 
-.rli-drop-target {
+.gli-drop-target {
   position: relative;
 }
-.rli-drop-target::before {
+.gli-drop-target::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -151,7 +151,7 @@
   pointer-events: none;
   transition: opacity var(--motion-instant) var(--ease-out-quart);
 }
-.rli-drop-target.is-dragging-over::before {
+.gli-drop-target.is-dragging-over::before {
   opacity: 0.15;
 }
 
@@ -160,20 +160,20 @@
    Apply class once, remove after the animation.
    ------------------------------------------------------------------ */
 
-@keyframes rli-drop-flash {
+@keyframes gli-drop-flash {
   0%   { background-color: var(--state-success-bg); }
   100% { background-color: transparent; }
 }
 
-.rli-drop-flash {
-  animation: rli-drop-flash 400ms var(--ease-out-quart);
+.gli-drop-flash {
+  animation: gli-drop-flash 400ms var(--ease-out-quart);
 }
 
 /* ------------------------------------------------------------------
    Running-agent snake-wave loader cell.
 
-   The Loader primitive renders a 3×3 grid of `<span class="rli-loader-cell">`.
-   Each cell carries a `--rli-loader-snake-pos` custom property (0..8)
+   The Loader primitive renders a 3×3 grid of `<span class="gli-loader-cell">`.
+   Each cell carries a `--gli-loader-snake-pos` custom property (0..8)
    giving its position along the inward-clockwise spiral, and the
    keyframe walks the full palette over 1.35s with a negative
    `animation-delay` per cell so each one sits at its own phase.
@@ -185,13 +185,13 @@
    animation on the compositor thread; the loader is now visually
    continuous regardless of how busy React is.
 
-   Scope: only `.rli-loader-cell` carries this animation. Nothing else
+   Scope: only `.gli-loader-cell` carries this animation. Nothing else
    in the codebase uses this class name, and the prior class
    (`.rli-loader`) is intentionally NOT defined anywhere so the legacy
    double-animate hazard called out in tokens.css doesn't return.
    ------------------------------------------------------------------ */
 
-@keyframes rli-loader-snake-wave {
+@keyframes gli-loader-snake-wave {
   0%      { background-color: oklch(36% 0.003 250); }
   11.111% { background-color: oklch(54% 0.003 250); }
   22.222% { background-color: oklch(72% 0.003 250); }
@@ -204,14 +204,14 @@
   100%    { background-color: oklch(36% 0.003 250); }
 }
 
-.rli-loader-cell {
+.gli-loader-cell {
   background-color: oklch(36% 0.003 250);
-  animation: rli-loader-snake-wave 1.35s linear infinite;
-  /* `--rli-loader-snake-pos` is 0..8 set inline per cell. A negative
+  animation: gli-loader-snake-wave 1.35s linear infinite;
+  /* `--gli-loader-snake-pos` is 0..8 set inline per cell. A negative
      delay equal to (pos / 9 of the cycle) starts each cell at its
      own phase, so the wave reads as one continuous crest across the
      grid even though every cell runs the same animation. */
-  animation-delay: calc(var(--rli-loader-snake-pos, 0) * -150ms);
+  animation-delay: calc(var(--gli-loader-snake-pos, 0) * -150ms);
   will-change: background-color;
 }
 
@@ -222,21 +222,21 @@
    ------------------------------------------------------------------ */
 
 @media (prefers-reduced-motion: reduce) {
-  .rli-pulse {
+  .gli-pulse {
     animation: none;
     opacity: 1;
   }
-  .rli-loading-dots > span {
+  .gli-loading-dots > span {
     animation: none;
     opacity: 0.6;
   }
-  .rli-loader-cell {
+  .gli-loader-cell {
     animation: none;
     /* freeze at the brightest mid-palette stop — reads as "still
        active" without motion. */
     background-color: oklch(72% 0.003 250);
   }
-  .rli-press:active {
+  .gli-press:active {
     transform: none;
   }
   [data-panel-resize-handle-enabled="true"]:hover,
