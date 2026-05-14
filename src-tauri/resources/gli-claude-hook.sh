@@ -7,6 +7,14 @@ SOCKET_PATH="/tmp/gli-agent.sock"
 # Exit silently if socket doesn't exist (GLI not running).
 [ -S "$SOCKET_PATH" ] || exit 0
 
+# Skip helper-agent invocations entirely. GLI's helper_agent spawns
+# `claude --print` (and the equivalents for codex / gemini) for things
+# like commit-message drafting and PR descriptions; those one-shot
+# runs aren't user-initiated turns, so they must not light the
+# worktree spinner. The Rust spawn site sets this env var; bash
+# inherits it into the agent CLI's hook subprocess.
+[ -n "$GLI_HELPER_AGENT" ] && exit 0
+
 # Forward stdin JSON to the socket. CRITICAL: we use `python3 -c "..."`
 # (inline string), NOT a heredoc — a heredoc replaces python's own
 # stdin with the heredoc body, leaving NO stdin for the actual hook

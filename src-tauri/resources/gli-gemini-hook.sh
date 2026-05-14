@@ -7,6 +7,9 @@ SOCKET_PATH="/tmp/gli-agent.sock"
 # Exit silently if socket doesn't exist (GLI not running).
 [ -S "$SOCKET_PATH" ] || exit 0
 
+# Skip helper-agent invocations — see gli-claude-hook.sh for rationale.
+[ -n "$GLI_HELPER_AGENT" ] && exit 0
+
 /usr/bin/python3 -c "
 import json, socket, sys
 

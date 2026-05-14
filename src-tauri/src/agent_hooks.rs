@@ -163,6 +163,21 @@ struct HookEnvelope {
     /// Codex-only. The CLI process id we should watch for liveness.
     #[serde(default)]
     codex_process_id: Option<i32>,
+    /// True iff this envelope is from a GLI helper-agent invocation
+    /// (commit-message draft, PR description, etc.). Belt-and-braces:
+    /// the hook script already exits early when `GLI_HELPER_AGENT` is
+    /// set, so this should never reach us in practice — but if a
+    /// future script regression skips that check, the Rust side still
+    /// drops the envelope and the spinner stays quiet.
+    #[serde(default)]
+    gli_helper: Option<bool>,
+}
+
+/// Drop envelopes that shouldn't move the spinner at all — today
+/// only the helper-agent marker. Factored as a pure predicate so the
+/// rule is testable without standing up an AppHandle.
+fn should_drop_envelope(envelope: &HookEnvelope) -> bool {
+    envelope.gli_helper.unwrap_or(false)
 }
 
 /// Map a (provider, event, aux) tuple plus the prior `in_user_turn`
@@ -326,6 +341,15 @@ fn handle_connection(mut stream: UnixStream, app: &AppHandle<Wry>) {
         eprintln!(
             "[gli-hooks] dropping {} event with empty session_id",
             provider.as_str()
+        );
+        return;
+    }
+    if should_drop_envelope(&envelope) {
+        eprintln!(
+            "[gli-hooks] dropping {} helper-agent envelope (event={} session={})",
+            provider.as_str(),
+            envelope.event,
+            envelope.session_id
         );
         return;
     }
@@ -1498,5 +1522,98 @@ mod tests {
         );
         let stale = find_stale_working_keys(&sessions, 500_000, STALE_WORKING_TIMEOUT_MS);
         assert!(stale.is_empty());
+    }
+
+    /* ---------- helper-agent envelope drop ---------- */
+
+    /// Helper for these tests: build a HookEnvelope from a JSON
+    /// fragment. Pure JSON path so the test stays focused on
+    /// semantics, not struct boilerplate.
+    fn envelope_from_json(v: serde_json::Value) -> HookEnvelope {
+        serde_json::from_value(v).expect("envelope decodes")
+    }
+
+    /// The reported bug: pressing "draft commit message" / "draft PR
+    /// description" runs claude --print, which fires UserPromptSubmit
+    /// / Stop just like an interactive turn. Without the helper-agent
+    /// marker we'd light the worktree spinner for those one-shot
+    /// calls. The marker must cause the envelope to be dropped
+    /// outright — no session creation, no event emission.
+    #[test]
+    fn helper_envelope_is_dropped() {
+        let helper = envelope_from_json(serde_json::json!({
+            "provider": "claude",
+            "session_id": "abc-123",
+            "cwd": "/Users/x/repo",
+            "event": "UserPromptSubmit",
+            "gli_helper": true,
+        }));
+        assert!(should_drop_envelope(&helper));
+    }
+
+    /// The same envelope without the marker must NOT be dropped —
+    /// that's a real user turn, the spinner should fire normally.
+    #[test]
+    fn non_helper_envelope_is_kept() {
+        let interactive = envelope_from_json(serde_json::json!({
+            "provider": "claude",
+            "session_id": "abc-123",
+            "cwd": "/Users/x/repo",
+            "event": "UserPromptSubmit",
+        }));
+        assert!(!should_drop_envelope(&interactive));
+
+        let explicit_false = envelope_from_json(serde_json::json!({
+            "provider": "claude",
+            "session_id": "abc-123",
+            "cwd": "/Users/x/repo",
+            "event": "UserPromptSubmit",
+            "gli_helper": false,
+        }));
+        assert!(!should_drop_envelope(&explicit_false));
+    }
+
+    /// The marker applies regardless of provider — helper agents can
+    /// run claude / codex / gemini and the spinner-suppression rule
+    /// is the same for all three.
+    #[test]
+    fn helper_envelope_dropped_for_every_provider() {
+        for provider in ["claude", "codex", "gemini"] {
+            let env = envelope_from_json(serde_json::json!({
+                "provider": provider,
+                "session_id": "x",
+                "cwd": "/tmp",
+                "event": "UserPromptSubmit",
+                "gli_helper": true,
+            }));
+            assert!(
+                should_drop_envelope(&env),
+                "helper envelope from provider={} should be dropped",
+                provider
+            );
+        }
+    }
+
+    /// Sanity check on the script-level guard: the bundled hook
+    /// scripts must exit early when `GLI_HELPER_AGENT` is set. The
+    /// script-level skip is the primary defense (no socket write at
+    /// all); the envelope-level `gli_helper` drop is just
+    /// belt-and-braces. Asserting on the embedded `include_str!`
+    /// content catches an accidental removal of the guard during
+    /// refactors.
+    #[test]
+    fn hook_scripts_check_helper_env_var() {
+        assert!(
+            CLAUDE_HOOK_SCRIPT.contains("GLI_HELPER_AGENT"),
+            "claude hook script must skip when GLI_HELPER_AGENT is set"
+        );
+        assert!(
+            CODEX_HOOK_SCRIPT.contains("GLI_HELPER_AGENT"),
+            "codex hook script must skip when GLI_HELPER_AGENT is set"
+        );
+        assert!(
+            GEMINI_HOOK_SCRIPT.contains("GLI_HELPER_AGENT"),
+            "gemini hook script must skip when GLI_HELPER_AGENT is set"
+        );
     }
 }

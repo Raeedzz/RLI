@@ -7,6 +7,9 @@ SOCKET_PATH="/tmp/gli-agent.sock"
 # Exit silently if socket doesn't exist (GLI not running).
 [ -S "$SOCKET_PATH" ] || exit 0
 
+# Skip helper-agent invocations — see gli-claude-hook.sh for rationale.
+[ -n "$GLI_HELPER_AGENT" ] && exit 0
+
 # Codex's hook protocol is similar to Claude's but emits fewer events
 # (only SessionStart / UserPromptSubmit / Stop are reliably wired).
 # That means we have no SessionEnd signal — the Rust side compensates

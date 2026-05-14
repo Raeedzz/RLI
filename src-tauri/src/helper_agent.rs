@@ -124,6 +124,12 @@ pub async fn run_inline(
         args.push(full_prompt);
         let mut command = Command::new(bin);
         command.args(&args);
+        // Mark this as a one-shot helper invocation so our installed
+        // hook scripts can skip their socket forward — the worktree
+        // spinner is reserved for interactive turns the user actually
+        // started, not background calls like "draft this commit msg".
+        // Inherited through the agent CLI into its hook subprocesses.
+        command.env("GLI_HELPER_AGENT", "1");
         if !cwd.is_empty() {
             command.current_dir(cwd);
         }
@@ -144,6 +150,7 @@ pub async fn run_inline(
 
     let mut command = Command::new(bin);
     command.args(&args);
+    command.env("GLI_HELPER_AGENT", "1");
     if !cwd.is_empty() {
         command.current_dir(cwd);
     }
