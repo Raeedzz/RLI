@@ -10,6 +10,10 @@ SOCKET_PATH="/tmp/gli-agent.sock"
 # Skip helper-agent invocations — see gli-claude-hook.sh for rationale.
 [ -n "$GLI_HELPER_AGENT" ] && exit 0
 
+# Skip agents running outside GLI — see gli-claude-hook.sh for rationale.
+GLI_SID="${GLI_SESSION_ID:-$RLI_SESSION_ID}"
+[ -z "$GLI_SID" ] && exit 0
+
 # Codex's hook protocol is similar to Claude's but emits fewer events
 # (only SessionStart / UserPromptSubmit / Stop are reliably wired).
 # That means we have no SessionEnd signal — the Rust side compensates
@@ -73,6 +77,7 @@ out = {
     'event': payload.get('hook_event_name', ''),
     'tool': payload.get('tool_name', ''),
     'aux': '',
+    'gli_session_id': '$GLI_SID',
 }
 
 pid = codex_pid()

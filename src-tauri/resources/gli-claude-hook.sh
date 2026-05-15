@@ -15,6 +15,16 @@ SOCKET_PATH="/tmp/gli-agent.sock"
 # inherits it into the agent CLI's hook subprocess.
 [ -n "$GLI_HELPER_AGENT" ] && exit 0
 
+# Skip events from agents NOT running inside a GLI PTY. The hook
+# script is installed globally (~/.claude/settings.json), so it fires
+# for every Claude invocation on the machine — including ones launched
+# from Warp, iTerm, the bare Terminal app, etc. GLI injects
+# GLI_SESSION_ID into every PTY it spawns; if neither it nor the
+# legacy RLI_SESSION_ID is present, the agent isn't running under GLI
+# and its state must not move the worktree spinner.
+GLI_SID="${GLI_SESSION_ID:-$RLI_SESSION_ID}"
+[ -z "$GLI_SID" ] && exit 0
+
 # Forward stdin JSON to the socket. CRITICAL: we use `python3 -c "..."`
 # (inline string), NOT a heredoc — a heredoc replaces python's own
 # stdin with the heredoc body, leaving NO stdin for the actual hook
@@ -42,6 +52,7 @@ out = {
     'tool_use_id': payload.get('tool_use_id', ''),
     'permission_mode': payload.get('permission_mode', 'default'),
     'aux': payload.get('notification_type', ''),
+    'gli_session_id': '$GLI_SID',
 }
 
 try:

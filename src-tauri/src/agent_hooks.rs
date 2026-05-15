@@ -171,13 +171,34 @@ struct HookEnvelope {
     /// drops the envelope and the spinner stays quiet.
     #[serde(default)]
     gli_helper: Option<bool>,
+    /// The GLI session id from the spawning PTY (GLI_SESSION_ID env
+    /// var, with RLI_SESSION_ID as the legacy fallback). Hook scripts
+    /// are installed globally, so they fire for *every* agent
+    /// invocation on the machine — including ones launched from Warp,
+    /// iTerm, or a bare terminal. When that env var is absent, the
+    /// agent isn't running inside a GLI PTY and the envelope must be
+    /// dropped so the worktree spinner doesn't fire for unrelated
+    /// activity. The script also exits early in that case; this is
+    /// belt-and-braces.
+    #[serde(default)]
+    gli_session_id: Option<String>,
 }
 
-/// Drop envelopes that shouldn't move the spinner at all — today
-/// only the helper-agent marker. Factored as a pure predicate so the
-/// rule is testable without standing up an AppHandle.
+/// Drop envelopes that shouldn't move the spinner at all. Two rules:
+///   1. `gli_helper=true` — internal helper-agent one-shot, never a
+///      user-visible turn.
+///   2. `gli_session_id` missing/empty — agent isn't running inside a
+///      GLI PTY (e.g. user is using Claude in Warp at the same time).
+/// Factored as a pure predicate so the rules are testable without
+/// standing up an AppHandle.
 fn should_drop_envelope(envelope: &HookEnvelope) -> bool {
-    envelope.gli_helper.unwrap_or(false)
+    if envelope.gli_helper.unwrap_or(false) {
+        return true;
+    }
+    match envelope.gli_session_id.as_deref() {
+        None | Some("") => true,
+        Some(_) => false,
+    }
 }
 
 /// Map a (provider, event, aux) tuple plus the prior `in_user_turn`
@@ -345,9 +366,15 @@ fn handle_connection(mut stream: UnixStream, app: &AppHandle<Wry>) {
         return;
     }
     if should_drop_envelope(&envelope) {
+        let reason = if envelope.gli_helper.unwrap_or(false) {
+            "helper-agent"
+        } else {
+            "outside-gli-pty"
+        };
         eprintln!(
-            "[gli-hooks] dropping {} helper-agent envelope (event={} session={})",
+            "[gli-hooks] dropping {} envelope ({}: event={} session={})",
             provider.as_str(),
+            reason,
             envelope.event,
             envelope.session_id
         );
@@ -1553,6 +1580,8 @@ mod tests {
 
     /// The same envelope without the marker must NOT be dropped —
     /// that's a real user turn, the spinner should fire normally.
+    /// `gli_session_id` is included so the "agent must be running
+    /// inside GLI" guard doesn't drop it for an unrelated reason.
     #[test]
     fn non_helper_envelope_is_kept() {
         let interactive = envelope_from_json(serde_json::json!({
@@ -1560,6 +1589,7 @@ mod tests {
             "session_id": "abc-123",
             "cwd": "/Users/x/repo",
             "event": "UserPromptSubmit",
+            "gli_session_id": "gli-session-1",
         }));
         assert!(!should_drop_envelope(&interactive));
 
@@ -1569,6 +1599,7 @@ mod tests {
             "cwd": "/Users/x/repo",
             "event": "UserPromptSubmit",
             "gli_helper": false,
+            "gli_session_id": "gli-session-1",
         }));
         assert!(!should_drop_envelope(&explicit_false));
     }
@@ -1585,11 +1616,87 @@ mod tests {
                 "cwd": "/tmp",
                 "event": "UserPromptSubmit",
                 "gli_helper": true,
+                "gli_session_id": "gli-session-1",
             }));
             assert!(
                 should_drop_envelope(&env),
                 "helper envelope from provider={} should be dropped",
                 provider
+            );
+        }
+    }
+
+    /* ---------- external-agent envelope drop (Warp / iTerm / etc.) ---------- */
+
+    /// The reported bug: user runs Claude from Warp at the same time
+    /// GLI is open. Warp's PTY has no GLI_SESSION_ID, so the hook
+    /// envelope has no `gli_session_id` field. Without this guard, the
+    /// spinner would fire in GLI for an agent that isn't even running
+    /// inside the app.
+    #[test]
+    fn envelope_without_gli_session_id_is_dropped() {
+        let external = envelope_from_json(serde_json::json!({
+            "provider": "claude",
+            "session_id": "abc-123",
+            "cwd": "/Users/x/repo",
+            "event": "UserPromptSubmit",
+        }));
+        assert!(should_drop_envelope(&external));
+    }
+
+    /// An empty-string `gli_session_id` is treated the same as missing
+    /// — the bash hook may emit `"gli_session_id": ""` when the env
+    /// var is unset (depending on quoting), so we must drop that too.
+    #[test]
+    fn envelope_with_empty_gli_session_id_is_dropped() {
+        let external = envelope_from_json(serde_json::json!({
+            "provider": "claude",
+            "session_id": "abc-123",
+            "cwd": "/Users/x/repo",
+            "event": "UserPromptSubmit",
+            "gli_session_id": "",
+        }));
+        assert!(should_drop_envelope(&external));
+    }
+
+    /// External-agent rule applies to every provider — same as
+    /// helper-agent — since Codex and Gemini hooks are installed
+    /// globally too.
+    #[test]
+    fn external_envelope_dropped_for_every_provider() {
+        for provider in ["claude", "codex", "gemini"] {
+            let env = envelope_from_json(serde_json::json!({
+                "provider": provider,
+                "session_id": "x",
+                "cwd": "/tmp",
+                "event": "UserPromptSubmit",
+            }));
+            assert!(
+                should_drop_envelope(&env),
+                "external (no gli_session_id) envelope from provider={} should be dropped",
+                provider
+            );
+        }
+    }
+
+    /// Any non-empty `gli_session_id` keeps the envelope — the value
+    /// itself isn't validated here, only its presence. (The session id
+    /// is informational; cwd-based worktree matching is what actually
+    /// routes the spinner.)
+    #[test]
+    fn envelope_with_gli_session_id_is_kept() {
+        for sid in ["gli-1", "abc", "x"] {
+            let env = envelope_from_json(serde_json::json!({
+                "provider": "claude",
+                "session_id": "s",
+                "cwd": "/tmp",
+                "event": "UserPromptSubmit",
+                "gli_session_id": sid,
+            }));
+            assert!(
+                !should_drop_envelope(&env),
+                "envelope with gli_session_id={:?} must be kept",
+                sid
             );
         }
     }
@@ -1615,5 +1722,31 @@ mod tests {
             GEMINI_HOOK_SCRIPT.contains("GLI_HELPER_AGENT"),
             "gemini hook script must skip when GLI_HELPER_AGENT is set"
         );
+    }
+
+    /// Hook scripts are installed globally and fire for every agent
+    /// invocation, including ones from Warp / iTerm / bare Terminal.
+    /// Each script must check for GLI_SESSION_ID (with RLI_SESSION_ID
+    /// as the legacy fallback) and exit early when neither is set. If
+    /// this assertion fails, the script has lost its guard and the
+    /// spinner will fire for agents outside GLI.
+    #[test]
+    fn hook_scripts_check_gli_session_id() {
+        for (name, body) in [
+            ("claude", CLAUDE_HOOK_SCRIPT),
+            ("codex", CODEX_HOOK_SCRIPT),
+            ("gemini", GEMINI_HOOK_SCRIPT),
+        ] {
+            assert!(
+                body.contains("GLI_SESSION_ID"),
+                "{} hook script must read GLI_SESSION_ID",
+                name
+            );
+            assert!(
+                body.contains("RLI_SESSION_ID"),
+                "{} hook script must fall back to RLI_SESSION_ID",
+                name
+            );
+        }
     }
 }
