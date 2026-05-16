@@ -14,10 +14,15 @@
  *   - One draw call per frame; redundant rebuilds short-circuited by
  *     seq dedupe
  *
- * Not yet (Phase 3b):
- *   - Mouse selection + cmd+C copy
+ * Not yet:
  *   - Cursor styles other than block (beam / underline)
- *   - Device-loss recovery — TODO before flipping default
+ *
+ * Device-loss recovery: `createGridRenderer` accepts an `onDeviceLost`
+ * callback that fires when the underlying GPUDevice is lost (system
+ * sleep/wake, driver reset, GPU crash). The caller is expected to
+ * destroy() the dead renderer and bootstrap a new one. CanvasGrid
+ * does this transparently — the user sees a single frame of black
+ * during the swap and the agent continues painting from the next seq.
  */
 
 import type { DirtyRow, RenderFrame, Span } from "../types";
@@ -40,6 +45,28 @@ export interface RenderInput {
    * `rows[0]`, not the original grid). Pass null/undefined to hide.
    */
   cursor?: { row: number; col: number; visible: boolean } | null;
+  /**
+   * Currently-selected cell range, half-open by (row, col) ordered
+   * pair. The renderer marks any cell inside the range with the
+   * SELECTED flag so the fragment shader can paint an accent overlay.
+   * Coordinates are window-relative — same space as `cursor.row/col`.
+   * Null/undefined when nothing is selected.
+   *
+   * `start` is the anchor (where the user pressed mouse-down) and
+   * `end` is the live mouse position. The renderer canonicalises
+   * order internally so either direction works.
+   */
+  selection?: { startRow: number; startCol: number; endRow: number; endCol: number } | null;
+}
+
+/**
+ * Cell size in CSS pixels — exposed so hit-test logic in CanvasGrid
+ * can convert mouse coordinates to cell (row, col) without
+ * duplicating the atlas measurement math.
+ */
+export interface CellSize {
+  widthCss: number;
+  heightCss: number;
 }
 
 const SHADER = /* wgsl */ `
@@ -56,9 +83,11 @@ struct Uniforms {
 //   bit 0 = underline
 //   bit 1 = strikethrough
 //   bit 2 = is-cursor (suppresses underline / strikethrough overlays)
+//   bit 3 = selected (paints an accent overlay over the cell)
 const FLAG_UNDERLINE: u32 = 1u;
 const FLAG_STRIKE: u32 = 2u;
 const FLAG_CURSOR: u32 = 4u;
+const FLAG_SELECTED: u32 = 8u;
 
 struct VertexInput {
   @location(0) quadPos: vec2<f32>,
@@ -104,18 +133,34 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   // Atlas glyphs were rasterized as white-on-transparent, so the alpha
-  // channel is the coverage mask. Blend the foreground over the
-  // background using that mask.
+  // channel is the coverage mask. We tint the BACKGROUND first (so a
+  // selection overlay can't bleed into the glyph) and only then
+  // composite the glyph on top via coverage. This is what keeps an
+  // agent's painted-cursor glyph crisp inside a selection range —
+  // earlier passes mixed the selection accent into the final color
+  // and the cursor glyph faded to a near-invisible smudge.
   let coverage = textureSample(atlasTex, atlasSampler, in.uv).a;
-  var rgb = mix(in.bg.rgb, in.fg.rgb, coverage);
-  var alpha = max(in.bg.a, in.fg.a * coverage);
+  let isCursor = (in.flags & FLAG_CURSOR) != 0u;
+
+  var bgColor = in.bg.rgb;
+  var bgAlpha = in.bg.a;
+  if ((in.flags & FLAG_SELECTED) != 0u && !isCursor) {
+    // Soft steel-blue selection accent. Mixed into the BG only — the
+    // glyph composites on top at full foreground color, so text in a
+    // selected cell stays at the same contrast as elsewhere.
+    let selBg = vec3<f32>(0.30, 0.46, 0.64);
+    bgColor = mix(bgColor, selBg, 0.55);
+    bgAlpha = max(bgAlpha, 0.85);
+  }
+
+  var rgb = mix(bgColor, in.fg.rgb, coverage);
+  var alpha = max(bgAlpha, in.fg.a * coverage);
 
   // Underline + strikethrough overlays. We paint a thin band in the
   // foreground color when the corresponding flag is set, drawn over
   // both the glyph and the background. Skipped for the cursor sprite
   // (the cursor's own bg is solid; layering a stripe on top would
   // create a notch).
-  let isCursor = (in.flags & FLAG_CURSOR) != 0u;
   if (!isCursor) {
     if ((in.flags & FLAG_UNDERLINE) != 0u) {
       let v = in.cellLocal.y;
@@ -158,6 +203,7 @@ const U32_PER_CELL = BYTES_PER_CELL / 4;
 const FLAG_UNDERLINE = 1;
 const FLAG_STRIKE = 2;
 const FLAG_CURSOR = 4;
+const FLAG_SELECTED = 8;
 
 export class GridRenderer {
   private device: GPUDevice;
@@ -177,6 +223,13 @@ export class GridRenderer {
   private scratchU32 = new Uint32Array(0);
   /** Last frame's seq — short-circuits redundant rebuilds. */
   private lastSeq = -1;
+  /**
+   * Set to true once `device.lost` resolves. All public methods become
+   * no-ops past that point — calling into a dead device throws WebGPU
+   * validation errors that the console can't recover from, and the
+   * caller is responsible for swapping in a fresh renderer anyway.
+   */
+  private lost = false;
 
   constructor(
     device: GPUDevice,
@@ -273,12 +326,52 @@ export class GridRenderer {
   }
 
   resize(cssWidth: number, cssHeight: number, dpr: number): void {
+    if (this.lost) return;
     this.cssWidth = cssWidth;
     this.cssHeight = cssHeight;
     const canvas = this.context.canvas as HTMLCanvasElement;
     canvas.width = Math.max(1, Math.floor(cssWidth * dpr));
     canvas.height = Math.max(1, Math.floor(cssHeight * dpr));
     // Force the next render to repaint regardless of seq dedupe.
+    this.lastSeq = -1;
+  }
+
+  /**
+   * True once the underlying GPUDevice is lost. Callers should
+   * destroy this renderer and bootstrap a replacement.
+   */
+  get isLost(): boolean {
+    return this.lost;
+  }
+
+  /**
+   * Internal — wired up by createGridRenderer's device.lost handler.
+   * Exported so the bootstrap can flip the flag without exposing a
+   * generic setter on the public surface.
+   */
+  markLost(): void {
+    this.lost = true;
+  }
+
+  /**
+   * Cell size in CSS pixels. Hit-test code in CanvasGrid uses this to
+   * convert mouse coordinates into (row, col) without duplicating the
+   * atlas measurement (which depends on font + DPR and shouldn't drift).
+   */
+  get cellSize(): CellSize {
+    return {
+      widthCss: this.atlas.cellWidthCss,
+      heightCss: this.atlas.cellHeightCss,
+    };
+  }
+
+  /**
+   * Force the next `render()` call to bypass seq dedupe. Used by
+   * callers that change render-time state which doesn't bump `seq`
+   * — currently just the selection range (the underlying frame
+   * hasn't changed, but the visible output must repaint).
+   */
+  invalidate(): void {
     this.lastSeq = -1;
   }
 
@@ -308,6 +401,7 @@ export class GridRenderer {
   }
 
   render(input: RenderInput): void {
+    if (this.lost) return;
     if (input.seq === this.lastSeq) return;
     this.lastSeq = input.seq;
 
@@ -351,6 +445,28 @@ export class GridRenderer {
       this.scratchU32 = new Uint32Array(this.scratch);
     }
 
+    // Normalise selection so `start` is always (row, col)-lexicographically
+    // before `end`. The caller doesn't have to track drag direction.
+    const sel = input.selection ?? null;
+    let selStartRow = 0;
+    let selStartCol = 0;
+    let selEndRow = 0;
+    let selEndCol = 0;
+    let hasSel = false;
+    if (sel) {
+      const aBefore =
+        sel.startRow < sel.endRow ||
+        (sel.startRow === sel.endRow && sel.startCol <= sel.endCol);
+      selStartRow = aBefore ? sel.startRow : sel.endRow;
+      selStartCol = aBefore ? sel.startCol : sel.endCol;
+      selEndRow = aBefore ? sel.endRow : sel.startRow;
+      selEndCol = aBefore ? sel.endCol : sel.startCol;
+      // Empty range (anchor == cursor before any drag) is treated as
+      // no selection so the user doesn't see a single-cell highlight
+      // on a mouse-down with no drag.
+      hasSel = !(selStartRow === selEndRow && selStartCol === selEndCol);
+    }
+
     const f32 = this.scratchF32;
     const u32 = this.scratchU32;
     let slot = 0;
@@ -375,13 +491,17 @@ export class GridRenderer {
         const ba = span.inverse ? fg[3] : bg[3];
         const dim = span.dim ? 0.6 : 1;
         const style: GlyphStyle = span.bold ? 1 : span.italic ? 2 : 0;
-        let flags = 0;
-        if (span.underline) flags |= FLAG_UNDERLINE;
-        if (span.strikeout) flags |= FLAG_STRIKE;
+        const baseFlags =
+          (span.underline ? FLAG_UNDERLINE : 0) |
+          (span.strikeout ? FLAG_STRIKE : 0);
         // Walk by grapheme code point so emoji + supplementary-plane
         // chars get their own cell instead of being split into two
         // half-cells (which would render as garbled pairs).
         for (const ch of span.text) {
+          let flags = baseFlags;
+          if (hasSel && isInRange(row, col, selStartRow, selStartCol, selEndRow, selEndCol)) {
+            flags |= FLAG_SELECTED;
+          }
           const entry = this.atlas.lookup(ch, style, ch);
           const offBytes = slot * BYTES_PER_CELL;
           const offF32 = offBytes / 4;
@@ -416,9 +536,16 @@ export class GridRenderer {
 
     if (drawCursor && cursor) {
       // Block cursor: solid accent fill, no glyph (atlas size = 0).
-      // The fragment shader's underline/strike paths are suppressed by
-      // FLAG_CURSOR so a strike-through cell doesn't paint a notch
-      // over the cursor block.
+      // The fragment shader's underline/strike + selection paths are
+      // all suppressed by FLAG_CURSOR so the cursor reads as a clean
+      // solid block — no overlay can dim or notch it.
+      //
+      // Crucially the cursor's bg alpha is 1.0 (fully opaque) so when
+      // the user has the cursor cell inside a selection, the cursor
+      // block FULLY replaces the selection-overlaid glyph cell
+      // underneath. Anything < 1.0 here lets the selection's blue
+      // tint bleed through and the cursor visually "fades out" — the
+      // bug users described as the cursor disappearing on shift-click.
       const offBytes = slot * BYTES_PER_CELL;
       const offF32 = offBytes / 4;
       const offU32 = offBytes / 4;
@@ -428,8 +555,6 @@ export class GridRenderer {
       f32[offF32 + 3] = 0;
       f32[offF32 + 4] = 0;
       f32[offF32 + 5] = 0;
-      // fg unused (no glyph), bg is the cursor color. Soft white-ish
-      // accent — pulling this from a CSS variable is a follow-up.
       f32[offF32 + 6] = 0;
       f32[offF32 + 7] = 0;
       f32[offF32 + 8] = 0;
@@ -437,7 +562,7 @@ export class GridRenderer {
       f32[offF32 + 10] = 0.92;
       f32[offF32 + 11] = 0.92;
       f32[offF32 + 12] = 0.92;
-      f32[offF32 + 13] = 0.85;
+      f32[offF32 + 13] = 1.0;
       u32[offU32 + 14] = FLAG_CURSOR;
       slot++;
     }
@@ -466,10 +591,22 @@ export class GridRenderer {
   }
 
   destroy(): void {
-    this.atlas.destroy();
-    this.uniformBuffer.destroy();
-    this.quadBuffer.destroy();
-    this.instanceBuffer?.destroy();
+    // Don't poke at GPU resources after device loss — destroy() on a
+    // lost device throws validation errors. The browser already
+    // cleans them up; we just drop our references.
+    if (!this.lost) {
+      try {
+        this.atlas.destroy();
+        this.uniformBuffer.destroy();
+        this.quadBuffer.destroy();
+        this.instanceBuffer?.destroy();
+      } catch {
+        // A race between `device.lost` resolving and destroy() being
+        // called can land us here. The browser is in the middle of
+        // tearing the device down — nothing useful left to do.
+      }
+    }
+    this.instanceBuffer = null;
   }
 
   private growInstanceBuffer(needed: number): void {
@@ -517,6 +654,32 @@ function stringLengthInCodepoints(s: string): number {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   for (const _ of s) n++;
   return n;
+}
+
+/**
+ * Inclusive on start, exclusive on end — terminal selection semantics
+ * to match the DOM behaviour where dragging-then-releasing on the
+ * same cell as the anchor selects nothing. (row, col) ordering is
+ * lexicographic: (3, 5) > (3, 4) but (3, 5) < (4, 0).
+ *
+ * Caller is responsible for canonicalising start ≤ end. This helper
+ * just asks "is (row, col) inside this normalised half-open range?"
+ */
+function isInRange(
+  row: number,
+  col: number,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): boolean {
+  // Strictly above start row or strictly below end row → outside.
+  if (row < startRow || row > endRow) return false;
+  // On the start row: must be at or past startCol.
+  if (row === startRow && col < startCol) return false;
+  // On the end row: must be strictly before endCol (half-open).
+  if (row === endRow && col >= endCol) return false;
+  return true;
 }
 
 function parseColor(
@@ -569,6 +732,7 @@ export async function createGridRenderer(
   font: string,
   fontSizeCss: number,
   lineHeight: number,
+  onDeviceLost?: (info: { reason: string; message: string }) => void,
 ): Promise<GridRenderer> {
   if (!navigator.gpu) {
     throw new Error("WebGPU not available — GLI requires macOS 14+");
@@ -584,6 +748,27 @@ export async function createGridRenderer(
     format,
     alphaMode: "premultiplied",
   });
+  // Wait for webfonts (specifically JetBrains Mono) to finish loading
+  // before the atlas pre-rasterizes its tofu glyph. Without this, on
+  // cold start the OffscreenCanvas falls back to a system monospace
+  // that doesn't carry box-drawing chars (U+2500..U+257F), the atlas
+  // caches the fallback's empty / replacement glyph forever, and
+  // claude's input box renders as a blank rectangle. The user
+  // reproed it as "the bottom is cutting out" — claude's TUI box was
+  // there, just painted with invisible glyphs.
+  //
+  // document.fonts.ready resolves once all font-face declarations in
+  // the active stylesheets have finished loading. Cheap when fonts
+  // are already ready (typical hot path); a few-ms wait otherwise.
+  if (typeof document !== "undefined" && document.fonts) {
+    try {
+      await document.fonts.ready;
+    } catch {
+      // Some embedded environments stub document.fonts incompletely.
+      // Continuing without the wait is no worse than the pre-fix
+      // behaviour, so swallow and move on.
+    }
+  }
   const dpr = window.devicePixelRatio || 1;
   const atlas = createAtlas(device, {
     font,
@@ -591,7 +776,28 @@ export async function createGridRenderer(
     lineHeight,
     dpr,
   });
-  return new GridRenderer(device, context, format, atlas);
+  const renderer = new GridRenderer(device, context, format, atlas);
+
+  // device.lost resolves once and only once — on driver reset, system
+  // sleep/wake on some GPUs, or an unrecoverable validation error.
+  // We flip the renderer to a lost state so subsequent draws no-op,
+  // then notify the caller so it can swap in a replacement. Caller
+  // is responsible for tearing the dead renderer down via destroy().
+  void device.lost
+    .then((info) => {
+      renderer.markLost();
+      // `reason` is "destroyed" when we explicitly tore the device
+      // down ourselves (component unmount) — not an error, just the
+      // normal shutdown path. Don't pester the caller in that case.
+      if (info.reason === "destroyed") return;
+      onDeviceLost?.({ reason: info.reason, message: info.message });
+    })
+    .catch(() => {
+      // device.lost never rejects in the spec; defensive catch just
+      // in case a browser implementation surprises us.
+    });
+
+  return renderer;
 }
 
 // Re-export so call sites can pull `Span` from one place.

@@ -12,8 +12,10 @@
 #[cfg(target_os = "macos")]
 mod browser;
 mod agent_hooks;
+mod block_id;
 mod claude_usage;
 mod connections;
+mod flat_storage;
 mod fs;
 mod git;
 mod helper_agent;

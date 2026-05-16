@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
-import { CanvasGrid, isCanvasRendererEnabled } from "./CanvasGrid";
+import { CanvasGrid } from "./CanvasGrid";
 import { CellRow } from "./CellRow";
 import { formatCwd, formatDuration } from "./formatBlockMeta";
 import type { DirtyRow, RenderFrame } from "./types";
@@ -51,8 +51,19 @@ function rowText(row: DirtyRow): string {
  * (`Block.tsx` skips line 0 when input matches), kept consistent so
  * a running block and its eventual closed block look visually
  * continuous when the command finishes.
+ *
+ * `footerKeepThroughRow` (optional) — minimum original-grid row
+ * index that must remain in the trimmed slice even when its tail is
+ * blank. Used by agent TUIs (claude/codex/gemini) where the input
+ * cursor sits above the meta + auto-mode hint and those rows are
+ * momentarily blank mid-redraw. Pass `frame.cursor_row + 5` for
+ * agents and `undefined` for shell commands.
  */
-function trimEchoAndBlanks(rows: DirtyRow[], command: string): DirtyRow[] {
+function trimEchoAndBlanks(
+  rows: DirtyRow[],
+  command: string,
+  footerKeepThroughRow?: number,
+): DirtyRow[] {
   const target = command.trim();
   let i = 0;
   while (i < rows.length && rowIsBlank(rows[i])) i++;
@@ -61,6 +72,10 @@ function trimEchoAndBlanks(rows: DirtyRow[], command: string): DirtyRow[] {
   }
   let j = rows.length - 1;
   while (j >= i && rowIsBlank(rows[j])) j--;
+  if (typeof footerKeepThroughRow === "number") {
+    const minJ = Math.min(rows.length - 1, footerKeepThroughRow);
+    if (minJ > j) j = minJ;
+  }
   if (i > j) return [];
   return rows.slice(i, j + 1);
 }
@@ -81,8 +96,30 @@ export function LiveBlock({
 }: Props) {
   const visibleRows = useMemo(() => {
     if (!frame) return [];
-    return trimEchoAndBlanks(frame.dirty, command);
-  }, [frame, command]);
+    // Tight trim of leading + trailing blanks. For agents, keep
+    // cursor + 5 rows so the meta/hint footer that paints just below
+    // the input cursor still has canvas space when claude is mid-
+    // redraw. The pinned-bottom layout in BlockTerminal anchors this
+    // tight slice to the bottom of the pane, so the result is: as
+    // much vertical space as claude's actual UI needs, no more, no
+    // less, always visible.
+    const footerKeep = preserveGrid ? frame.cursor_row + 5 : undefined;
+    return trimEchoAndBlanks(frame.dirty, command, footerKeep);
+  }, [frame, command, preserveGrid]);
+
+  // Original-grid row index of `visibleRows[0]`. Used by the canvas
+  // path to translate `frame.cursor_row` into a window-relative row.
+  // Without it, CanvasGrid assumes the window is the tail of the
+  // grid — wrong when `trimEchoAndBlanks` dropped leading blanks, and
+  // the cursor would paint several rows above where it should be.
+  const firstRowOffset = useMemo(() => {
+    if (!frame || visibleRows.length === 0) return 0;
+    const first = visibleRows[0];
+    // `DirtyRow.row` carries the original grid index — that's what
+    // the trim function preserves verbatim, so we can read it back
+    // directly instead of doing an indexOf walk.
+    return first.row;
+  }, [frame, visibleRows]);
 
   const hasBody = visibleRows.length > 0;
   const cwdLabel = formatCwd(cwd);
@@ -139,7 +176,21 @@ export function LiveBlock({
         fontSize: 13,
         fontVariantLigatures: "none",
         color: "var(--text-primary)",
-        userSelect: "text",
+        // Selection rules:
+        //  - Shell command output (preserveGrid=false): allow DOM
+        //    selection — users want to copy `git log` output, etc.
+        //  - Agent TUI (preserveGrid=true): disallow DOM selection.
+        //    Browser-painted selection would paint over the agent's
+        //    cursor cell and hide it (the cursor is just an inverse-
+        //    coloured <span> in the DOM path; the OS selection
+        //    overlay erases it). This is the symptom users see as
+        //    "shift-click makes the cursor disappear in the agent."
+        //    Canvas-rendered agent blocks (below) get their own
+        //    shader-driven selection, so DOM selection adds nothing
+        //    there either. The selection chrome above (the closed
+        //    blocks in BlockList) is unaffected — each closed Block
+        //    sets its own userSelect.
+        userSelect: preserveGrid ? "none" : "text",
       }}
     >
       {(cwdLabel || initialElapsedLabel) && (
@@ -196,19 +247,23 @@ export function LiveBlock({
             overflow: fill ? "auto" : undefined,
           }}
         >
-          {/* Phase 3 canvas path: when the flag is on AND this block
-              is rendering an agent's TUI (preserveGrid), swap the DOM
-              CellRow stack for a content-sized CanvasGrid. Shell
-              command output stays on the DOM path because canvas
-              doesn't soft-wrap yet — Phase 4. */}
-          {preserveGrid && isCanvasRendererEnabled() && frame ? (
-            <CanvasGrid frame={frame} rows={visibleRows} mode="auto" />
+          {/* Agent TUI blocks (preserveGrid) always render through the
+              WebGPU CanvasGrid — it owns its own selection + cursor
+              painting, so no browser-selection-eats-cursor issue and
+              the cursor draws on top of any selection overlay. Shell
+              command output stays on the DOM CellRow path because
+              canvas doesn't soft-wrap yet (the wrap mode is what
+              keeps long lines readable in narrow panes — promoting
+              canvas here is a follow-up that needs wrap support). */}
+          {preserveGrid && frame ? (
+            <CanvasGrid
+              frame={frame}
+              rows={visibleRows}
+              mode="auto"
+              firstRowOffset={firstRowOffset}
+            />
           ) : (
             visibleRows.map((row) => (
-              // Shell command output wraps so it reads cleanly in narrow
-              // panes. Agent TUIs (`preserveGrid=true`) keep one visual
-              // line per grid row — wrapping their UI would scramble
-              // claude's box-drawing and shift columns mid-frame.
               <CellRow
                 key={row.row}
                 spans={row.spans}

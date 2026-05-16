@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -8,8 +9,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { BlockList } from "./BlockList";
-import { CanvasGrid, isCanvasRendererEnabled } from "./CanvasGrid";
-import { FullGrid } from "./FullGrid";
+import { CanvasGrid } from "./CanvasGrid";
 import { LiveBlock } from "./LiveBlock";
 import { PromptInput, type PromptInputHandle } from "./PromptInput";
 import { PtyPassthrough, type PtyPassthroughHandle } from "./PtyPassthrough";
@@ -184,6 +184,14 @@ export function BlockTerminal({
   isVisible = true,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+  /**
+   * Scroll container for the closed blocks + live block area. Manually
+   * managed instead of relying on column-reverse auto-scroll, because
+   * WKWebView's behaviour with very tall flex children is unreliable.
+   * See the `useLayoutEffect` below that anchors scrollTop to the
+   * bottom whenever the live frame changes.
+   */
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<PromptInputHandle>(null);
   const passthroughRef = useRef<PtyPassthroughHandle>(null);
   // Generation counter — bumped when the user clicks "restart" on the
@@ -398,6 +406,31 @@ export function BlockTerminal({
     sessionId,
     isVisible,
   });
+
+  // Scroll anchoring for the live-block area. The scroll container is
+  // a normal-direction column flex (BlockList first, LiveBlock second),
+  // so without intervention the default scrollTop would sit at the top
+  // and the LiveBlock at the bottom would be off-screen. After every
+  // commit that bumped the live frame seq or the closed-block count,
+  // we anchor scrollTop to the bottom — unless the user has scrolled
+  // up away from the bottom on purpose, in which case we leave them
+  // alone so they can browse history without being yanked back.
+  //
+  // useLayoutEffect (not useEffect) so the scroll happens in the same
+  // paint as the layout that introduced the new content. Otherwise the
+  // user sees a single frame at the old scroll position before we
+  // catch up — which manifests as a visible jump.
+  useLayoutEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    // Tolerance 100 — anything within ~6 rows of the bottom counts as
+    // "near the bottom", so the natural rounding error of a manual
+    // wheel-scroll-to-bottom doesn't disqualify the anchor.
+    if (distance < 100) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [liveFrame?.seq, blocks.length, altScreen]);
 
   // PTY died (process crashed, backend restarted on a Rust hot-reload,
   // user `exit`-ed the shell, etc.). Drop out of agent mode so the
@@ -833,38 +866,39 @@ export function BlockTerminal({
         </div>
       )}
 
-      {!exited && altScreen &&
-        (isCanvasRendererEnabled() ? (
-          <div style={{ flex: 1, minHeight: 0 }}>
-            <CanvasGrid frame={liveFrame} onSendBytes={sendBytes} />
-          </div>
-        ) : (
-          <FullGrid
-            frame={liveFrame}
-            onSendBytes={sendBytes}
-            autoFocus={autoFocus}
-          />
-        ))}
+      {!exited && altScreen && (
+        // Alt-screen TUI (vim, htop, claude-in-alt-screen) renders
+        // exclusively through the WebGPU CanvasGrid. The previous
+        // DOM-backed FullGrid is retired — CanvasGrid handles
+        // selection, cursor, and the full feature set, and keeping
+        // two paths invited drift bugs. The `autoFocus` prop isn't
+        // forwarded because CanvasGrid manages its own focus through
+        // the hidden textarea overlay.
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <CanvasGrid frame={liveFrame} onSendBytes={sendBytes} />
+        </div>
+      )}
 
-      {/* One scroll container for everything that isn't alt-screen.
-          Closed-block history (BlockList) above, in-progress LiveBlock
-          pinned at the bottom (column-reverse). Same shape whether
-          the running command is a shell command or a TUI agent —
-          there is no separate "agent view." Agents render inline in
-          the conversation as a `preserveGrid` LiveBlock so claude's
-          UI doesn't wrap and the user keeps one continuous scroll
-          over their whole session. */}
+      {/* Unified Warp-style scroll: closed blocks + the live block
+          (shell command output OR the agent's TUI) flow together in
+          one scroll container. The agent is just another block in the
+          stream — the whole pane scrolls as one continuous history.
+          `preserveGrid` switches the LiveBlock body between DOM CellRow
+          rendering (shell output, soft-wrap) and the WebGPU CanvasGrid
+          (agent TUI, fixed grid). */}
       {!altScreen && (
         <div
+          ref={scrollContainerRef}
           style={{
             flex: 1,
             minHeight: 0,
             display: "flex",
-            flexDirection: "column-reverse",
+            flexDirection: "column",
             overflowY: "auto",
             overflowX: "hidden",
           }}
         >
+          <BlockList blocks={blocks} />
           {liveFrame?.command_running && !exited && (
             <LiveBlock
               command={activeCommand}
@@ -873,7 +907,6 @@ export function BlockTerminal({
               preserveGrid={foregroundIsAgent}
             />
           )}
-          <BlockList blocks={blocks} />
         </div>
       )}
 

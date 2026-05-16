@@ -1,13 +1,28 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
+  useState,
   type ClipboardEvent,
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { createGridRenderer, type GridRenderer } from "./gpu/GridRenderer";
 import { isGlobalChord, keyToBytes } from "./keyEncoding";
 import type { DirtyRow, RenderFrame } from "./types";
+
+/**
+ * Half-open cell-coord range. `start` is the anchor (mouse-down
+ * cell); `end` is the live mouse position. Either end can be
+ * lexicographically less than the other — the renderer canonicalises.
+ */
+interface Selection {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
 
 interface Props {
   /**
@@ -37,6 +52,19 @@ interface Props {
   /** Font size in CSS pixels (kept in sync with terminal cell metrics). */
   fontSizeCss?: number;
   lineHeight?: number;
+  /**
+   * For inline/windowed mode (`rows` prop set): the original-grid row
+   * index of `rows[0]`. Used to translate `frame.cursor_row` (in
+   * original grid coords) into a window-relative row so the cursor
+   * draws at the correct cell.
+   *
+   * Defaults to `frame.rows - rows.length` (treat the window as the
+   * tail of the grid). LiveBlock passes an explicit value because
+   * `trimEchoAndBlanks` drops leading blanks + the command echo, so
+   * the window is NOT the tail — using the default offset paints the
+   * cursor a few rows above where it should be.
+   */
+  firstRowOffset?: number;
 }
 
 /**
@@ -61,6 +89,7 @@ export function CanvasGrid({
   font,
   fontSizeCss = 13,
   lineHeight = 1.35,
+  firstRowOffset,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -70,6 +99,16 @@ export function CanvasGrid({
   const rowsRef = useRef<DirtyRow[] | undefined>(rows);
   frameRef.current = frame;
   rowsRef.current = rows;
+
+  // Selection state. `selection` is the visible (committed or
+  // live-during-drag) range; null means no selection. `dragging`
+  // tracks whether a mouse drag is currently in flight — used to
+  // route mousemove and pickup-mouseup-anywhere via a document-level
+  // listener so the user can drag past the canvas edge.
+  const [selection, setSelection] = useState<Selection | null>(null);
+  const selectionRef = useRef<Selection | null>(null);
+  const draggingRef = useRef(false);
+  selectionRef.current = selection;
 
   // Auto-height: compute pixel height from row count + line metric.
   // Uses the same constants as the renderer's atlas so the canvas
@@ -81,6 +120,12 @@ export function CanvasGrid({
     return Math.max(cellHeightCss, rowCount * cellHeightCss);
   }, [mode, rows, frame?.dirty.length, cellHeightCss]);
 
+  // Renderer bootstrap with device-loss recovery. `epoch` is bumped
+  // whenever the GPUDevice is lost — the effect tears down the dead
+  // renderer (which is already a no-op because the device is gone)
+  // and bootstraps a fresh one. Users see a single frame of black
+  // during the swap, then painting resumes from the next backend seq.
+  const [rendererEpoch, setRendererEpoch] = useState(0);
   useEffect(() => {
     const canvas = canvasRef.current;
     const wrapper = wrapperRef.current;
@@ -90,7 +135,28 @@ export function CanvasGrid({
       font ??
       "JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, monospace";
 
-    void createGridRenderer(canvas, fontFamily, fontSizeCss, lineHeight)
+    // device.lost handler — called from the renderer when the GPU
+    // device dies (driver reset, sleep/wake on some configs, unhandled
+    // validation failure). Bumping `rendererEpoch` re-runs this effect
+    // with a fresh bootstrap. Guarded by `cancelled` so we don't trigger
+    // a rebuild during normal unmount.
+    const handleDeviceLost = (info: { reason: string; message: string }) => {
+      if (cancelled) return;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[CanvasGrid] WebGPU device lost (${info.reason}): ${info.message} — rebuilding`,
+      );
+      rendererRef.current = null;
+      setRendererEpoch((n) => n + 1);
+    };
+
+    void createGridRenderer(
+      canvas,
+      fontFamily,
+      fontSizeCss,
+      lineHeight,
+      handleDeviceLost,
+    )
       .then((renderer) => {
         if (cancelled) {
           renderer.destroy();
@@ -116,7 +182,7 @@ export function CanvasGrid({
       rendererRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [rendererEpoch]);
 
   // Repaint on frame / rows / cursor change. The renderer dedupes
   // by seq so a re-render with the same frame is a cheap no-op.
@@ -195,22 +261,24 @@ export function CanvasGrid({
   function renderRequest(r: GridRenderer): void {
     const f = frameRef.current;
     const explicitRows = rowsRef.current;
+    const sel = selectionRef.current;
     if (explicitRows) {
       // Inline mode — caller-provided row window. The backend frame's
       // `cursor_row` is in original-grid coordinates (0..frame.rows),
-      // but `explicitRows` is the rows the caller chose to render
-      // (typically the last N rows of the frame). We translate the
-      // cursor's grid row onto the window by aligning the bottom of
-      // the grid with the bottom of the window — the most common case
-      // where caller-supplied rows are the tail of the frame (live
-      // command output growing downward). If the cursor falls outside
-      // the window the renderer's bounds-check hides it.
+      // but `explicitRows` may be any contiguous slice of the grid
+      // (LiveBlock's `trimEchoAndBlanks` drops leading blanks + the
+      // command echo, so the slice usually starts past row 0 and
+      // sometimes ends short of the last row).
+      //
+      // `firstRowOffset` tells us where `explicitRows[0]` sits in the
+      // original grid. Without it we'd guess "the slice is the tail
+      // of the grid" — fine for many shell commands, wrong for any
+      // agent TUI where the trim moved the slice's start.
       let cursor: { row: number; col: number; visible: boolean } | null = null;
       if (f) {
         const windowSize = explicitRows.length;
-        const cursorRowInGrid = f.cursor_row;
-        const cursorRowInWindow =
-          cursorRowInGrid - (f.rows - windowSize);
+        const offset = firstRowOffset ?? Math.max(0, f.rows - windowSize);
+        const cursorRowInWindow = f.cursor_row - offset;
         if (cursorRowInWindow >= 0 && cursorRowInWindow < windowSize) {
           cursor = {
             row: cursorRowInWindow,
@@ -224,15 +292,241 @@ export function CanvasGrid({
         cols: f?.cols ?? 80,
         seq: f?.seq ?? 0,
         cursor,
+        selection: sel,
+      });
+    } else if (f) {
+      // For the full-frame path we can't use renderFrame() because
+      // it doesn't forward selection. Reconstruct the input shape.
+      r.render({
+        rows: f.dirty,
+        cols: f.cols,
+        seq: f.seq,
+        cursor: { row: f.cursor_row, col: f.cursor_col, visible: true },
+        selection: sel,
       });
     } else {
-      r.renderFrame(f);
+      r.renderFrame(null);
     }
   }
+
+  // ---- Selection + clipboard ----------------------------------------
+  //
+  // Mouse-driven cell selection. The flow:
+  //   1. mousedown on the wrapper  → record anchor cell, set dragging
+  //   2. mousemove (document-level) → update end cell while dragging
+  //   3. mouseup   (document-level) → finalise; keep selection visible
+  //   4. mousedown elsewhere       → clears the previous selection
+  //                                  (handled by setting a new anchor)
+  //   5. cmd+C while focused       → extract text from the selected
+  //                                  cell range and write to clipboard
+  //
+  // Coordinates are window-relative: cell (0,0) is the top-left of
+  // whatever's currently rendered (the full grid in fill mode, the
+  // windowed tail in auto mode). The renderer applies the same
+  // mapping when it walks the instance buffer, so the rendered
+  // highlight aligns with the cells the copy step extracts from.
+
+  /**
+   * Convert a mouse event to (row, col) cell coordinates relative to
+   * the rendered grid. Returns null when the renderer hasn't booted
+   * yet (early frames before WebGPU init resolves).
+   */
+  const eventToCell = useCallback(
+    (e: ReactMouseEvent | MouseEvent): { row: number; col: number } | null => {
+      const wrapper = wrapperRef.current;
+      const renderer = rendererRef.current;
+      if (!wrapper || !renderer) return null;
+      const rect = wrapper.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const { widthCss, heightCss } = renderer.cellSize;
+      if (widthCss <= 0 || heightCss <= 0) return null;
+      const col = Math.max(0, Math.floor(x / widthCss));
+      const row = Math.max(0, Math.floor(y / heightCss));
+      return { row, col };
+    },
+    [],
+  );
+
+  /**
+   * Repaint the renderer right now without waiting for a fresh frame.
+   * Selection changes don't bump the backend's frame seq, so the
+   * renderer's dedupe would otherwise skip our request.
+   */
+  const repaint = useCallback(() => {
+    const r = rendererRef.current;
+    if (!r) return;
+    r.invalidate();
+    renderRequest(r);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const onMouseDown = (e: ReactMouseEvent<HTMLDivElement>) => {
+    // Only react to left-clicks. Right-clicks open context menus and
+    // middle-click is paste — both must pass through.
+    if (e.button !== 0) return;
+    const cell = eventToCell(e);
+    if (!cell) return;
+    // Shift+click extends from the existing anchor if there is one;
+    // otherwise it starts a fresh selection at this cell. Mirrors how
+    // every other text-editing surface treats shift-click.
+    const prev = selectionRef.current;
+    if (e.shiftKey && prev) {
+      const next: Selection = {
+        startRow: prev.startRow,
+        startCol: prev.startCol,
+        endRow: cell.row,
+        endCol: cell.col,
+      };
+      selectionRef.current = next;
+      setSelection(next);
+    } else {
+      const next: Selection = {
+        startRow: cell.row,
+        startCol: cell.col,
+        endRow: cell.row,
+        endCol: cell.col,
+      };
+      selectionRef.current = next;
+      setSelection(next);
+    }
+    draggingRef.current = true;
+    inputRef.current?.focus();
+    repaint();
+  };
+
+  // Document-level mouse handlers so a drag continues even when the
+  // pointer leaves the canvas (the user goes selecting past the edge).
+  // The handlers are only installed while a drag is in flight to keep
+  // mouse processing for every other canvas zero-cost.
+  useEffect(() => {
+    if (!selection) return;
+    const onMove = (e: MouseEvent) => {
+      if (!draggingRef.current) return;
+      const cell = eventToCell(e);
+      if (!cell) return;
+      const prev = selectionRef.current;
+      if (!prev) return;
+      const next: Selection = {
+        startRow: prev.startRow,
+        startCol: prev.startCol,
+        endRow: cell.row,
+        endCol: cell.col,
+      };
+      // Skip the work if the cell hasn't actually changed — mousemove
+      // fires many times per pixel and recomputing the same selection
+      // would burn GPU bandwidth for no visible difference.
+      if (
+        prev.endRow === next.endRow &&
+        prev.endCol === next.endCol
+      ) {
+        return;
+      }
+      selectionRef.current = next;
+      setSelection(next);
+      repaint();
+    };
+    const onUp = () => {
+      if (!draggingRef.current) return;
+      draggingRef.current = false;
+      // Empty-range collapse: if the user mouse-downed and released
+      // without dragging, drop the selection so they don't see a
+      // single-cell stripe and so cmd+C reads as "nothing selected".
+      const cur = selectionRef.current;
+      if (
+        cur &&
+        cur.startRow === cur.endRow &&
+        cur.startCol === cur.endCol
+      ) {
+        selectionRef.current = null;
+        setSelection(null);
+        repaint();
+      }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [selection, eventToCell, repaint]);
+
+  /**
+   * Extract the selected cells as plain text. Trims trailing
+   * whitespace on each row (alacritty pads rows with blanks past
+   * the printed content) and joins with \n — the standard
+   * terminal selection-copy shape every shell + agent expects on
+   * paste. Returns an empty string when nothing is selected or the
+   * range collapses (defensive — caller should already have
+   * cleared the selection in that case).
+   */
+  const extractSelectionText = useCallback((): string => {
+    const sel = selectionRef.current;
+    if (!sel) return "";
+    // Canonicalise so startRow,startCol is lexicographically before
+    // endRow,endCol — same logic the renderer uses.
+    const aBefore =
+      sel.startRow < sel.endRow ||
+      (sel.startRow === sel.endRow && sel.startCol <= sel.endCol);
+    const sr = aBefore ? sel.startRow : sel.endRow;
+    const sc = aBefore ? sel.startCol : sel.endCol;
+    const er = aBefore ? sel.endRow : sel.startRow;
+    const ec = aBefore ? sel.endCol : sel.startCol;
+    const sourceRows: DirtyRow[] | undefined =
+      rowsRef.current ?? frameRef.current?.dirty;
+    if (!sourceRows || sourceRows.length === 0) return "";
+    const lines: string[] = [];
+    for (let r = sr; r <= er; r++) {
+      if (r < 0 || r >= sourceRows.length) continue;
+      const row = sourceRows[r];
+      const rowStart = r === sr ? sc : 0;
+      // Inclusive end-of-row when the selection extends past this row.
+      const rowEnd = r === er ? ec : Infinity;
+      let col = 0;
+      let line = "";
+      for (const span of row.spans) {
+        for (const ch of span.text) {
+          if (col >= rowStart && col < rowEnd) {
+            line += ch;
+          }
+          col++;
+        }
+      }
+      // Trim only trailing whitespace — leading whitespace might be
+      // intentional indent that the user is selecting (e.g., a Python
+      // diff hunk).
+      lines.push(line.replace(/\s+$/, ""));
+    }
+    return lines.join("\n");
+  }, []);
 
   // Input handling. Mirrors FullGrid / PtyPassthrough so all three
   // paths agree on encoding. Read-only when onSendBytes is omitted.
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Cmd+C while a selection is active → copy the selected cells to
+    // the clipboard. We have to intercept BEFORE checking onSendBytes
+    // / isGlobalChord because copy must work in read-only mode too
+    // (e.g. browsing scrollback). preventDefault() stops the browser
+    // from also firing a `copy` event on the hidden textarea, which
+    // would otherwise read the textarea's empty selection and clobber
+    // the clipboard.
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "c") {
+      if (selectionRef.current) {
+        const text = extractSelectionText();
+        if (text.length > 0) {
+          e.preventDefault();
+          // navigator.clipboard.writeText is the Tauri-friendly path
+          // — it round-trips through the OS clipboard rather than
+          // depending on the focused-element selection model.
+          void navigator.clipboard.writeText(text).catch(() => {
+            // Silent — if the user has clipboard permissions denied
+            // there's nothing useful we can show, and they'll learn
+            // by the missing paste.
+          });
+          return;
+        }
+      }
+    }
     if (!onSendBytes) return;
     if (isGlobalChord(e)) return;
     const seq = keyToBytes(e, frame?.app_cursor ?? false);
@@ -277,13 +571,21 @@ export function CanvasGrid({
   return (
     <div
       ref={wrapperRef}
-      onMouseDown={() => inputRef.current?.focus()}
+      onMouseDown={onMouseDown}
       style={{
         width: "100%",
         height: mode === "auto" ? `${autoHeightPx}px` : "100%",
         position: "relative",
         backgroundColor: "var(--surface-0)",
-        cursor: onSendBytes ? "text" : "default",
+        // I-beam cursor so users know the surface is selectable; the
+        // I-beam also reads correctly in read-only mode (browsing
+        // scrollback) where we still allow selection + copy.
+        cursor: "text",
+        // Suppress the OS' native text-select behaviour over the
+        // canvas — we draw our own highlight via the WGSL shader and
+        // the OS selection would do nothing useful (the canvas has
+        // no DOM text nodes to select).
+        userSelect: "none",
       }}
     >
       <canvas
@@ -320,27 +622,3 @@ export function CanvasGrid({
   );
 }
 
-/**
- * Returns true if the canvas renderer is enabled via URL flag. Set
- * `?renderer=canvas` in the dev URL or `localStorage.rli.renderer =
- * "canvas"` to toggle on without restart.
- */
-export function isCanvasRendererEnabled(): boolean {
-  try {
-    if (
-      typeof window !== "undefined" &&
-      new URLSearchParams(window.location.search).get("renderer") === "canvas"
-    ) {
-      return true;
-    }
-    if (
-      typeof localStorage !== "undefined" &&
-      localStorage.getItem("gli.renderer") === "canvas"
-    ) {
-      return true;
-    }
-  } catch {
-    // localStorage / URL inaccessible — bail to DOM renderer.
-  }
-  return false;
-}
