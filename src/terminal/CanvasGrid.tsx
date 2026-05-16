@@ -146,6 +146,49 @@ export function CanvasGrid({
     return () => observer.disconnect();
   }, []);
 
+  // Repaint at the new DPR when the user drags GLI between a Retina
+  // and an external 1x monitor mid-session. Without this, the canvas
+  // stays at its mount-time DPR — glyphs look fuzzy (1x → 2x) or
+  // pixel-doubled (2x → 1x) until the user resizes the pane.
+  //
+  // matchMedia(resolution) fires whenever the DPR changes. Each change
+  // recreates the listener for the new DPR value (it's a one-shot
+  // listener per query), which is why the cleanup tears down the old
+  // one before registering the next.
+  useEffect(() => {
+    const wrapper = wrapperRef.current;
+    if (!wrapper) return;
+    let mq: MediaQueryList | null = null;
+    let onChange: (() => void) | null = null;
+    const setup = () => {
+      const dpr = window.devicePixelRatio || 1;
+      mq = window.matchMedia(`(resolution: ${dpr}dppx)`);
+      onChange = () => {
+        const renderer = rendererRef.current;
+        if (!renderer) return;
+        const rect = wrapper.getBoundingClientRect();
+        renderer.resize(
+          rect.width,
+          rect.height,
+          window.devicePixelRatio || 1,
+        );
+        renderRequest(renderer);
+        // Re-register at the new DPR so the next change fires.
+        if (mq && onChange) {
+          mq.removeEventListener("change", onChange);
+        }
+        setup();
+      };
+      mq.addEventListener("change", onChange);
+    };
+    setup();
+    return () => {
+      if (mq && onChange) {
+        mq.removeEventListener("change", onChange);
+      }
+    };
+  }, []);
+
   // Drive a render based on whichever input mode the caller chose.
   // Always reads via the refs so it stays valid through async resize
   // and frame events.
@@ -153,14 +196,34 @@ export function CanvasGrid({
     const f = frameRef.current;
     const explicitRows = rowsRef.current;
     if (explicitRows) {
-      // Inline mode — caller-provided row window. Cursor is hidden
-      // because cursor coords are in original-grid space; mapping
-      // them onto the trimmed window is a Phase 4 concern.
+      // Inline mode — caller-provided row window. The backend frame's
+      // `cursor_row` is in original-grid coordinates (0..frame.rows),
+      // but `explicitRows` is the rows the caller chose to render
+      // (typically the last N rows of the frame). We translate the
+      // cursor's grid row onto the window by aligning the bottom of
+      // the grid with the bottom of the window — the most common case
+      // where caller-supplied rows are the tail of the frame (live
+      // command output growing downward). If the cursor falls outside
+      // the window the renderer's bounds-check hides it.
+      let cursor: { row: number; col: number; visible: boolean } | null = null;
+      if (f) {
+        const windowSize = explicitRows.length;
+        const cursorRowInGrid = f.cursor_row;
+        const cursorRowInWindow =
+          cursorRowInGrid - (f.rows - windowSize);
+        if (cursorRowInWindow >= 0 && cursorRowInWindow < windowSize) {
+          cursor = {
+            row: cursorRowInWindow,
+            col: f.cursor_col,
+            visible: true,
+          };
+        }
+      }
       r.render({
         rows: explicitRows,
         cols: f?.cols ?? 80,
         seq: f?.seq ?? 0,
-        cursor: null,
+        cursor,
       });
     } else {
       r.renderFrame(f);

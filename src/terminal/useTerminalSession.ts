@@ -253,6 +253,7 @@ export function useTerminalSession(opts: Args): SessionApi {
             block_id: b.block_id,
             input: stamped,
             transcript: b.transcript,
+            blockRows: b.blockRows ?? [],
             exit_code: b.exit_code,
             cwd: b.cwd,
             durationMs: b.durationMs,

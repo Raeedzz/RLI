@@ -66,16 +66,34 @@ export interface RenderFrame {
   dirty: DirtyRow[];
 }
 
+/**
+ * One row of a closed block's rendered grid snapshot. Mirrors Rust's
+ * `RowSnapshot` shape (`{ spans: Span[] }`). Shipped on `ClosedBlock`
+ * as `blockRows` — see the comment below for why this exists.
+ */
+export interface BlockRow {
+  spans: Span[];
+}
+
 export interface ClosedBlock {
   /** Stable id minted by the Rust segmenter at OSC 133 A. */
   block_id: number;
   input: string;
   /**
-   * Full byte transcript from OSC 133 A → D. Includes the user's
-   * PROMPT (with ANSI styling), the echoed command, and the command's
-   * output. Frontend parses SGR to render styled spans inside Block.
+   * Full byte transcript from OSC 133 A → D. Kept as a fallback /
+   * for search; the primary render path uses `blockRows` (below).
    */
   transcript: string;
+  /**
+   * Pre-rendered grid snapshot of this block's transcript, produced
+   * on the Rust side by feeding the bytes through a fresh alacritty
+   * `Term` and walking the resulting grid. Rendering from this
+   * (instead of running the byte stream through the small
+   * `parseAnsi.ts`) is what lets progress bars, `\r`-overstrike,
+   * line clears, and other cursor-driven redraws come out the way
+   * they looked live. Empty when the transcript was empty.
+   */
+  blockRows: BlockRow[];
   exit_code: number | null;
   /** cwd at OSC 133 C — where the command actually ran. */
   cwd: string | null;
@@ -90,6 +108,8 @@ export interface Block {
   block_id: number;
   input: string;
   transcript: string;
+  /** See `ClosedBlock.blockRows`. */
+  blockRows: BlockRow[];
   exit_code: number | null;
   cwd: string | null;
   durationMs: number | null;

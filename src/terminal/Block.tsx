@@ -45,18 +45,41 @@ function isAgentInput(input: string): boolean {
  */
 export function Block({ block }: Props) {
   const isAgent = useMemo(() => isAgentInput(block.input), [block.input]);
-  const lines = useMemo(
-    // Skip ANSI parsing for agent transcripts — their linearized form
-    // is unreadable (cursor positioning collapses columns into wordsmush
-    // like "AUTHORISEDANDMAKESENSE"). The body renders a compact
-    // "session ended" placeholder instead.
-    () => (isAgent ? [] : parseAnsi(block.transcript)),
-    [block.transcript, isAgent],
-  );
+  // Closed blocks render from one of two sources, in order of fidelity:
+  //
+  //   1. `blockRows` — the Warp-style per-block grid snapshot produced
+  //      on the Rust side by replaying the transcript through alacritty.
+  //      Handles CR overstrike, line clear, cursor moves, scroll
+  //      regions, etc. correctly. This is the path real production
+  //      blocks take.
+  //
+  //   2. `parseAnsi(transcript)` — the legacy fallback for blocks that
+  //      hydrated from sessionMemory before `blockRows` existed on the
+  //      wire, or any block whose transcript predates a backend
+  //      restart. parseAnsi handles SGR + line breaks but nothing
+  //      else, so progress bars / spinners look concatenated. Kept so
+  //      pre-existing in-memory blocks still render after upgrade.
+  const lines = useMemo(() => {
+    if (isAgent) return [];
+    if (block.blockRows && block.blockRows.length > 0) {
+      return block.blockRows.map((r) => r.spans);
+    }
+    return parseAnsi(block.transcript);
+  }, [block.blockRows, block.transcript, isAgent]);
   const bodyLines = useMemo(() => {
-    if (block.input.length > 0 && lines.length > 0) return lines.slice(1);
+    // Skip the first line ONLY when rendering from the legacy
+    // parseAnsi path — that path captures zsh's echo of the user's
+    // typed command as the first transcript line, which would
+    // duplicate the bold command we render in the header. The
+    // alacritty-rendered `blockRows` path is layout-correct already;
+    // the typed command echo lives in its own row (or gets
+    // overwritten by the prompt redraw) and there's nothing to skip.
+    const usingBlockRows = block.blockRows && block.blockRows.length > 0;
+    if (!usingBlockRows && block.input.length > 0 && lines.length > 0) {
+      return lines.slice(1);
+    }
     return lines;
-  }, [lines, block.input]);
+  }, [lines, block.blockRows, block.input]);
 
   const exitBadge = useMemo(() => {
     if (block.exit_code === null) return null;

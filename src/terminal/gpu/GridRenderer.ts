@@ -3,20 +3,25 @@
  * sampling a glyph atlas. One draw call per frame for the visible
  * cells; uniforms carry cell size + canvas resolution.
  *
- * Phase 3 skeleton scope:
- *   - ASCII glyphs from the atlas (Phase 4: full Unicode + emoji)
- *   - Foreground + background blend in one fragment pass
- *   - No selection, no cursor blink, no underline/strikethrough
- *   - No device-loss recovery (Phase 4)
- *   - No DPR change handling beyond initial mount (Phase 4)
+ * Current scope (post-Phase-3a):
+ *   - Dynamic Unicode atlas (rasterize-on-miss; see Atlas.ts)
+ *   - Bold / italic via atlas variants; dim via fragment alpha
+ *   - Underline + strikethrough rendered in the fragment shader
+ *     from per-cell flags packed into the instance data
+ *   - Inverse swap of fg/bg
+ *   - Cursor (block style) overlaid at the requested cell, with row
+ *     coordinates honored in both whole-frame and inline windows
+ *   - One draw call per frame; redundant rebuilds short-circuited by
+ *     seq dedupe
  *
- * Inputs flow as `RenderFrame.dirty` → instance buffer → one draw.
- * The instance buffer reuses its allocation across frames; we only
- * grow when the cell count exceeds capacity.
+ * Not yet (Phase 3b):
+ *   - Mouse selection + cmd+C copy
+ *   - Cursor styles other than block (beam / underline)
+ *   - Device-loss recovery — TODO before flipping default
  */
 
-import type { DirtyRow, RenderFrame } from "../types";
-import { createAtlas, type Atlas } from "./Atlas";
+import type { DirtyRow, RenderFrame, Span } from "../types";
+import { createAtlas, type Atlas, type GlyphStyle } from "./Atlas";
 
 /**
  * Decoupled input the renderer actually consumes. Lets callers pass
@@ -47,6 +52,14 @@ struct Uniforms {
 @group(0) @binding(1) var atlasTex: texture_2d<f32>;
 @group(0) @binding(2) var atlasSampler: sampler;
 
+// Bitmask packed into instance.flags:
+//   bit 0 = underline
+//   bit 1 = strikethrough
+//   bit 2 = is-cursor (suppresses underline / strikethrough overlays)
+const FLAG_UNDERLINE: u32 = 1u;
+const FLAG_STRIKE: u32 = 2u;
+const FLAG_CURSOR: u32 = 4u;
+
 struct VertexInput {
   @location(0) quadPos: vec2<f32>,
   @location(1) cellPos: vec2<f32>,
@@ -54,6 +67,7 @@ struct VertexInput {
   @location(3) atlasSize: vec2<f32>,
   @location(4) fgColor: vec4<f32>,
   @location(5) bgColor: vec4<f32>,
+  @location(6) flags: u32,
 };
 
 struct VertexOutput {
@@ -61,13 +75,13 @@ struct VertexOutput {
   @location(0) uv: vec2<f32>,
   @location(1) fg: vec4<f32>,
   @location(2) bg: vec4<f32>,
+  @location(3) cellLocal: vec2<f32>,
+  @location(4) @interpolate(flat) flags: u32,
 };
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
   let pixelPos = (in.cellPos + in.quadPos) * u.cellSize;
-  // Map from CSS pixels (0..resolution) to clip space (-1..1).
-  // Y is flipped because our cell coordinates grow downward.
   let clip = vec4<f32>(
     (pixelPos.x / u.resolution.x) * 2.0 - 1.0,
     -((pixelPos.y / u.resolution.y) * 2.0 - 1.0),
@@ -80,6 +94,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
   out.uv = uv;
   out.fg = in.fgColor;
   out.bg = in.bgColor;
+  // Local cell coords (0..1) — used to draw underline / strike bands
+  // without needing a separate pipeline pass.
+  out.cellLocal = in.quadPos;
+  out.flags = in.flags;
   return out;
 }
 
@@ -89,15 +107,57 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   // channel is the coverage mask. Blend the foreground over the
   // background using that mask.
   let coverage = textureSample(atlasTex, atlasSampler, in.uv).a;
-  let rgb = mix(in.bg.rgb, in.fg.rgb, coverage);
-  let alpha = max(in.bg.a, in.fg.a * coverage);
+  var rgb = mix(in.bg.rgb, in.fg.rgb, coverage);
+  var alpha = max(in.bg.a, in.fg.a * coverage);
+
+  // Underline + strikethrough overlays. We paint a thin band in the
+  // foreground color when the corresponding flag is set, drawn over
+  // both the glyph and the background. Skipped for the cursor sprite
+  // (the cursor's own bg is solid; layering a stripe on top would
+  // create a notch).
+  let isCursor = (in.flags & FLAG_CURSOR) != 0u;
+  if (!isCursor) {
+    if ((in.flags & FLAG_UNDERLINE) != 0u) {
+      let v = in.cellLocal.y;
+      if (v > 0.86 && v < 0.95) {
+        rgb = in.fg.rgb;
+        alpha = max(alpha, in.fg.a);
+      }
+    }
+    if ((in.flags & FLAG_STRIKE) != 0u) {
+      let v = in.cellLocal.y;
+      if (v > 0.46 && v < 0.54) {
+        rgb = in.fg.rgb;
+        alpha = max(alpha, in.fg.a);
+      }
+    }
+  }
   return vec4<f32>(rgb, alpha);
 }
 `;
 
-/** Instance attribute layout in floats: cellPos(2) + uv(2) + uvSize(2) + fg(4) + bg(4). */
-const FLOATS_PER_CELL = 14;
-const BYTES_PER_CELL = FLOATS_PER_CELL * 4;
+/**
+ * Instance attribute layout in bytes:
+ *   cellPos      f32x2  (8)
+ *   atlasUV      f32x2  (8)
+ *   atlasSize    f32x2  (8)
+ *   fgColor      f32x4  (16)
+ *   bgColor      f32x4  (16)
+ *   flags        u32    (4)
+ *   padding      u32x3  (12, padding to 72-byte alignment for u32x4 row)
+ *
+ * Total = 72 bytes per instance. The 12-byte tail keeps the next
+ * instance's `cellPos` aligned to the same offset for every slot —
+ * WebGPU is happy as long as `arrayStride` is a multiple of 4 and the
+ * attributes don't straddle a 16-byte boundary in a way the validation
+ * layer rejects. 72 satisfies that without playing alignment games.
+ */
+const BYTES_PER_CELL = 72;
+const U32_PER_CELL = BYTES_PER_CELL / 4;
+
+const FLAG_UNDERLINE = 1;
+const FLAG_STRIKE = 2;
+const FLAG_CURSOR = 4;
 
 export class GridRenderer {
   private device: GPUDevice;
@@ -112,7 +172,9 @@ export class GridRenderer {
   private cssWidth = 0;
   private cssHeight = 0;
   /** Reused scratch buffer to avoid GC on every render. */
-  private scratch = new Float32Array(0);
+  private scratch = new ArrayBuffer(0);
+  private scratchF32 = new Float32Array(0);
+  private scratchU32 = new Uint32Array(0);
   /** Last frame's seq — short-circuits redundant rebuilds. */
   private lastSeq = -1;
 
@@ -126,8 +188,6 @@ export class GridRenderer {
     this.context = context;
     this.atlas = atlas;
 
-    // Unit quad (two triangles), vertex coords in [0,1]. Instanced
-    // per-cell: shader translates and scales by cellSize + cellPos.
     const quadVerts = new Float32Array([
       0, 0, 1, 0, 0, 1,
       1, 0, 1, 1, 0, 1,
@@ -138,9 +198,6 @@ export class GridRenderer {
     });
     device.queue.writeBuffer(this.quadBuffer, 0, quadVerts);
 
-    // Uniform: cellSize(vec2) + resolution(vec2) = 16 bytes; padded
-    // to 32 because vec2<f32> in a uniform block packs to 8 bytes
-    // and WebGPU requires the buffer be a multiple of 16.
     this.uniformBuffer = device.createBuffer({
       size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -201,6 +258,7 @@ export class GridRenderer {
               { shaderLocation: 3, offset: 16, format: "float32x2" },
               { shaderLocation: 4, offset: 24, format: "float32x4" },
               { shaderLocation: 5, offset: 40, format: "float32x4" },
+              { shaderLocation: 6, offset: 56, format: "uint32" },
             ],
           },
         ],
@@ -233,6 +291,10 @@ export class GridRenderer {
       this.draw(0);
       return;
     }
+    // RenderFrame.dirty IS the full grid for the alt-screen / full-pane
+    // case (the backend sends every row in this mode), so `cursor_row`
+    // — a row index into the original grid — is also a valid index
+    // into rows.
     this.render({
       rows: frame.dirty,
       cols: frame.cols,
@@ -240,7 +302,7 @@ export class GridRenderer {
       cursor: {
         row: frame.cursor_row,
         col: frame.cursor_col,
-        visible: !frame.alt_screen || true, // always visible for now
+        visible: true,
       },
     });
   }
@@ -253,13 +315,15 @@ export class GridRenderer {
     let count = 0;
     for (const dr of input.rows) {
       for (const span of dr.spans) {
-        count += span.text.length;
+        // Count by Unicode code-point sequences (we render one cell per
+        // code point; combining marks would ideally cluster, but that's
+        // a future refinement and the cells past the base are blanks
+        // either way since alacritty inlines combining marks into the
+        // base cell's zerowidth list).
+        count += stringLengthInCodepoints(span.text);
       }
     }
 
-    // Cursor takes one extra instance slot. Drawn last so it overlays
-    // any glyph at the cursor position. Block-style cursor: solid
-    // bg, no glyph (atlas size 0).
     const cursor = input.cursor;
     const drawCursor =
       cursor !== null &&
@@ -279,18 +343,23 @@ export class GridRenderer {
     if (totalCount > this.instanceCapacity) {
       this.growInstanceBuffer(totalCount);
     }
-    if (this.scratch.length < totalCount * FLOATS_PER_CELL) {
-      this.scratch = new Float32Array(nextPow2(totalCount * FLOATS_PER_CELL));
+    const neededBytes = totalCount * BYTES_PER_CELL;
+    if (this.scratch.byteLength < neededBytes) {
+      const cap = nextPow2(neededBytes);
+      this.scratch = new ArrayBuffer(cap);
+      this.scratchF32 = new Float32Array(this.scratch);
+      this.scratchU32 = new Uint32Array(this.scratch);
     }
 
-    const data = this.scratch;
-    let ptr = 0;
+    const f32 = this.scratchF32;
+    const u32 = this.scratchU32;
+    let slot = 0;
     for (let r = 0; r < input.rows.length; r++) {
       const dr = input.rows[r];
-      // For the windowed-rows case (inline LiveBlock), display rows
-      // are packed sequentially starting at 0, NOT at dr.row. The
-      // caller decides what they want — using dr.row here would
-      // create gaps when rows aren't contiguous.
+      // Windowed rows render packed top-down regardless of dr.row.
+      // Callers using dr.row as a grid coordinate (alt-screen full
+      // frame) get the same answer because dr.row matches r in that
+      // mode anyway.
       const row = r;
       let col = 0;
       for (const span of dr.spans) {
@@ -305,30 +374,41 @@ export class GridRenderer {
         const bb = span.inverse ? fg[2] : bg[2];
         const ba = span.inverse ? fg[3] : bg[3];
         const dim = span.dim ? 0.6 : 1;
-        for (let i = 0; i < span.text.length; i++) {
-          const cp = span.text.charCodeAt(i);
-          const entry = this.atlas.lookup(cp);
-          data[ptr++] = col;
-          data[ptr++] = row;
+        const style: GlyphStyle = span.bold ? 1 : span.italic ? 2 : 0;
+        let flags = 0;
+        if (span.underline) flags |= FLAG_UNDERLINE;
+        if (span.strikeout) flags |= FLAG_STRIKE;
+        // Walk by grapheme code point so emoji + supplementary-plane
+        // chars get their own cell instead of being split into two
+        // half-cells (which would render as garbled pairs).
+        for (const ch of span.text) {
+          const entry = this.atlas.lookup(ch, style, ch);
+          const offBytes = slot * BYTES_PER_CELL;
+          const offF32 = offBytes / 4;
+          const offU32 = offBytes / 4;
+          f32[offF32 + 0] = col;
+          f32[offF32 + 1] = row;
           if (entry) {
-            data[ptr++] = entry.u;
-            data[ptr++] = entry.v;
-            data[ptr++] = entry.w;
-            data[ptr++] = entry.h;
+            f32[offF32 + 2] = entry.u;
+            f32[offF32 + 3] = entry.v;
+            f32[offF32 + 4] = entry.w;
+            f32[offF32 + 5] = entry.h;
           } else {
-            data[ptr++] = 0;
-            data[ptr++] = 0;
-            data[ptr++] = 0;
-            data[ptr++] = 0;
+            f32[offF32 + 2] = 0;
+            f32[offF32 + 3] = 0;
+            f32[offF32 + 4] = 0;
+            f32[offF32 + 5] = 0;
           }
-          data[ptr++] = fr * dim;
-          data[ptr++] = fgG * dim;
-          data[ptr++] = fb * dim;
-          data[ptr++] = fa;
-          data[ptr++] = br;
-          data[ptr++] = bgG;
-          data[ptr++] = bb;
-          data[ptr++] = ba;
+          f32[offF32 + 6] = fr * dim;
+          f32[offF32 + 7] = fgG * dim;
+          f32[offF32 + 8] = fb * dim;
+          f32[offF32 + 9] = fa;
+          f32[offF32 + 10] = br;
+          f32[offF32 + 11] = bgG;
+          f32[offF32 + 12] = bb;
+          f32[offF32 + 13] = ba;
+          u32[offU32 + 14] = flags;
+          slot++;
           col++;
         }
       }
@@ -336,31 +416,38 @@ export class GridRenderer {
 
     if (drawCursor && cursor) {
       // Block cursor: solid accent fill, no glyph (atlas size = 0).
-      // Drawn last so it overlays whatever's at the cell.
-      data[ptr++] = cursor.col;
-      data[ptr++] = cursor.row;
-      data[ptr++] = 0;
-      data[ptr++] = 0;
-      data[ptr++] = 0;
-      data[ptr++] = 0;
+      // The fragment shader's underline/strike paths are suppressed by
+      // FLAG_CURSOR so a strike-through cell doesn't paint a notch
+      // over the cursor block.
+      const offBytes = slot * BYTES_PER_CELL;
+      const offF32 = offBytes / 4;
+      const offU32 = offBytes / 4;
+      f32[offF32 + 0] = cursor.col;
+      f32[offF32 + 1] = cursor.row;
+      f32[offF32 + 2] = 0;
+      f32[offF32 + 3] = 0;
+      f32[offF32 + 4] = 0;
+      f32[offF32 + 5] = 0;
       // fg unused (no glyph), bg is the cursor color. Soft white-ish
-      // accent — a Phase 4 pass will pull this from CSS variables.
-      data[ptr++] = 0;
-      data[ptr++] = 0;
-      data[ptr++] = 0;
-      data[ptr++] = 0;
-      data[ptr++] = 0.92;
-      data[ptr++] = 0.92;
-      data[ptr++] = 0.92;
-      data[ptr++] = 0.85;
+      // accent — pulling this from a CSS variable is a follow-up.
+      f32[offF32 + 6] = 0;
+      f32[offF32 + 7] = 0;
+      f32[offF32 + 8] = 0;
+      f32[offF32 + 9] = 0;
+      f32[offF32 + 10] = 0.92;
+      f32[offF32 + 11] = 0.92;
+      f32[offF32 + 12] = 0.92;
+      f32[offF32 + 13] = 0.85;
+      u32[offU32 + 14] = FLAG_CURSOR;
+      slot++;
     }
 
     this.device.queue.writeBuffer(
       this.instanceBuffer!,
       0,
-      data.buffer,
-      data.byteOffset,
-      totalCount * BYTES_PER_CELL,
+      this.scratch,
+      0,
+      slot * BYTES_PER_CELL,
     );
 
     const uniforms = new Float32Array([
@@ -375,7 +462,7 @@ export class GridRenderer {
     ]);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
 
-    this.draw(totalCount);
+    this.draw(slot);
   }
 
   destroy(): void {
@@ -417,6 +504,19 @@ export class GridRenderer {
     pass.end();
     this.device.queue.submit([encoder.finish()]);
   }
+}
+
+/**
+ * Count user-perceived characters in a string by iterating code points
+ * (the for..of iterator yields one element per code point, handling
+ * surrogate pairs correctly). Emoji + supplementary-plane chars come
+ * back as one element instead of two.
+ */
+function stringLengthInCodepoints(s: string): number {
+  let n = 0;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  for (const _ of s) n++;
+  return n;
 }
 
 function parseColor(
@@ -493,3 +593,6 @@ export async function createGridRenderer(
   });
   return new GridRenderer(device, context, format, atlas);
 }
+
+// Re-export so call sites can pull `Span` from one place.
+export type { Span };

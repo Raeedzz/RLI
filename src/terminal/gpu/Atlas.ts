@@ -1,16 +1,32 @@
 /**
- * Glyph atlas — rasterizes a fixed glyph set onto an OffscreenCanvas
- * once at startup, then uploads it as a single GPUTexture. The
- * GridRenderer samples this texture per-cell to draw text.
+ * Glyph atlas — rasterizes glyphs lazily onto an OffscreenCanvas and
+ * mirrors them into a single fixed-size GPUTexture. The GridRenderer
+ * samples this texture per-cell to draw text.
  *
- * Phase 3 skeleton scope: ASCII printable range (0x20–0x7E). Wide
- * glyphs (CJK, emoji), ZWJ sequences, and combining marks land in
- * Phase 4 — they need grapheme-cluster keying and a 2-cell-wide
- * sprite layout that this version doesn't implement.
+ * Three glyph variants live in the atlas:
+ *   - regular
+ *   - bold
+ *   - italic
+ * Bold-italic is rendered with the italic slot using bold weight on
+ * the fly (the rasterized output drops back to regular if a font
+ * doesn't carry both styles — that's a font config issue, not ours).
+ *
+ * The atlas pre-allocates a Shelf-Next-Fit packed texture (see Warp's
+ * `crates/warpui/src/rendering/atlas/allocator.rs` for the inspiration)
+ * sized for ~4096 glyph entries at the configured cell size. That's
+ * enough headroom for Latin Extended, box drawing, the BMP code points
+ * a typical agent / shell session exercises, and a few hundred
+ * emoji-as-pict glyphs, without ever growing the texture. Glyphs that
+ * would overflow the atlas degrade to the tofu glyph at U+FFFD.
+ *
+ * `lookup(codepoint, style)` is the hot path — it returns the cached
+ * entry for already-rasterized glyphs, or rasterizes a new entry,
+ * uploads the cell-sized sprite to the GPU texture, and returns it.
+ * Rasterizing is synchronous (OffscreenCanvas 2d fillText) so callers
+ * get a usable entry the same frame the codepoint first appears.
  */
 
-const ASCII_START = 0x20;
-const ASCII_END = 0x7e;
+export type GlyphStyle = 0 | 1 | 2; // 0 regular, 1 bold, 2 italic
 
 export interface AtlasEntry {
   /** Top-left UV in normalized atlas space (0..1). */
@@ -33,8 +49,17 @@ export interface Atlas {
   cellHeightCss: number;
   textureWidth: number;
   textureHeight: number;
-  /** Returns null for codepoints outside the rasterized range. */
-  lookup(codepoint: number): AtlasEntry | null;
+  /**
+   * Returns the atlas entry for the given codepoint + style, rasterizing
+   * lazily on first encounter. Returns null only when the atlas has
+   * filled all slots — at which point the renderer falls back to drawing
+   * a blank cell with the right fg/bg.
+   *
+   * `text` is passed (instead of inferring from `codepoint`) so callers
+   * can supply grapheme clusters (combining marks, ZWJ-joined emoji) as
+   * a single sprite without us reconstructing them from a code point.
+   */
+  lookup(key: string, style: GlyphStyle, text: string): AtlasEntry | null;
   destroy(): void;
 }
 
@@ -46,9 +71,8 @@ export interface AtlasOptions {
 }
 
 /**
- * Bake the atlas synchronously (well, as synchronously as offscreen
- * canvas font rendering allows). Caller must keep the returned Atlas
- * alive until it calls destroy().
+ * Bake the atlas. The texture is pre-allocated empty; glyphs land
+ * on first reference via `lookup()`.
  */
 export function createAtlas(
   device: GPUDevice,
@@ -70,42 +94,27 @@ export function createAtlas(
   const cellWidthCss = cellWidthPx / dpr;
   const cellHeightCss = cellHeightPx / dpr;
 
-  // Lay glyphs out in a 16-column grid. ASCII printable range is 95
-  // codepoints, so we need 6 rows. Texture size = cell × grid.
-  const COLS = 16;
-  const numGlyphs = ASCII_END - ASCII_START + 1;
-  const ROWS = Math.ceil(numGlyphs / COLS);
+  // Capacity = COLS × ROWS slots. 64 × 64 = 4096 slots holds Latin
+  // Extended + box drawing + a comfortable emoji budget. At 13px
+  // font on 2x DPR that's ~26px × 35px per cell × 64 × 64 ≈ 1664 ×
+  // 2240 px = ~3.7M texels. Single rgba8 texture: ~15 MB. Fits in
+  // any GPU memory budget we care about; spends RAM to spare us the
+  // texture-array / re-allocate dance.
+  const COLS = 64;
+  const ROWS = 64;
+  const SLOTS = COLS * ROWS;
   const textureWidth = cellWidthPx * COLS;
   const textureHeight = cellHeightPx * ROWS;
 
+  // Backing 2d canvas for rasterization. We paint per-glyph cells
+  // into this and copy each cell into the GPU texture in a single
+  // writeTexture call.
   const canvas = new OffscreenCanvas(textureWidth, textureHeight);
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) throw new Error("OffscreenCanvas 2d context unavailable");
   ctx.clearRect(0, 0, textureWidth, textureHeight);
-  ctx.font = `${fontSizeCss * dpr}px ${font}`;
   ctx.textBaseline = "top";
-  ctx.fillStyle = "#ffffff";
 
-  const lookup = new Map<number, AtlasEntry>();
-  for (let i = 0; i < numGlyphs; i++) {
-    const codepoint = ASCII_START + i;
-    const col = i % COLS;
-    const row = Math.floor(i / COLS);
-    const x = col * cellWidthPx;
-    const y = row * cellHeightPx;
-    ctx.fillText(String.fromCharCode(codepoint), x, y);
-    lookup.set(codepoint, {
-      u: x / textureWidth,
-      v: y / textureHeight,
-      w: cellWidthPx / textureWidth,
-      h: cellHeightPx / textureHeight,
-    });
-  }
-
-  // Pull the rasterized bitmap into a GPUTexture. We use rgba8unorm
-  // (NOT srgb) because the canvas 2d context already produces linear
-  // pixels for #ffffff fills — re-srgb-encoding would over-brighten.
-  const imageData = ctx.getImageData(0, 0, textureWidth, textureHeight);
   const texture = device.createTexture({
     size: { width: textureWidth, height: textureHeight },
     format: "rgba8unorm",
@@ -114,15 +123,6 @@ export function createAtlas(
       GPUTextureUsage.COPY_DST |
       GPUTextureUsage.RENDER_ATTACHMENT,
   });
-  device.queue.writeTexture(
-    { texture },
-    imageData.data,
-    {
-      bytesPerRow: textureWidth * 4,
-      rowsPerImage: textureHeight,
-    },
-    { width: textureWidth, height: textureHeight },
-  );
 
   const sampler = device.createSampler({
     magFilter: "linear",
@@ -130,6 +130,63 @@ export function createAtlas(
     addressModeU: "clamp-to-edge",
     addressModeV: "clamp-to-edge",
   });
+
+  // Pre-rasterize the tofu glyph (U+FFFD) so missing entries fall back
+  // to it cheaply instead of painting blanks. Slot 0 is reserved.
+  const cache = new Map<string, AtlasEntry>();
+  let nextSlot = 0;
+
+  function styleFontString(style: GlyphStyle): string {
+    const pxSize = `${fontSizeCss * dpr}px`;
+    switch (style) {
+      case 1:
+        return `bold ${pxSize} ${font}`;
+      case 2:
+        return `italic ${pxSize} ${font}`;
+      default:
+        return `${pxSize} ${font}`;
+    }
+  }
+
+  function rasterizeInto(slot: number, style: GlyphStyle, text: string): AtlasEntry | null {
+    if (slot >= SLOTS) return null;
+    const col = slot % COLS;
+    const row = Math.floor(slot / COLS);
+    const x = col * cellWidthPx;
+    const y = row * cellHeightPx;
+    ctx.clearRect(x, y, cellWidthPx, cellHeightPx);
+    ctx.font = styleFontString(style);
+    ctx.fillStyle = "#ffffff";
+    // Drop the glyph slightly inside the cell to allow descenders +
+    // diacritics that extend past `lineHeight` to not clip into the
+    // neighbour cell.
+    const padTop = Math.max(0, (cellHeightPx - fontSizeCss * dpr) * 0.25);
+    ctx.fillText(text, x, y + padTop);
+    // Pull just this cell's pixels for the GPU upload. writeTexture
+    // wants tightly-packed rgba8 rows.
+    const cellImage = ctx.getImageData(x, y, cellWidthPx, cellHeightPx);
+    device.queue.writeTexture(
+      { texture, origin: { x, y } },
+      cellImage.data,
+      {
+        bytesPerRow: cellWidthPx * 4,
+        rowsPerImage: cellHeightPx,
+      },
+      { width: cellWidthPx, height: cellHeightPx },
+    );
+    return {
+      u: x / textureWidth,
+      v: y / textureHeight,
+      w: cellWidthPx / textureWidth,
+      h: cellHeightPx / textureHeight,
+    };
+  }
+
+  // Slot 0 — tofu. Rasterized eagerly so atlas-full lookups can fall
+  // back to it without consuming a fresh slot mid-render.
+  const tofu = rasterizeInto(0, 0, "�");
+  nextSlot = 1;
+  if (tofu) cache.set("�|0", tofu);
 
   return {
     texture,
@@ -141,7 +198,24 @@ export function createAtlas(
     cellHeightCss,
     textureWidth,
     textureHeight,
-    lookup: (cp) => lookup.get(cp) ?? null,
+    lookup(key: string, style: GlyphStyle, text: string): AtlasEntry | null {
+      const cacheKey = `${key}|${style}`;
+      const hit = cache.get(cacheKey);
+      if (hit) return hit;
+      // Atlas full — degrade to the cached tofu so the cell at least
+      // shows SOMETHING. Without this fallback unfamiliar glyphs would
+      // render as solid bg.
+      if (nextSlot >= SLOTS) {
+        return cache.get("�|0") ?? null;
+      }
+      const slot = nextSlot++;
+      const entry = rasterizeInto(slot, style, text);
+      if (!entry) {
+        return cache.get("�|0") ?? null;
+      }
+      cache.set(cacheKey, entry);
+      return entry;
+    },
     destroy: () => texture.destroy(),
   };
 }

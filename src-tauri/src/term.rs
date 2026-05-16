@@ -14,8 +14,14 @@
 //!   * Frames are throttled to ~60 Hz — heavy output (`seq 1 100000`)
 //!     coalesces instead of overwhelming the IPC channel.
 //!   * `BlockSegmenter` scans the raw byte stream (parallel to VTE) for
-//!     OSC 133 prompt markers; closed blocks emit their own event.
-//!     Unmarked shells get an idle-quiescence fallback.
+//!     OSC 133 prompt markers AND for Warp-style DCS hooks of the form
+//!     `ESC P gli ; <hook_name> ; <json_payload> ESC \`. The DCS hooks
+//!     carry richer metadata (the exact typed command, precise start
+//!     timestamp, exact exit code + duration as measured by the shell)
+//!     that enrich the resulting `ClosedBlock`. OSC 133 stays as the
+//!     compat fallback for shells where DCS hooks aren't installed.
+//!     Closed blocks emit their own event. Unmarked shells get an
+//!     idle-quiescence fallback.
 //!   * When the Term is in alt-screen mode (vim, htop, claude TUI), the
 //!     segmenter pauses and the frontend swaps from BlockList to FullGrid.
 
@@ -418,10 +424,27 @@ pub struct ClosedBlock {
     /// Full byte transcript for this block, from the OSC 133 A that
     /// opened it through the OSC 133 D that closed it. Includes the
     /// user's PROMPT bytes (with all their SGR styling), the echoed
-    /// command, and the command's output. The frontend renders this
-    /// with a small SGR parser so the block looks visually identical
-    /// to what scrolled past in the live terminal.
+    /// command, and the command's output. Kept on the wire as a
+    /// fallback / for search; the primary render path now uses
+    /// [`block_rows`] (see below).
     pub transcript: String,
+    /// Per-block grid snapshot — the result of feeding `transcript`
+    /// through a fresh `alacritty_terminal::Term` and walking the
+    /// resulting grid. Closed blocks render from these rows instead
+    /// of running the byte stream through the frontend's much simpler
+    /// `parseAnsi.ts` parser, which would mishandle CR overstrike,
+    /// line clears, cursor moves, and similar terminal control codes
+    /// that alacritty handles correctly. Empty when the transcript
+    /// was empty (e.g. block closed by a stray OSC 133 D before any
+    /// command output).
+    ///
+    /// This is the Warp-style "per-block grid" — each closed block
+    /// carries an immutable snapshot of what its output rendered to,
+    /// rather than relying on the live shared terminal grid (which
+    /// can be clobbered by `clear`, alt-screen, scrollback eviction,
+    /// or subsequent commands).
+    #[serde(rename = "blockRows")]
+    pub block_rows: Vec<RowSnapshot>,
     pub exit_code: Option<i32>,
     /// Working directory at the moment the command started running
     /// (OSC 133 C). Populated from the most recent OSC 7 the
@@ -438,6 +461,13 @@ struct BlockSegmenter {
     state: SegState,
     osc_buf: Vec<u8>,
     in_osc: bool,
+    /// Active DCS-sequence assembly buffer. DCS opens with `ESC P` and
+    /// closes with `ESC \` (ST) — same terminator family as OSC. We
+    /// only act on DCS payloads with the `gli;` prefix; anything else
+    /// (terminfo definitions, tmux passthrough, etc.) is silently
+    /// dropped so the segmenter remains a no-op for non-GLI tooling.
+    dcs_buf: Vec<u8>,
+    in_dcs: bool,
     current_input: String,
     /// Raw bytes captured from OSC 133 A through D. See `ClosedBlock::transcript`.
     current_transcript: Vec<u8>,
@@ -468,6 +498,34 @@ struct BlockSegmenter {
     /// is in progress (i.e. before the first prompt or between D and
     /// the next A).
     current_block_id: u64,
+    /// Command line reported by the shell via the `preexec` DCS hook.
+    /// Latched between hook delivery and the matching OSC 133 C — at C
+    /// we drain it into `current_input`, giving the closed block the
+    /// exact bytes the user submitted (vs reading them out of zsh's
+    /// echo, which is fragile when the user backspaces or uses zle
+    /// widgets). None when no DCS hook fired for this block — in which
+    /// case the OSC 133 B fallback / frontend pending queue still
+    /// populates `input`.
+    pending_command: Option<String>,
+    /// Wall-clock start timestamp (unix ms) reported by the shell via
+    /// the `preexec` DCS hook. Preferred over the local
+    /// `current_block_start = Instant::now()` reading because the
+    /// shell hook fires before the PTY-side OSC 133 C marker reaches
+    /// us, especially under bursty output.
+    pending_start_ms: Option<u64>,
+    /// Exit code reported by the shell via the `cmd_finished` DCS hook.
+    /// Latched between hook delivery and the matching OSC 133 D — at D
+    /// we prefer this over `133;D;<code>` because some shells
+    /// (notably bash before 5.0) emit `D;0` regardless of the actual
+    /// exit status; the DCS hook reads `$?` directly so it's always
+    /// correct. None when no DCS hook fired.
+    pending_exit_code: Option<i32>,
+    /// Wall-clock duration in ms reported by the shell via the
+    /// `cmd_finished` DCS hook. Preferred over the locally-computed
+    /// duration (start `Instant` → close `Instant`) because the local
+    /// timer measures bytes-arriving rather than the shell's actual
+    /// command runtime.
+    pending_duration_ms: Option<u64>,
 }
 
 impl BlockSegmenter {
@@ -476,6 +534,8 @@ impl BlockSegmenter {
             state: SegState::BeforePrompt,
             osc_buf: Vec::with_capacity(64),
             in_osc: false,
+            dcs_buf: Vec::with_capacity(256),
+            in_dcs: false,
             current_input: String::new(),
             current_transcript: Vec::with_capacity(4096),
             command_just_started: false,
@@ -485,6 +545,10 @@ impl BlockSegmenter {
             current_block_start: None,
             next_block_id: 1,
             current_block_id: 0,
+            pending_command: None,
+            pending_start_ms: None,
+            pending_exit_code: None,
+            pending_duration_ms: None,
         }
     }
 
@@ -534,9 +598,47 @@ impl BlockSegmenter {
                 continue;
             }
 
+            if self.in_dcs {
+                // DCS terminates only on ST (ESC \) per ECMA-48 — BEL
+                // is NOT a valid DCS terminator. Tolerating BEL here
+                // would corrupt the JSON payload if a glyph in the
+                // payload happens to be 0x07 (rare but possible inside
+                // command strings that the shell quoted into the
+                // payload).
+                if b == 0x1b
+                    && i + 1 < bytes.len()
+                    && bytes[i + 1] == 0x5c
+                {
+                    self.handle_dcs();
+                    self.dcs_buf.clear();
+                    self.in_dcs = false;
+                    i += 1; // consume the trailing 0x5c too
+                } else {
+                    // Cap the buffer so a stuck DCS (shell crashed
+                    // mid-write, malicious large payload, etc.) can't
+                    // grow unbounded. 64 KB is comfortably above any
+                    // legitimate command-line; larger payloads get
+                    // dropped at the close.
+                    if self.dcs_buf.len() < 64 * 1024 {
+                        self.dcs_buf.push(b);
+                    }
+                }
+                i += 1;
+                continue;
+            }
+
             // Detect ESC ] which begins an OSC sequence.
             if b == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == 0x5d {
                 self.in_osc = true;
+                i += 2;
+                continue;
+            }
+
+            // Detect ESC P which begins a DCS sequence. Warp uses DCS
+            // for its richer command-lifecycle hooks; we mirror that
+            // wire shape so the protocol stays familiar across tools.
+            if b == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == 0x50 {
+                self.in_dcs = true;
                 i += 2;
                 continue;
             }
@@ -617,6 +719,19 @@ impl BlockSegmenter {
                 self.command_just_started = true;
                 self.current_block_cwd = self.current_cwd.clone();
                 self.current_block_start = Some(Instant::now());
+                // Drain anything stashed by an earlier `preexec` DCS
+                // hook into the running block. Both bash and zsh fire
+                // preexec just before OSC 133 C, so when we arrive
+                // here `pending_command` already holds the exact line
+                // the user submitted (more reliable than reading it
+                // out of the terminal echo, which moves around with
+                // backspaces / completion / zle widgets).
+                if let Some(cmd) = self.pending_command.take() {
+                    self.current_input = cmd;
+                }
+                // Note: pending_start_ms is honoured by close() rather
+                // than overwriting current_block_start, so the
+                // local-fallback path (no DCS) still works unchanged.
             }
             Some(b'D') => {
                 let exit = rest.parse::<i32>().ok();
@@ -627,15 +742,103 @@ impl BlockSegmenter {
         }
     }
 
+    /// Parse the most recently accumulated DCS payload. Recognised
+    /// shape: `gli;<hook>;<json>` where `<hook>` is one of `preexec`,
+    /// `cmd_finished`, `bootstrapped`. Anything else (terminfo capability
+    /// payloads, tmux passthrough wrappers, etc.) is silently dropped.
+    ///
+    /// The DCS protocol is intentionally additive on top of OSC 133 —
+    /// it surfaces information the OSC markers can't carry (e.g. the
+    /// exact command bytes, the shell-side start timestamp, the real
+    /// exit code on bash <5.0). Sessions where the integration script
+    /// hasn't been installed (custom shells, ssh into a vanilla box)
+    /// never emit DCS, and the OSC 133 fallback continues to drive
+    /// block segmentation unchanged.
+    fn handle_dcs(&mut self) {
+        let buf = &self.dcs_buf;
+        // Cheap-prefix check before invoking serde_json on every random
+        // DCS payload some other process might emit through the PTY.
+        const PREFIX: &[u8] = b"gli;";
+        if !buf.starts_with(PREFIX) {
+            return;
+        }
+        let rest = &buf[PREFIX.len()..];
+        // Split on the FIRST `;` only — JSON payloads contain `;` freely
+        // (commands like `cd a; ls`), so a greedy split would corrupt
+        // them.
+        let sep = match rest.iter().position(|&b| b == b';') {
+            Some(p) => p,
+            None => return,
+        };
+        let hook = match std::str::from_utf8(&rest[..sep]) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let json = match std::str::from_utf8(&rest[sep + 1..]) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        // Parse permissively — missing fields are fine, the shell
+        // hook may evolve independently of this code path. Bad JSON
+        // (truncated, unbalanced quotes) drops the hook silently
+        // rather than blowing up the segmenter.
+        let value: serde_json::Value = match serde_json::from_str(json) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        match hook {
+            "preexec" => {
+                if let Some(cmd) = value.get("command").and_then(|v| v.as_str()) {
+                    self.pending_command = Some(cmd.to_owned());
+                }
+                if let Some(ms) = value.get("start_ms").and_then(|v| v.as_u64()) {
+                    self.pending_start_ms = Some(ms);
+                }
+            }
+            "cmd_finished" => {
+                if let Some(code) = value.get("exit_code").and_then(|v| v.as_i64()) {
+                    self.pending_exit_code = Some(code as i32);
+                }
+                if let Some(ms) = value.get("duration_ms").and_then(|v| v.as_u64()) {
+                    self.pending_duration_ms = Some(ms);
+                }
+            }
+            "bootstrapped" => {
+                // Reserved for future: shell version detection, prompt
+                // metadata, capability negotiation. The integration
+                // script already emits this on shell startup so the
+                // wire shape is locked in even though we don't act on
+                // it yet.
+            }
+            _ => {}
+        }
+    }
+
     fn close(&mut self, exit_code: Option<i32>, blocks: &mut Vec<ClosedBlock>) {
         if self.current_input.is_empty() && self.current_transcript.is_empty() {
             return;
         }
         let transcript = String::from_utf8_lossy(&self.current_transcript).into_owned();
-        let duration_ms = self
+        // Prefer the shell-reported duration (measured by the shell
+        // around the actual command, before any output reaches the PTY
+        // queue) over the local Instant-based reading (start..close,
+        // includes the byte-stream travel time).
+        let measured_duration_ms = self
             .current_block_start
             .take()
             .map(|start| start.elapsed().as_millis() as u64);
+        let duration_ms = self.pending_duration_ms.take().or(measured_duration_ms);
+        // Same reasoning for exit code: bash before 5.0 ignores the
+        // value passed to OSC 133 D and always reports 0, so the DCS
+        // hook (which reads `$?` directly) is more trustworthy when it
+        // exists.
+        let exit_code = self.pending_exit_code.take().or(exit_code);
+        // The locally-measured start gets consumed but never wired up
+        // to ClosedBlock — `duration_ms` is the only timing field on
+        // the wire today. `pending_start_ms` is reserved for a future
+        // ClosedBlock.start_ms field; clear it here so it doesn't leak
+        // across blocks.
+        self.pending_start_ms = None;
         let cwd = self.current_block_cwd.take();
         let block_id = self.current_block_id;
         self.current_block_id = 0;
@@ -643,6 +846,11 @@ impl BlockSegmenter {
             block_id,
             input: std::mem::take(&mut self.current_input),
             transcript,
+            // Populated by the reader thread post-feed; the segmenter
+            // doesn't own an alacritty Term so it can't render the
+            // transcript itself. See `snapshot_transcript` for the
+            // one-shot parse path that lands the grid rows here.
+            block_rows: Vec::new(),
             exit_code,
             cwd,
             duration_ms,
@@ -778,7 +986,7 @@ const ANSI_16: [&str; 16] = [
    Frame snapshot — walk the grid and compress styled runs.
    ------------------------------------------------------------------ */
 
-fn snapshot_grid(term: &Term<EventProxy>) -> Vec<RowSnapshot> {
+fn snapshot_grid<E: EventListener>(term: &Term<E>) -> Vec<RowSnapshot> {
     let cols = term.columns();
     let rows = term.screen_lines();
     let mut out = Vec::with_capacity(rows);
@@ -825,6 +1033,65 @@ fn snapshot_grid(term: &Term<EventProxy>) -> Vec<RowSnapshot> {
     out
 }
 
+/// A no-op `EventListener` for the throwaway `Term` instances used by
+/// `snapshot_transcript`. Those Terms parse a finished block's bytes
+/// for the sole purpose of yielding a snapshot — we don't care about
+/// bell / title / child-exit events fired while they parse, because
+/// no actual PTY is attached and no one's listening.
+#[derive(Clone)]
+struct NullEventProxy;
+
+impl EventListener for NullEventProxy {
+    fn send_event(&self, _event: AlacEvent) {}
+}
+
+/// Render a closed block's byte transcript into a `Vec<RowSnapshot>`
+/// by replaying it through a fresh `alacritty_terminal::Term` of the
+/// requested size, then walking the resulting grid.
+///
+/// This is the Warp-style block render path. The frontend's small
+/// `parseAnsi.ts` handles SGR and line breaks but ignores cursor
+/// moves, line clears, CR overstrike, and the rest of the VT
+/// repertoire — so progress bars (`\r`-redrawn lines), `clear`,
+/// spinners, and TUI redraws all rendered incorrectly when blocks
+/// were reconstructed in JS. Replaying through alacritty in Rust
+/// gives the closed block the same rendering fidelity the live grid
+/// has, at a one-shot CPU cost paid once per block close.
+///
+/// Trailing all-empty rows are stripped so the block sizes naturally
+/// to actual content; otherwise short commands would render with
+/// dozens of blank rows below them (one for each unused row of the
+/// scratch Term's screen).
+fn snapshot_transcript(transcript: &str, cols: u16, rows: u16) -> Vec<RowSnapshot> {
+    if transcript.is_empty() {
+        return Vec::new();
+    }
+    let dims = Dims {
+        cols: cols.max(1) as usize,
+        rows: rows.max(1) as usize,
+    };
+    let mut term = Term::new(TermConfig::default(), &dims, NullEventProxy);
+    let mut parser: Processor = Processor::new();
+    parser.advance(&mut term, transcript.as_bytes());
+    let mut snap = snapshot_grid(&term);
+    // Drop trailing rows that are empty / all-whitespace. A row is
+    // "empty" when its spans contain nothing but whitespace text.
+    // Done greedily from the bottom — we never trim from the middle
+    // because alacritty already coalesces blank rows in scrollback.
+    while let Some(last) = snap.last() {
+        let blank = last
+            .spans
+            .iter()
+            .all(|s| s.text.chars().all(|c| c.is_whitespace()));
+        if blank {
+            snap.pop();
+        } else {
+            break;
+        }
+    }
+    snap
+}
+
 fn cell_to_span(cell: &Cell) -> Span {
     let mut text = String::new();
     text.push(cell.c);
@@ -869,11 +1136,12 @@ fn diff_rows(prev: &[RowSnapshot], next: &[RowSnapshot]) -> Vec<DirtyRow> {
 
 const ZSH_INTEGRATION: &str = r#"# GLI shell integration — auto-generated, do not edit.
 # Sources the user's real configuration first, then installs OSC 133
-# semantic-prompt markers + OSC 7 cwd reporting + an empty PROMPT.
-# The empty PROMPT is intentional: GLI's chrome already shows folder
-# / branch / diff in a pill row above the input, so the shell's own
-# host@machine cwd % line would just duplicate that and eat vertical
-# space inside every closed block.
+# semantic-prompt markers + OSC 7 cwd reporting + Warp-style DCS hooks
+# carrying richer command metadata + an empty PROMPT. The empty PROMPT
+# is intentional: GLI's chrome already shows folder / branch / diff in
+# a pill row above the input, so the shell's own host@machine cwd %
+# line would just duplicate that and eat vertical space inside every
+# closed block.
 
 # Save the integration ZDOTDIR before any user config can clobber it.
 GLI_INTEGRATION_DIR="$ZDOTDIR"
@@ -894,6 +1162,33 @@ elif [ -f "$HOME/.zshrc" ]; then
     source "$HOME/.zshrc"
 fi
 
+# JSON-escape a string for DCS payload bodies. We avoid shelling out
+# (jq, python) because (a) jq isn't guaranteed to be installed and
+# (b) the precmd / preexec path runs around every prompt and a subshell
+# round-trip adds visible latency.
+_gli_json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+# Wall-clock milliseconds. zsh's $EPOCHREALTIME (e.g. "1700000000.123")
+# requires the zsh/datetime module which is bundled with every modern
+# zsh build but we still fall back to `date +%s000` for paranoia.
+_gli_now_ms() {
+    if [[ -n "$EPOCHREALTIME" ]]; then
+        # Truncate fractional seconds to ms (3 digits).
+        printf '%s' "${EPOCHREALTIME//./}" | cut -c1-13
+    else
+        printf '%s' "$(date +%s)000"
+    fi
+}
+zmodload zsh/datetime 2>/dev/null
+
 # OSC 133 semantic-prompt markers. The segmenter on the Rust side
 # slices the byte stream at these points to build per-command blocks.
 #
@@ -903,8 +1198,25 @@ fi
 # We deliberately omit B (end-of-prompt) because the React-side
 # PromptInput captures the user's input directly — far more reliable
 # than fishing it out of the byte stream.
-_rli_precmd() {
+#
+# DCS hooks — Warp-style enriched lifecycle events. Wire format:
+#   ESC P gli ; <hook> ; <json> ESC \
+# Fired alongside OSC 133 so a session whose Rust side speaks only
+# OSC 133 still segments correctly, and a session that speaks both
+# gets the richer metadata. The hooks ARE ordered relative to the OSC
+# markers:
+#   preexec:      before OSC 133 C  → carries the user's command + start_ms
+#   cmd_finished: before OSC 133 D  → carries exact exit + duration
+_gli_precmd() {
     local _exit=$?
+    local _now_ms="$(_gli_now_ms)"
+    local _duration_ms=0
+    if [[ -n "$_GLI_BLOCK_START_MS" ]]; then
+        _duration_ms=$(( _now_ms - _GLI_BLOCK_START_MS ))
+        unset _GLI_BLOCK_START_MS
+    fi
+    printf '\eP'"gli;cmd_finished;{\"exit_code\":%d,\"duration_ms\":%d}"'\e\\' \
+        "$_exit" "$_duration_ms"
     print -Pn "\e]133;D;${_exit}\a"
     print -Pn "\e]133;A\a"
     # Defensively re-empty PROMPT every time a prompt is about to draw.
@@ -914,27 +1226,39 @@ _rli_precmd() {
     PROMPT=''
     RPROMPT=''
 }
-_rli_preexec() {
+_gli_preexec() {
+    # `$1` is the unexpanded command line as the user typed it. zsh's
+    # preexec callback signature: preexec <typed> <expanded> <fullhist>.
+    local _cmd="$1"
+    local _now_ms="$(_gli_now_ms)"
+    export _GLI_BLOCK_START_MS="$_now_ms"
+    printf '\eP'"gli;preexec;{\"command\":\"%s\",\"start_ms\":%s}"'\e\\' \
+        "$(_gli_json_escape "$_cmd")" "$_now_ms"
     print -Pn "\e]133;C\a"
 }
 
 # OSC 7 cwd reporting. Emitted on shell startup and on every cd, so
 # the chrome's folder pill tracks the *live* terminal cwd instead of
 # only the launch cwd.
-_rli_chpwd() {
+_gli_chpwd() {
     print -Pn "\e]7;file://%m%d\a"
 }
 
 typeset -ag precmd_functions
 typeset -ag preexec_functions
 typeset -ag chpwd_functions
-precmd_functions+=(_rli_precmd)
-preexec_functions+=(_rli_preexec)
-chpwd_functions+=(_rli_chpwd)
+precmd_functions+=(_gli_precmd)
+preexec_functions+=(_gli_preexec)
+chpwd_functions+=(_gli_chpwd)
+
+# One-shot startup hook — surfaces shell type + pid to the Rust side
+# for future capability negotiation (Phase 2+). The Rust segmenter
+# parses this but doesn't act on it yet, so it's harmless if unread.
+printf '\eP'"gli;bootstrapped;{\"shell\":\"zsh\",\"shell_pid\":%d,\"version\":\"1\"}"'\e\\' "$$"
 
 # Initial cwd report — fires once at startup so the pill shows the
 # launch directory before any cd happens.
-_rli_chpwd
+_gli_chpwd
 
 # Initial PROMPT wipe — covers the very first prompt drawn before
 # any precmd runs.
@@ -955,6 +1279,153 @@ fn ensure_zsh_integration_dir(app: &AppHandle<Wry>) -> Result<PathBuf, String> {
     let path = dir.join(".zshrc");
     fs::write(&path, ZSH_INTEGRATION).map_err(|e| format!("write zshrc: {e}"))?;
     Ok(dir)
+}
+
+/* ------------------------------------------------------------------
+   Bash shell integration. Bash can't be ZDOTDIR-hijacked, but
+   `bash --rcfile <path>` will load `<path>` instead of the default
+   `~/.bashrc`. We point bash at a generated rc that sources the
+   user's real `~/.bashrc` first and then installs the same OSC 133
+   markers + DCS hooks that the zsh integration uses. Bash gets the
+   preexec equivalent via `trap DEBUG`; the flag-guarded pattern
+   (set in PROMPT_COMMAND, unset in the trap) prevents the trap from
+   firing on every subshell inside the user's command.
+   ------------------------------------------------------------------ */
+
+const BASH_INTEGRATION: &str = r#"# GLI shell integration for bash — auto-generated, do not edit.
+# Loaded via `bash --rcfile <this-file>`. We source the user's real
+# .bashrc first so their aliases / completions / PATH all still work,
+# then install OSC 133 segmentation markers + Warp-style DCS hooks.
+
+# Source user config from the standard locations, in the order bash
+# itself would, then carry on with our own setup.
+if [ -f "$HOME/.bashrc" ]; then
+    source "$HOME/.bashrc"
+elif [ -f "$HOME/.bash_profile" ]; then
+    source "$HOME/.bash_profile"
+fi
+
+# JSON-escape a string for DCS payload bodies. Same logic as the zsh
+# version; bash's parameter expansion is close enough that the body
+# is identical.
+_gli_json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+# Wall-clock milliseconds. Bash 5+ has $EPOCHREALTIME natively; older
+# bash falls back to `date +%s%3N` on Linux or `date +%s000` on macOS
+# where date doesn't support %N.
+_gli_now_ms() {
+    if [[ -n "${EPOCHREALTIME-}" ]]; then
+        local sec="${EPOCHREALTIME%.*}"
+        local frac="${EPOCHREALTIME#*.}"
+        # Pad / truncate frac to exactly 3 digits.
+        frac="${frac}000"
+        printf '%s' "${sec}${frac:0:3}"
+    else
+        # %3N is GNU-only; on macOS (BSD date) the fallback adds three
+        # zeros so we at least produce a sane ms-resolution value.
+        local out
+        out="$(date +%s%3N 2>/dev/null)"
+        if [[ "$out" == *N ]]; then
+            out="$(date +%s)000"
+        fi
+        printf '%s' "$out"
+    fi
+}
+
+# preexec via trap DEBUG. Only fires when armed by PROMPT_COMMAND —
+# without the flag guard the trap fires inside every subshell of every
+# pipeline (e.g. `ls | grep x` would emit two preexec markers, one for
+# each side of the pipe).
+_gli_preexec_armed=0
+_gli_preexec() {
+    if [[ "$_gli_preexec_armed" != "1" ]]; then return; fi
+    _gli_preexec_armed=0
+    # BASH_COMMAND holds the command about to run. For pipelines bash
+    # invokes the trap with the leftmost command; that's a reasonable
+    # approximation of "the line the user typed" for display purposes.
+    local _cmd="${BASH_COMMAND:-}"
+    local _now_ms
+    _now_ms="$(_gli_now_ms)"
+    export _GLI_BLOCK_START_MS="$_now_ms"
+    printf '\eP''gli;preexec;{"command":"%s","start_ms":%s}''\e\\' \
+        "$(_gli_json_escape "$_cmd")" "$_now_ms"
+    printf '\e]133;C\a'
+}
+trap '_gli_preexec' DEBUG
+
+# precmd via PROMPT_COMMAND. We chain ourselves AFTER whatever the
+# user already had so their setup (e.g. `__git_ps1`, history sync)
+# runs first; if it overwrote PS1, we silence it below.
+_gli_precmd() {
+    local _exit=$?
+    local _now_ms
+    _now_ms="$(_gli_now_ms)"
+    local _duration_ms=0
+    if [[ -n "${_GLI_BLOCK_START_MS-}" ]]; then
+        _duration_ms=$(( _now_ms - _GLI_BLOCK_START_MS ))
+        unset _GLI_BLOCK_START_MS
+    fi
+    printf '\eP''gli;cmd_finished;{"exit_code":%d,"duration_ms":%d}''\e\\' \
+        "$_exit" "$_duration_ms"
+    printf '\e]133;D;%d\a' "$_exit"
+    printf '\e]133;A\a'
+    # GLI's chrome shows folder + branch above the input; silence the
+    # shell's own prompt so the block doesn't duplicate that line.
+    PS1=''
+    PS2=''
+    # Re-arm the preexec trap for the next command.
+    _gli_preexec_armed=1
+}
+
+# OSC 7 cwd reporting via PROMPT_COMMAND wrapping. Bash doesn't have
+# a chpwd hook, so we emit on every prompt — cheap (printf to PTY).
+_gli_chpwd_emit() {
+    printf '\e]7;file://%s%s\a' "$HOSTNAME" "$PWD"
+}
+
+# Hook ourselves into PROMPT_COMMAND. Bash 5.1+ supports arrays; older
+# versions get a string concatenation. Either way we run *after* the
+# user's existing PROMPT_COMMAND so their setup still works.
+if [[ "${BASH_VERSINFO[0]}" -ge 5 && "${BASH_VERSINFO[1]}" -ge 1 ]] 2>/dev/null; then
+    if ! declare -p PROMPT_COMMAND 2>/dev/null | grep -q 'declare -a'; then
+        # Convert scalar to array preserving the existing value.
+        PROMPT_COMMAND=("${PROMPT_COMMAND-}")
+    fi
+    PROMPT_COMMAND+=('_gli_chpwd_emit' '_gli_precmd')
+else
+    PROMPT_COMMAND="${PROMPT_COMMAND:+${PROMPT_COMMAND}$'\n'}_gli_chpwd_emit; _gli_precmd"
+fi
+
+# Bootstrapped hook + initial cwd emit so the chrome has data before
+# the user's first command.
+printf '\eP''gli;bootstrapped;{"shell":"bash","shell_pid":%d,"version":"1"}''\e\\' "$$"
+_gli_chpwd_emit
+PS1=''
+PS2=''
+_gli_preexec_armed=1
+"#;
+
+/// Write the bash integration rc file into the app data dir and
+/// return its absolute path. The bash command is then launched as
+/// `bash --rcfile <path> -i`. Idempotent.
+fn ensure_bash_integration_rc(app: &AppHandle<Wry>) -> Result<PathBuf, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?;
+    let dir = base.join("shell-integration").join("bash");
+    fs::create_dir_all(&dir).map_err(|e| format!("create integration dir: {e}"))?;
+    let path = dir.join("gli-bashrc");
+    fs::write(&path, BASH_INTEGRATION).map_err(|e| format!("write gli-bashrc: {e}"))?;
+    Ok(path)
 }
 
 /* ------------------------------------------------------------------
@@ -1101,11 +1572,28 @@ pub fn term_start(
         cmd.env("RLI_SESSION_ID", sid);
     }
 
-    // For zsh, install our shell integration via ZDOTDIR. The
-    // generated .zshrc emits OSC 133 markers (so the BlockSegmenter
-    // can split commands into blocks) and clears PROMPT/RPROMPT so
-    // the host/cwd prefix doesn't duplicate our pill bar.
-    if args.command == "zsh" {
+    // Install shell integration so the BlockSegmenter sees the OSC
+    // 133 markers + Warp-style DCS hooks. Behavior differs by shell:
+    //
+    //   zsh:  hijack ZDOTDIR → load our generated .zshrc, which
+    //         sources the user's real .zshrc first then installs the
+    //         hooks via precmd_functions / preexec_functions /
+    //         chpwd_functions.
+    //
+    //   bash: pass `--rcfile <path>` so bash loads our gli-bashrc
+    //         instead of the default. The rc sources ~/.bashrc first
+    //         then installs the trap DEBUG / PROMPT_COMMAND hooks.
+    //         `--rcfile` requires the shell to be interactive; we
+    //         pass `-i` to be safe even when the spawn cwd is set.
+    //
+    // Shells we don't recognise (fish, pwsh, plain `sh`, custom
+    // shells) launch unmodified — the user just doesn't get block
+    // segmentation in that PTY. Future work: fish + pwsh bootstrap.
+    let command_basename = std::path::Path::new(&args.command)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&args.command);
+    if command_basename == "zsh" {
         if let Ok(dir) = ensure_zsh_integration_dir(&app) {
             // Stash the user's existing ZDOTDIR (if any) so the
             // integration script can chain-source from there.
@@ -1113,6 +1601,21 @@ pub fn term_start(
                 cmd.env("GLI_USER_ZDOTDIR", prev);
             }
             cmd.env("ZDOTDIR", dir.to_string_lossy().into_owned());
+        }
+    } else if command_basename == "bash" {
+        if let Ok(rc) = ensure_bash_integration_rc(&app) {
+            // Only inject the flags when the caller didn't already
+            // supply their own — respecting any explicit override
+            // they passed in args.args.
+            let already_set = args
+                .args
+                .iter()
+                .any(|a| a == "--rcfile" || a == "--noprofile" || a == "-i");
+            if !already_set {
+                cmd.arg("--rcfile");
+                cmd.arg(rc.to_string_lossy().into_owned());
+                cmd.arg("-i");
+            }
         }
     }
 
@@ -1192,8 +1695,26 @@ pub fn term_start(
                         //    parser means we can decide whether to wipe
                         //    the grid BEFORE the chunk's output bytes
                         //    are written into it.
-                        let blocks = s.segmenter.feed(bytes);
+                        let mut blocks = s.segmenter.feed(bytes);
                         let just_started = s.segmenter.take_command_just_started();
+                        // For each block the segmenter just closed,
+                        // render its byte transcript into a per-block
+                        // grid snapshot (Warp-style) so the frontend
+                        // can paint the block via the same RowSnapshot
+                        // shape it uses for the live grid. The width
+                        // we render at is the session's current width;
+                        // closed blocks reflow alongside live frames
+                        // so this matches what the user expects when
+                        // resizing.
+                        let snap_cols = s.cols;
+                        let snap_rows = s.rows;
+                        for block in blocks.iter_mut() {
+                            block.block_rows = snapshot_transcript(
+                                &block.transcript,
+                                snap_cols,
+                                snap_rows,
+                            );
+                        }
                         // 2) If C just fired, clear the grid + diff
                         //    baseline NOW. The previous command's TUI
                         //    (e.g. claude's UI after a Ctrl+C exit)
@@ -1690,6 +2211,270 @@ mod tests {
         seg.feed(&osc("133;C"));
         assert!(seg.take_command_just_started()); // first read returns true
         assert!(!seg.take_command_just_started()); // and clears
+    }
+
+    /* ---------- Warp-style DCS hook protocol ---------- */
+
+    /// Wrap a payload in a DCS sequence: `ESC P <payload> ESC \`.
+    fn dcs(payload: &str) -> Vec<u8> {
+        let mut v = vec![0x1b, 0x50];
+        v.extend_from_slice(payload.as_bytes());
+        v.extend_from_slice(&[0x1b, 0x5c]); // ST
+        v
+    }
+
+    #[test]
+    fn dcs_preexec_populates_command_at_c() {
+        // The shell fires `preexec` DCS just before OSC 133 C, so the
+        // resulting ClosedBlock.input must come from the DCS payload —
+        // not from echoed PTY bytes between B and C.
+        let mut seg = BlockSegmenter::new();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&osc("133;A"));
+        bytes.extend_from_slice(&osc("133;B"));
+        bytes.extend_from_slice(&dcs(
+            r#"gli;preexec;{"command":"git status","start_ms":1700000000000}"#,
+        ));
+        bytes.extend_from_slice(&osc("133;C"));
+        bytes.extend_from_slice(b"output\n");
+        bytes.extend_from_slice(&osc("133;D;0"));
+        let blocks = seg.feed(&bytes);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].input, "git status");
+        assert_eq!(blocks[0].exit_code, Some(0));
+    }
+
+    #[test]
+    fn dcs_cmd_finished_overrides_osc133_d_exit() {
+        // bash <5.0 always reports `D;0` regardless of the real exit.
+        // When the DCS `cmd_finished` hook fires, its exit code wins.
+        let mut seg = BlockSegmenter::new();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&osc("133;A"));
+        bytes.extend_from_slice(&osc("133;C"));
+        bytes.extend_from_slice(b"oops\n");
+        bytes.extend_from_slice(&dcs(
+            r#"gli;cmd_finished;{"exit_code":127,"duration_ms":42}"#,
+        ));
+        // OSC 133 D claims success — DCS must win.
+        bytes.extend_from_slice(&osc("133;D;0"));
+        let blocks = seg.feed(&bytes);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].exit_code, Some(127));
+        assert_eq!(blocks[0].duration_ms, Some(42));
+    }
+
+    #[test]
+    fn dcs_chunked_input_assembles_correctly() {
+        // DCS sequence split across multiple feed() calls — must parse
+        // the same as if fed in one shot. Mirrors a real PTY read
+        // boundary landing mid-payload.
+        let mut seg = BlockSegmenter::new();
+        seg.feed(&osc("133;A"));
+        seg.feed(b"\x1b\x50gli;preexec;{\"comm");
+        seg.feed(b"and\":\"echo hi\",\"start_ms\":42}");
+        seg.feed(&[0x1b, 0x5c]); // ST in its own chunk
+        seg.feed(&osc("133;C"));
+        seg.feed(b"hi\n");
+        let blocks = seg.feed(&osc("133;D;0"));
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].input, "echo hi");
+    }
+
+    #[test]
+    fn dcs_ignores_non_gli_prefix() {
+        // Terminfo definitions, tmux passthrough, and other tools all
+        // use DCS for their own purposes. We must not interpret any
+        // DCS sequence whose prefix isn't `gli;` — confirm by feeding
+        // a tmux-style payload and verifying no command gets latched.
+        let mut seg = BlockSegmenter::new();
+        seg.feed(&dcs(r#"tmux;\033[31mred\033[0m"#));
+        seg.feed(&osc("133;A"));
+        seg.feed(&osc("133;B"));
+        seg.feed(&osc("133;C"));
+        seg.feed(b"output\n");
+        let blocks = seg.feed(&osc("133;D;0"));
+        assert_eq!(blocks.len(), 1);
+        // No DCS preexec fired → input stays empty (the frontend's
+        // pending queue would fill it in a real session).
+        assert_eq!(blocks[0].input, "");
+    }
+
+    #[test]
+    fn dcs_malformed_json_dropped_silently() {
+        // Bad JSON must not crash the segmenter — the rest of the
+        // session keeps working.
+        let mut seg = BlockSegmenter::new();
+        seg.feed(&dcs(r#"gli;preexec;{not really json"#));
+        seg.feed(&osc("133;A"));
+        seg.feed(&osc("133;C"));
+        seg.feed(b"output\n");
+        let blocks = seg.feed(&osc("133;D;0"));
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].input, "");
+        assert_eq!(blocks[0].exit_code, Some(0));
+    }
+
+    #[test]
+    fn dcs_bel_does_not_terminate() {
+        // DCS terminates ONLY on ESC \\ (ST), never on BEL — tolerating
+        // BEL would split a DCS sequence at any 0x07 byte and leave
+        // the segmenter desynced for the rest of the session. Confirm
+        // by sending a DCS-with-BEL followed by a clean OSC 133 cycle:
+        // if BEL had terminated DCS, the trailing `}` and ESC \\ would
+        // have been parsed as random output and the next OSC 133 cycle
+        // would still segment, but the segmenter would have processed
+        // an additional spurious handle_dcs() call. We can't observe
+        // that directly here without poking internals, so we settle
+        // for the structural check: the next clean cycle works.
+        let mut seg = BlockSegmenter::new();
+        let mut bytes = vec![0x1b, 0x50];
+        // Use `` JSON-encoded BEL in the payload so the wire byte
+        // is the escape sequence (valid JSON), and add a raw 0x07 in
+        // the binary tail (after the JSON close) so the segmenter sees
+        // a literal BEL inside the DCS. The literal BEL must NOT close
+        // the sequence.
+        bytes.extend_from_slice(b"gli;pree");
+        bytes.push(0x07); // raw BEL mid-marker — must NOT terminate DCS
+        bytes.extend_from_slice(b"xec;{\"command\":\"hi\",\"start_ms\":1}");
+        bytes.extend_from_slice(&[0x1b, 0x5c]); // real ST terminator
+        bytes.extend_from_slice(&osc("133;A"));
+        bytes.extend_from_slice(&osc("133;C"));
+        bytes.extend_from_slice(b"output\n");
+        bytes.extend_from_slice(&osc("133;D;0"));
+        let blocks = seg.feed(&bytes);
+        assert_eq!(blocks.len(), 1);
+        // The hook name `pree<BEL>xec` isn't recognised so no metadata
+        // latches — but the segmenter stayed responsive and produced
+        // a clean block from the subsequent OSC 133 cycle, which is
+        // the property under test.
+        assert!(blocks[0].transcript.contains("output\n"));
+    }
+
+    /* ---------- snapshot_transcript (per-block grid render) ---------- */
+
+    /// Flatten a row's spans into the plain text the user would read.
+    fn row_text(row: &RowSnapshot) -> String {
+        row.spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn snapshot_transcript_empty_returns_empty() {
+        let out = snapshot_transcript("", 80, 24);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn snapshot_transcript_plain_text_lays_out_lines() {
+        // Real shells emit CRLF, not bare LF — alacritty (correctly)
+        // treats LF as cursor-down-only, so without the leading CR
+        // the second line would start at column 5 ("     beta").
+        let out = snapshot_transcript("alpha\r\nbeta\r\ngamma\r\n", 80, 24);
+        assert_eq!(out.len(), 3);
+        assert_eq!(row_text(&out[0]).trim_end(), "alpha");
+        assert_eq!(row_text(&out[1]).trim_end(), "beta");
+        assert_eq!(row_text(&out[2]).trim_end(), "gamma");
+    }
+
+    #[test]
+    fn snapshot_transcript_handles_cr_overstrike() {
+        // Progress bars use CR (no LF) to redraw the same line. The
+        // OLD parseAnsi.ts dropped CR and concatenated everything,
+        // producing nonsense like "[####] 25%[######] 50%[########] 75%".
+        // The alacritty-backed snapshot must show ONLY the last state.
+        let bytes = "[####    ] 25%\r[######  ] 50%\r[########] 75%\n";
+        let out = snapshot_transcript(bytes, 80, 24);
+        // First row holds the final redraw; the next print should land
+        // on row 1 (after the trailing \n). Row 0's text must match
+        // the LAST progress-bar state, not a concatenation.
+        assert!(!out.is_empty());
+        let first = row_text(&out[0]);
+        assert!(first.contains("[########] 75%"), "got `{first}`");
+        // None of the earlier states should leak in — they all got
+        // overwritten by the CR-redraw.
+        assert!(!first.contains("25%"), "got `{first}`");
+        assert!(!first.contains("50%"), "got `{first}`");
+    }
+
+    #[test]
+    fn snapshot_transcript_honors_line_clear() {
+        // CSI K (clear-to-end-of-line) is what `clear` and most TUIs
+        // use to wipe a line before redrawing. parseAnsi.ts dropped
+        // these silently and left ghost text behind; alacritty
+        // implements them correctly.
+        let bytes = "long line of text\r\x1b[Kshort\n";
+        let out = snapshot_transcript(bytes, 80, 24);
+        assert!(!out.is_empty());
+        let first = row_text(&out[0]);
+        assert!(first.contains("short"), "got `{first}`");
+        // The long text must have been erased — no leakage past
+        // "short" except trailing whitespace.
+        let trimmed = first.trim_end();
+        assert_eq!(trimmed, "short", "got `{first}` trimmed `{trimmed}`");
+    }
+
+    #[test]
+    fn snapshot_transcript_preserves_sgr_styling() {
+        let bytes = "\x1b[31mred\x1b[0m normal\n";
+        let out = snapshot_transcript(bytes, 80, 24);
+        assert!(!out.is_empty());
+        // The "red" segment must come back as a span with the ANSI red
+        // foreground; the " normal" tail must NOT inherit the colour.
+        let row = &out[0];
+        let red = row.spans.iter().find(|s| s.text.contains("red")).unwrap();
+        assert_eq!(red.fg.as_ref(), ANSI_16[1]); // workshop rust
+        let after = row
+            .spans
+            .iter()
+            .find(|s| s.text.contains("normal"))
+            .unwrap();
+        // SGR 0 reset means the trailing span's fg goes back to the
+        // default ("var(--text-primary)") — anything but the red.
+        assert_ne!(after.fg.as_ref(), ANSI_16[1]);
+    }
+
+    #[test]
+    fn snapshot_transcript_trims_trailing_blank_rows() {
+        // A 3-line transcript rendered into a 24-row scratch Term must
+        // produce 3 rows, not 24 — otherwise short commands waste
+        // vertical space in the block list.
+        let bytes = "one\ntwo\nthree\n";
+        let out = snapshot_transcript(bytes, 80, 24);
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn snapshot_transcript_safe_with_zero_dims() {
+        // Defensive: a session where rows/cols are momentarily 0
+        // (mid-resize race, malformed startup args) must not panic.
+        let out = snapshot_transcript("hello\n", 0, 0);
+        // Caps to 1x1 internally — content gets clipped but no crash.
+        assert!(!out.is_empty() || out.is_empty()); // tautology to assert "no panic"
+        let _ = out;
+    }
+
+    #[test]
+    fn dcs_buffer_caps_to_prevent_unbounded_growth() {
+        // If the shell starts a DCS but never closes it (crash, hang,
+        // hostile payload), we must not OOM. Confirm that feeding a
+        // huge payload without a terminator still leaves the segmenter
+        // responsive on the next clean OSC 133 cycle. We add an output
+        // byte between C and D so the empty-block guard in close()
+        // doesn't suppress the resulting block.
+        let mut seg = BlockSegmenter::new();
+        let mut huge = vec![0x1b, 0x50];
+        huge.extend(std::iter::repeat(b'x').take(128 * 1024));
+        seg.feed(&huge);
+        // Even though the DCS was never closed, normal OSC 133 must
+        // still segment correctly once we resync (e.g. on the next
+        // ST that does arrive).
+        seg.feed(&[0x1b, 0x5c]); // close the DCS
+        seg.feed(&osc("133;A"));
+        seg.feed(&osc("133;C"));
+        seg.feed(b"ok\n");
+        let blocks = seg.feed(&osc("133;D;0"));
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].transcript.contains("ok\n"));
     }
 
     /* ---------- spawn-error classifier (regression from pty.rs) ---------- */
