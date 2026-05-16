@@ -16,6 +16,7 @@ mod block_id;
 mod claude_usage;
 mod connections;
 mod flat_storage;
+mod flat_term;
 mod fs;
 mod git;
 mod helper_agent;

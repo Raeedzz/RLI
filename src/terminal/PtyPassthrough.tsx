@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  memo,
   useEffect,
   useImperativeHandle,
   useRef,
@@ -59,7 +60,7 @@ const PASTE_END = encoder.encode("\x1b[201~");
  * OS IME composition still works. Off-screen via fixed positioning
  * so the textarea is invisible but focusable.
  */
-export const PtyPassthrough = forwardRef<PtyPassthroughHandle, Props>(
+export const PtyPassthrough = memo(forwardRef<PtyPassthroughHandle, Props>(
   function PtyPassthrough(
     { onSendBytes, appCursor, bracketedPaste, autoFocus = true },
     ref,
@@ -149,5 +150,5 @@ export const PtyPassthrough = forwardRef<PtyPassthroughHandle, Props>(
       />
     );
   },
-);
+));
 

@@ -49,8 +49,13 @@ use tauri::{AppHandle, Emitter, Manager, State, Wry};
 
 const SCROLLBACK_LIMIT: usize = 10_000;
 /// Frame throttle while the session is visible to the user AND the
-/// GLI window has focus. 16 ms ≈ one display frame at 60 Hz.
-const FRAME_THROTTLE_VISIBLE: Duration = Duration::from_millis(16);
+/// GLI window has focus. 8 ms ≈ one frame at 120 Hz, matching the
+/// MacBook Pro / Pro Display XDR ProMotion refresh rate. On non-
+/// ProMotion 60 Hz displays the compositor coalesces back to 60 fps
+/// automatically, so the higher cap is free for those users —
+/// they get the same 60 fps perception with marginally more headroom
+/// for sudden burst output to land in fewer coalesced frames.
+const FRAME_THROTTLE_VISIBLE: Duration = Duration::from_millis(8);
 /// Frame throttle while the session is currently NOT shown anywhere
 /// in the UI but the GLI window is otherwise focused. Kept close to
 /// the visible cadence (32 ms ≈ 30 Hz) so that a worktree-switch
@@ -894,9 +899,6 @@ fn percent_decode(s: &str) -> String {
    shipped with, plus passes through 24-bit truecolor RGB.
    ------------------------------------------------------------------ */
 
-// Now only used by `snapshot_grid_legacy` + its tests. The production
-// snapshot path runs through `packed_color_to_css` instead.
-#[cfg(test)]
 fn color_to_css(c: Color, fallback: &'static str) -> Cow<'static, str> {
     match c {
         Color::Spec(Rgb { r, g, b }) => {
@@ -989,30 +991,71 @@ const ANSI_16: [&str; 16] = [
    Frame snapshot — walk the grid and compress styled runs.
    ------------------------------------------------------------------
 
-   Pipeline:
-     alacritty Term  ─►  FlatStorage (via alac_adapter)
-                                      │
-                                      ▼
-                          Vec<RowSnapshot>  (this fn)
+   This is the HOT path: called on every frame for every visible
+   terminal, including the 60+ Hz live agent stream. It walks
+   alacritty's grid directly (no intermediate FlatStorage allocation)
+   to keep the per-frame cost minimal.
 
-   The intermediate FlatStorage is the Warp-style flat-buffer + interval
-   map representation. Currently it adds an extra walk over alacritty's
-   grid, but routing through it now (a) validates the data shape with
-   real terminal output and (b) makes the alacritty side swappable —
-   the day a native `FlatTerm` parser lands, this function only needs
-   to drop the adapter call and take the FlatStorage directly.
+   Earlier the path was alacritty → FlatStorage → RowSnapshot via
+   alac_adapter — that worked but allocated ~3000 Strings per frame
+   per terminal, visibly slowing agent load times. The FlatStorage
+   bridge stays alive in `alac_adapter` (used by tests + scrollback
+   capture); only the live snapshot path went back to direct.
 
-   The legacy direct-from-alacritty path stays alive as
-   `snapshot_grid_legacy`, used by parity tests to assert the new
-   pipeline produces byte-identical output. */
+   `flat_storage_to_row_snapshots` is still exported for the day
+   FlatTerm replaces alacritty in Session — at that point the input
+   becomes a FlatStorage owned by FlatTerm and this function vanishes
+   in favor of `flat_storage_to_row_snapshots`. The parity tests in
+   `flat_storage_path_matches_legacy_*` lock the two paths together
+   so the eventual swap is provably equivalent. */
 
 fn snapshot_grid<E: EventListener>(term: &Term<E>) -> Vec<RowSnapshot> {
-    let fs = crate::flat_storage::alac_adapter::from_alacritty_term(term);
-    flat_storage_to_row_snapshots(&fs)
+    let cols = term.columns();
+    let rows = term.screen_lines();
+    let mut out = Vec::with_capacity(rows);
+
+    for row_idx in 0..rows {
+        let mut spans: Vec<Span> = Vec::new();
+        let mut current: Option<Span> = None;
+        for col_idx in 0..cols {
+            let point = Point::new(Line(row_idx as i32), Column(col_idx));
+            let cell: &Cell = &term.grid()[point];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let span = cell_to_span(cell);
+            match &mut current {
+                Some(c) if c.fg == span.fg
+                    && c.bg == span.bg
+                    && c.bold == span.bold
+                    && c.italic == span.italic
+                    && c.underline == span.underline
+                    && c.inverse == span.inverse
+                    && c.dim == span.dim
+                    && c.strikeout == span.strikeout =>
+                {
+                    c.text.push_str(&span.text);
+                }
+                Some(_) | None => {
+                    if let Some(c) = current.take() {
+                        spans.push(c);
+                    }
+                    current = Some(span);
+                }
+            }
+        }
+        if let Some(c) = current.take() {
+            spans.push(c);
+        }
+        out.push(RowSnapshot { spans });
+    }
+    out
 }
 
-/// Direct alacritty walk. Same behaviour as `snapshot_grid` before the
-/// FlatStorage migration. Kept around exclusively for parity tests.
+/// Test-only mirror of `snapshot_grid`. Identical to the prod path —
+/// kept under #[cfg(test)] so we can still reference it by a stable
+/// name from `flat_storage_path_matches_legacy_*` even after the prod
+/// path's name changes in the future.
 #[cfg(test)]
 fn snapshot_grid_legacy<E: EventListener>(term: &Term<E>) -> Vec<RowSnapshot> {
     let cols = term.columns();
@@ -1064,6 +1107,11 @@ fn snapshot_grid_legacy<E: EventListener>(term: &Term<E>) -> Vec<RowSnapshot> {
 /// equal-attribute runs into a single span. Output matches what
 /// `snapshot_grid_legacy` produces for the same source grid (proven by
 /// the `flat_storage_path_matches_legacy_*` parity tests below).
+// FlatStorage → RowSnapshot conversion. Currently used only by the
+// flat_storage_path_matches_legacy_* tests; once FlatTerm is wired
+// into Session this becomes the prod snapshot path. Gated on test
+// for now to keep prod builds free of the unused-fn warning.
+#[cfg(test)]
 fn flat_storage_to_row_snapshots(
     fs: &crate::flat_storage::FlatStorage,
 ) -> Vec<RowSnapshot> {
@@ -1101,6 +1149,7 @@ fn flat_storage_to_row_snapshots(
     out
 }
 
+#[cfg(test)]
 fn spans_match(a: &Span, b: &Span) -> bool {
     a.fg == b.fg
         && a.bg == b.bg
@@ -1114,6 +1163,7 @@ fn spans_match(a: &Span, b: &Span) -> bool {
 
 /// Build a Span for one grapheme, with attributes lifted from
 /// FlatStorage's packed encoding.
+#[cfg(test)]
 fn packed_cell_to_span(
     ch: char,
     fg: crate::flat_storage::PackedColor,
@@ -1138,6 +1188,7 @@ fn packed_cell_to_span(
 /// for the alacritty Color variants that our adapter actually
 /// produces. The `Named` variant uses the raw NamedColor index — see
 /// `alac_adapter::color_to_packed` for the mapping.
+#[cfg(test)]
 fn packed_color_to_css(
     c: crate::flat_storage::PackedColor,
     fallback: &'static str,
@@ -1165,6 +1216,7 @@ fn packed_color_to_css(
 /// (`#[repr(u16)]`): 0..=15 for the 16 ANSI base colors, then 256..=268
 /// for the Foreground / Background / Cursor / Dim* / Bright* set.
 /// Variants outside those ranges produce the fallback.
+#[cfg(test)]
 fn named_color_from_raw_index(
     idx: u16,
     fallback: &'static str,
@@ -1246,9 +1298,18 @@ fn snapshot_transcript(transcript: &str, cols: u16, rows: u16) -> Vec<RowSnapsho
         cols: cols.max(1) as usize,
         rows: rows.max(1) as usize,
     };
+    // Strip trailing screen-destructive sequences before replay. When
+    // an interactive agent (claude / codex / gemini) is Ctrl+C'd, its
+    // cleanup emits DECRST 1049 (exit alt-screen) and often an erase-
+    // screen + cursor-home. Feeding those through a fresh alacritty
+    // Term wipes the alt-screen content that the user was looking at —
+    // the closed block ends up empty. Trimming the tail keeps the
+    // agent's final TUI state as scrollable history, mirroring
+    // Warp's "Ctrl+C preserves the conversation" behaviour.
+    let trimmed = strip_trailing_screen_destruction(transcript);
     let mut term = Term::new(TermConfig::default(), &dims, NullEventProxy);
     let mut parser: Processor = Processor::new();
-    parser.advance(&mut term, transcript.as_bytes());
+    parser.advance(&mut term, trimmed.as_bytes());
     let mut snap = snapshot_grid(&term);
     // Drop trailing rows that are empty / all-whitespace. A row is
     // "empty" when its spans contain nothing but whitespace text.
@@ -1268,7 +1329,77 @@ fn snapshot_transcript(transcript: &str, cols: u16, rows: u16) -> Vec<RowSnapsho
     snap
 }
 
-#[cfg(test)]
+/// Trim trailing "destroy the screen state we just wrote" sequences
+/// from a transcript before it gets replayed for a closed-block
+/// snapshot. The goal is to preserve the agent's last visible TUI
+/// frame as scrollable history — Warp's "Ctrl+C keeps the
+/// conversation" behaviour.
+///
+/// Sequences trimmed (greedy, repeated from the tail):
+///   * DECRST 1049  (`ESC [ ? 1049 l`) — exit alt-screen
+///   * DECRST 1047  (`ESC [ ? 1047 l`) — exit alt-screen (older variant)
+///   * DECRST 47    (`ESC [ ? 47 l`)   — exit alt-screen (oldest)
+///   * Erase-display-all (`ESC [ 2 J`)
+///   * Erase-display-saved (`ESC [ 3 J`)
+///   * Cursor home (`ESC [ H` / `ESC [ ; H` / `ESC [ 1 ; 1 H`)
+///   * Show cursor (`ESC [ ? 25 h`) — common in cleanup
+///   * Reset SGR (`ESC [ 0 m` / `ESC [ m`)
+///   * Plain whitespace (CR / LF / spaces)
+///
+/// The match is byte-level on a suffix-stripping loop — order
+/// matters: we strip one sequence at a time from the tail, repeating
+/// until nothing in the trim set is found. Conservative on what gets
+/// trimmed; anything we don't recognise is preserved.
+fn strip_trailing_screen_destruction(transcript: &str) -> &str {
+    let mut bytes = transcript.as_bytes();
+    // Suffix patterns to strip, longest first so e.g. `ESC[?1049l`
+    // matches before `ESC[?47l` (substring-style overlap).
+    const PATTERNS: &[&[u8]] = &[
+        b"\x1b[?1049l",
+        b"\x1b[?1047l",
+        b"\x1b[?47l",
+        b"\x1b[?25h",
+        b"\x1b[?25l",
+        b"\x1b[2J",
+        b"\x1b[3J",
+        b"\x1b[1;1H",
+        b"\x1b[;H",
+        b"\x1b[H",
+        b"\x1b[0m",
+        b"\x1b[m",
+    ];
+    loop {
+        let original_len = bytes.len();
+        // Strip trailing whitespace bytes that the agent's cleanup
+        // pad emits between escape sequences (CR / LF / SPACE / TAB).
+        while let Some(&b) = bytes.last() {
+            if b == b'\r' || b == b'\n' || b == b' ' || b == b'\t' {
+                bytes = &bytes[..bytes.len() - 1];
+            } else {
+                break;
+            }
+        }
+        // Strip one escape-sequence suffix per outer loop iteration.
+        let mut matched = false;
+        for pat in PATTERNS {
+            if bytes.ends_with(pat) {
+                bytes = &bytes[..bytes.len() - pat.len()];
+                matched = true;
+                break;
+            }
+        }
+        if !matched && bytes.len() == original_len {
+            // Nothing stripped this round — fixed point.
+            break;
+        }
+    }
+    // Safe because `bytes` is always a UTF-8-aligned suffix of the
+    // original string: every byte we strip is either ASCII or part of
+    // an ASCII-only escape sequence, so cutting at the trim point
+    // never lands inside a multi-byte UTF-8 character.
+    std::str::from_utf8(bytes).unwrap_or(transcript)
+}
+
 fn cell_to_span(cell: &Cell) -> Span {
     let mut text = String::new();
     text.push(cell.c);
@@ -2618,6 +2749,69 @@ mod tests {
         let bytes = "one\ntwo\nthree\n";
         let out = snapshot_transcript(bytes, 80, 24);
         assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    #[test]
+    fn strip_trailing_alt_screen_exit_preserves_content() {
+        // Simulate claude's Ctrl+C cleanup: enter alt-screen, draw,
+        // exit alt-screen + erase + cursor home.
+        let transcript = "\x1b[?1049hHELLO FROM AGENT\r\nLINE 2\x1b[?1049l\x1b[2J\x1b[H";
+        let trimmed = strip_trailing_screen_destruction(transcript);
+        // The trim should drop the trailing cleanup so the alt-screen
+        // content survives a replay.
+        assert!(!trimmed.contains("\x1b[?1049l"));
+        assert!(!trimmed.ends_with("\x1b[2J"));
+        assert!(!trimmed.ends_with("\x1b[H"));
+        assert!(trimmed.contains("HELLO FROM AGENT"));
+    }
+
+    #[test]
+    fn strip_trailing_does_not_touch_mid_transcript_clears() {
+        // A clear-screen in the MIDDLE (e.g. `clear` then `ls`)
+        // shouldn't be removed — only trailing destruction is.
+        let transcript = "before\x1b[2Jafter";
+        let trimmed = strip_trailing_screen_destruction(transcript);
+        assert_eq!(trimmed, transcript);
+    }
+
+    #[test]
+    fn strip_trailing_handles_multiple_stacked_sequences() {
+        // Real cleanup typically stacks: show cursor + reset SGR +
+        // alt-screen-exit + erase + home, sometimes with whitespace
+        // between. All should be peeled off the tail.
+        let transcript = "content\x1b[0m\x1b[?25h\x1b[?1049l\x1b[2J\x1b[H\r\n";
+        let trimmed = strip_trailing_screen_destruction(transcript);
+        assert_eq!(trimmed, "content");
+    }
+
+    #[test]
+    fn strip_trailing_no_op_on_clean_transcripts() {
+        // Shell command output that ends with a newline shouldn't lose
+        // anything meaningful. The trailing `\n` gets stripped (the
+        // whitespace branch) but the visible content is preserved.
+        let transcript = "ls output\nmore\n";
+        let trimmed = strip_trailing_screen_destruction(transcript);
+        assert_eq!(trimmed, "ls output\nmore");
+    }
+
+    #[test]
+    fn snapshot_transcript_preserves_alt_screen_content_post_ctrl_c() {
+        // End-to-end: feed in a claude-style alt-screen session whose
+        // tail looks like a Ctrl+C cleanup. The closed block should
+        // still carry the agent's last visible state.
+        let transcript = "\x1b[?1049hHello, agent here\r\nworking…\x1b[?1049l\x1b[2J\x1b[H";
+        let snap = snapshot_transcript(transcript, 30, 5);
+        let any_hello = snap.iter().any(|row| {
+            row.spans.iter().any(|s| s.text.contains("Hello, agent here"))
+        });
+        assert!(
+            any_hello,
+            "alt-screen content should survive the trailing cleanup, but got rows: {:?}",
+            snap.iter()
+                .map(|r| r.spans.iter().map(|s| s.text.as_str()).collect::<String>())
+                .collect::<Vec<_>>(),
+        );
     }
 
     #[test]

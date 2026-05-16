@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  memo,
   useEffect,
   useImperativeHandle,
   useRef,
@@ -310,7 +311,15 @@ function resolveDir(parent: string, cwd: string): string {
  * zone" is implied by the pill bar above (TerminalStatusBar) and the
  * dim hint below. The cursor is the only saturated color.
  */
-export const PromptInput = forwardRef<PromptInputHandle, Props>(
+/**
+ * Memoized to keep the input box independent of the parent BlockTerminal's
+ * frame-driven re-renders. As long as the caller stabilizes the callback
+ * refs (useCallback for onSubmit / onSendBytes / onPaste in
+ * BlockTerminal), PromptInput won't re-render when a new PTY frame
+ * arrives — which is the dominant source of typing-lag during streaming
+ * agent output.
+ */
+export const PromptInput = memo(forwardRef<PromptInputHandle, Props>(
   function PromptInput(
     {
       onSubmit,
@@ -326,6 +335,15 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
   ) {
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [value, setValue] = useState("");
+    // Track the newline count of the last value so the height-resize
+    // path only runs when the line count actually changes. Reading
+    // `scrollHeight` after writing `height = "auto"` forces a
+    // synchronous layout flush — doing it on every keystroke (the
+    // previous behaviour) stalled fast typing by tens of ms per char,
+    // which the user perceives as the terminal "stopping for a sec
+    // and then catching up all at once." Single-line typing now skips
+    // the reflow entirely.
+    const lastNewlineCountRef = useRef(0);
     // Index into history. -1 = composing a new line; 0 = most recent
     // committed entry; N-1 = oldest.
     const [historyCursor, setHistoryCursor] = useState(-1);
@@ -381,6 +399,7 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
       onSubmit(text);
       // Reset the textarea height after multi-line input gets cleared.
       if (textareaRef.current) textareaRef.current.style.height = "auto";
+      lastNewlineCountRef.current = 0;
     };
 
     const applyCompletion = (entry: DirEntry) => {
@@ -806,12 +825,24 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
             ref={textareaRef}
             value={value}
             onChange={(e) => {
-              setValue(e.target.value);
+              const next = e.target.value;
+              setValue(next);
               if (historyCursor >= 0) setHistoryCursor(-1);
-              // Auto-grow height for multi-line commands.
-              const ta = e.currentTarget;
-              ta.style.height = "auto";
-              ta.style.height = `${ta.scrollHeight}px`;
+              // Auto-grow height for multi-line commands. Only run the
+              // forced-reflow path when the newline count actually
+              // changes — typing on a single line never triggers a
+              // layout flush, which keeps fast typists fluid. Counts
+              // are cheap; reflow is not.
+              let newlineCount = 0;
+              for (let i = 0; i < next.length; i++) {
+                if (next.charCodeAt(i) === 10) newlineCount++;
+              }
+              if (newlineCount !== lastNewlineCountRef.current) {
+                lastNewlineCountRef.current = newlineCount;
+                const ta = e.currentTarget;
+                ta.style.height = "auto";
+                ta.style.height = `${ta.scrollHeight}px`;
+              }
             }}
             onPaste={(e: ClipboardEvent<HTMLTextAreaElement>) => {
               if (!onPaste) return;
@@ -887,7 +918,7 @@ export const PromptInput = forwardRef<PromptInputHandle, Props>(
       </div>
     );
   },
-);
+));
 
 /**
  * Layered syntax-highlight overlay. Renders a `<pre>` underneath the

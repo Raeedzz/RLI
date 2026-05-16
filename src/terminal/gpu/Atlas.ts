@@ -109,9 +109,15 @@ export function createAtlas(
   // Backing 2d canvas for rasterization. We paint per-glyph cells
   // into this and copy each cell into the GPU texture in a single
   // writeTexture call.
+  //
+  // The local `ctx` is narrowed via a separate const so the closure-
+  // captured reference in `rasterizeInto` below is also non-nullable
+  // — TS doesn't narrow across capture boundaries, so the post-throw
+  // type assertion has to live in a re-binding the closure can see.
   const canvas = new OffscreenCanvas(textureWidth, textureHeight);
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) throw new Error("OffscreenCanvas 2d context unavailable");
+  const ctxNullable = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctxNullable) throw new Error("OffscreenCanvas 2d context unavailable");
+  const ctx: OffscreenCanvasRenderingContext2D = ctxNullable;
   ctx.clearRect(0, 0, textureWidth, textureHeight);
   ctx.textBaseline = "top";
 
@@ -159,8 +165,14 @@ export function createAtlas(
     ctx.fillStyle = "#ffffff";
     // Drop the glyph slightly inside the cell to allow descenders +
     // diacritics that extend past `lineHeight` to not clip into the
-    // neighbour cell.
-    const padTop = Math.max(0, (cellHeightPx - fontSizeCss * dpr) * 0.25);
+    // neighbour cell. ROUND to integer pixels — a fractional y here
+    // forces `fillText` to anti-alias across two pixel rows, which
+    // reads as a soft / fuzzy glyph even though the cell positioning
+    // is pixel-perfect. The user reported this directly as "fuzzy"
+    // terminal text after the earlier fixes lined up the cells.
+    const padTop = Math.round(
+      Math.max(0, (cellHeightPx - fontSizeCss * dpr) * 0.25),
+    );
     ctx.fillText(text, x, y + padTop);
     // Pull just this cell's pixels for the GPU upload. writeTexture
     // wants tightly-packed rgba8 rows.

@@ -1,0 +1,156 @@
+import { describe, expect, test } from "bun:test";
+import type { KeyboardEvent } from "react";
+import { isGlobalChord, keyToBytes } from "./keyEncoding";
+
+/**
+ * Synthetic React.KeyboardEvent. We only set the fields keyToBytes /
+ * isGlobalChord actually read — TypeScript would object to the
+ * synthetic shape, hence the `as unknown as` cast at the boundary.
+ */
+type KeyOpts = {
+  key: string;
+  code?: string;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  altKey?: boolean;
+  shiftKey?: boolean;
+};
+
+function ke(opts: KeyOpts): KeyboardEvent<HTMLTextAreaElement> {
+  return {
+    key: opts.key,
+    code: opts.code ?? "",
+    ctrlKey: opts.ctrlKey ?? false,
+    metaKey: opts.metaKey ?? false,
+    altKey: opts.altKey ?? false,
+    shiftKey: opts.shiftKey ?? false,
+  } as unknown as KeyboardEvent<HTMLTextAreaElement>;
+}
+
+describe("keyToBytes — Ctrl+letter → C0 control byte", () => {
+  // The PTY-interrupt path. claude / codex / shell commands all rely
+  // on Ctrl+C sending 0x03 (SIGINT). A regression here means Ctrl+C
+  // silently does nothing — exactly the kind of "I can't kill the
+  // agent" symptom users hit hardest.
+  test("Ctrl+C → [0x03]", () => {
+    const bytes = keyToBytes(ke({ key: "c", ctrlKey: true }), false);
+    expect(bytes).not.toBeNull();
+    expect(Array.from(bytes!)).toEqual([0x03]);
+  });
+
+  test("Ctrl+Shift+C (uppercase e.key) still → [0x03]", () => {
+    // Some keyboard layouts / browsers report `e.key` as "C" when
+    // shift is held. toLowerCase() inside keyToBytes is the load-
+    // bearing detail — pin it here so a future "simplification" to
+    // `e.key.charCodeAt(0)` (which would yield 0x43, not 0x03) is
+    // caught immediately.
+    const bytes = keyToBytes(
+      ke({ key: "C", ctrlKey: true, shiftKey: true }),
+      false,
+    );
+    expect(bytes).not.toBeNull();
+    expect(Array.from(bytes!)).toEqual([0x03]);
+  });
+
+  test("Ctrl+D → [0x04] (EOF)", () => {
+    const bytes = keyToBytes(ke({ key: "d", ctrlKey: true }), false);
+    expect(Array.from(bytes!)).toEqual([0x04]);
+  });
+
+  test("Ctrl+Z → [0x1A] (SIGTSTP)", () => {
+    const bytes = keyToBytes(ke({ key: "z", ctrlKey: true }), false);
+    expect(Array.from(bytes!)).toEqual([0x1a]);
+  });
+
+  test("Ctrl+A → [0x01] (beginning of line)", () => {
+    const bytes = keyToBytes(ke({ key: "a", ctrlKey: true }), false);
+    expect(Array.from(bytes!)).toEqual([0x01]);
+  });
+
+  test("Ctrl+letter is suppressed when Alt is also held", () => {
+    // Ctrl+Alt+letter is reserved for keyboard layout combinations
+    // (AltGr) and shouldn't collapse to a C0 byte. Return null so
+    // the textarea sees the keystroke and IME can route it.
+    const bytes = keyToBytes(
+      ke({ key: "c", ctrlKey: true, altKey: true }),
+      false,
+    );
+    expect(bytes).toBeNull();
+  });
+
+  test("Ctrl+digit is NOT mapped (only Ctrl+letter)", () => {
+    const bytes = keyToBytes(ke({ key: "1", ctrlKey: true }), false);
+    expect(bytes).toBeNull();
+  });
+});
+
+describe("keyToBytes — arrows + DECCKM", () => {
+  // Verifies the appCursor branch — agents flip DECCKM (ESC[?1h) and
+  // arrow encoding must swap CSI → SS3 or they never see the user's
+  // arrow keys. Worth pinning so the cursor mode wiring stays correct.
+  test("ArrowUp with appCursor=false → ESC[A (CSI)", () => {
+    const bytes = keyToBytes(ke({ key: "ArrowUp" }), false);
+    expect(bytes).not.toBeNull();
+    expect(new TextDecoder().decode(bytes!)).toBe("\x1b[A");
+  });
+
+  test("ArrowUp with appCursor=true → ESC O A (SS3)", () => {
+    const bytes = keyToBytes(ke({ key: "ArrowUp" }), true);
+    expect(bytes).not.toBeNull();
+    expect(new TextDecoder().decode(bytes!)).toBe("\x1bOA");
+  });
+});
+
+describe("keyToBytes — Enter / Shift+Enter", () => {
+  test("Plain Enter → CR", () => {
+    const bytes = keyToBytes(ke({ key: "Enter" }), false);
+    expect(new TextDecoder().decode(bytes!)).toBe("\r");
+  });
+
+  test("Shift+Enter → LF (multi-line in agent prompts)", () => {
+    const bytes = keyToBytes(ke({ key: "Enter", shiftKey: true }), false);
+    expect(new TextDecoder().decode(bytes!)).toBe("\n");
+  });
+});
+
+describe("keyToBytes — printable characters return null", () => {
+  // Plain printable chars route through the textarea's onChange
+  // handler so IME composition still works. keyToBytes returning
+  // null is the signal "let the textarea handle this."
+  test("plain 'a' → null", () => {
+    expect(keyToBytes(ke({ key: "a" }), false)).toBeNull();
+  });
+
+  test("plain digit → null", () => {
+    expect(keyToBytes(ke({ key: "5" }), false)).toBeNull();
+  });
+});
+
+describe("isGlobalChord — Ctrl+C is NOT a global chord", () => {
+  // Critical: Ctrl+C must reach the PTY-input handler in
+  // PtyPassthrough / PromptInput, not bubble up to the global
+  // keybinding layer. If isGlobalChord ever starts returning true
+  // for Ctrl+C, the user can't interrupt a running command.
+  test("Ctrl+C is intercepted (returns false)", () => {
+    expect(isGlobalChord(ke({ key: "c", ctrlKey: true }))).toBe(false);
+  });
+
+  test("Cmd+C (copy) is NOT marked global either — let the OS handle it", () => {
+    // Cmd+C is the macOS copy shortcut; we don't list it in
+    // isGlobalChord because we WANT the browser's default copy
+    // behavior to run. Returning false here means the textarea sees
+    // the keystroke; keyToBytes ignores Cmd+letter so the default
+    // copy semantics survive.
+    expect(isGlobalChord(ke({ key: "c", metaKey: true }))).toBe(false);
+  });
+
+  test("Cmd+K is a global chord (search overlay)", () => {
+    expect(isGlobalChord(ke({ key: "k", metaKey: true }))).toBe(true);
+  });
+
+  test("Cmd+1 (worktree switch) is a global chord", () => {
+    expect(isGlobalChord(ke({ key: "1", metaKey: true, code: "Digit1" }))).toBe(
+      true,
+    );
+  });
+});

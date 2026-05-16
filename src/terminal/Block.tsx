@@ -1,30 +1,11 @@
 import { useMemo } from "react";
 import { CellRow } from "./CellRow";
-import { parseAnsi } from "./parseAnsi";
+import { computeClosedBlockLines, isAgentInput } from "./blockLogic";
 import { formatCwd, formatDuration } from "./formatBlockMeta";
 import type { Block as BlockType } from "./types";
 
 interface Props {
   block: BlockType;
-}
-
-/** Agent binaries whose closed transcripts are unreadable as linear text. */
-const AGENT_NAMES = new Set(["claude", "codex", "aider", "gemini"]);
-
-/**
- * True when `input` invokes one of our known TUI agents. Strips leading
- * env-var assignments (`FOO=bar claude`) and resolves the basename so
- * wrapper paths still match. Mirrors the logic in BlockTerminal so the
- * two stay in lockstep.
- */
-function isAgentInput(input: string): boolean {
-  const tokens = input.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  for (const t of tokens) {
-    if (/^[a-z_][a-z0-9_]*=/i.test(t)) continue;
-    const prog = t.split("/").pop() ?? t;
-    return AGENT_NAMES.has(prog);
-  }
-  return false;
 }
 
 /**
@@ -45,27 +26,10 @@ function isAgentInput(input: string): boolean {
  */
 export function Block({ block }: Props) {
   const isAgent = useMemo(() => isAgentInput(block.input), [block.input]);
-  // Closed blocks render from one of two sources, in order of fidelity:
-  //
-  //   1. `blockRows` — the Warp-style per-block grid snapshot produced
-  //      on the Rust side by replaying the transcript through alacritty.
-  //      Handles CR overstrike, line clear, cursor moves, scroll
-  //      regions, etc. correctly. This is the path real production
-  //      blocks take.
-  //
-  //   2. `parseAnsi(transcript)` — the legacy fallback for blocks that
-  //      hydrated from sessionMemory before `blockRows` existed on the
-  //      wire, or any block whose transcript predates a backend
-  //      restart. parseAnsi handles SGR + line breaks but nothing
-  //      else, so progress bars / spinners look concatenated. Kept so
-  //      pre-existing in-memory blocks still render after upgrade.
-  const lines = useMemo(() => {
-    if (isAgent) return [];
-    if (block.blockRows && block.blockRows.length > 0) {
-      return block.blockRows.map((r) => r.spans);
-    }
-    return parseAnsi(block.transcript);
-  }, [block.blockRows, block.transcript, isAgent]);
+  const lines = useMemo(
+    () => computeClosedBlockLines(block.blockRows, block.transcript, isAgent),
+    [block.blockRows, block.transcript, isAgent],
+  );
   const bodyLines = useMemo(() => {
     // Skip the first line ONLY when rendering from the legacy
     // parseAnsi path — that path captures zsh's echo of the user's
@@ -90,11 +54,9 @@ export function Block({ block }: Props) {
     };
   }, [block.exit_code]);
 
-  const hasBody = isAgent
-    ? false
-    : bodyLines.some(
-        (line) => line.length > 0 && line.some((s) => s.text.length > 0),
-      );
+  const hasBody = bodyLines.some(
+    (line) => line.length > 0 && line.some((s) => s.text.length > 0),
+  );
 
   const cwdLabel = formatCwd(block.cwd);
   const durLabel = formatDuration(block.durationMs);
@@ -166,7 +128,7 @@ export function Block({ block }: Props) {
       {hasBody && (
         <div style={{ color: "var(--text-secondary)" }}>
           {bodyLines.map((spans, i) => (
-            <CellRow key={i} spans={spans} wrap />
+            <CellRow key={i} spans={spans} wrap={!isAgent} />
           ))}
         </div>
       )}

@@ -346,6 +346,11 @@ export function useTerminalSession(opts: Args): SessionApi {
                 exit_code: 1,
                 cwd: null,
                 durationMs: null,
+                // Synthetic error block has no real grid snapshot —
+                // the frontend's parseAnsi fallback handles the
+                // transcript display. Empty blockRows signals "no
+                // pre-rendered snapshot available."
+                blockRows: [],
               },
             ];
             memSetBlocks(opts.id, next);

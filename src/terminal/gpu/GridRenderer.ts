@@ -207,7 +207,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
  * layer rejects. 72 satisfies that without playing alignment games.
  */
 const BYTES_PER_CELL = 72;
-const U32_PER_CELL = BYTES_PER_CELL / 4;
 
 const FLAG_UNDERLINE = 1;
 const FLAG_STRIKE = 2;

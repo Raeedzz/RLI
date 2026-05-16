@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useEditor, EditorContent, type Editor as TiptapEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "tiptap-markdown";
@@ -57,6 +57,8 @@ function RichView({
   content: string;
   onChange: (content: string) => void;
 }) {
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
   const editor = useEditor({
     extensions: [
       StarterKit,
@@ -83,11 +85,30 @@ function RichView({
   // the same pane) need to push the new markdown into TipTap. We bail
   // when the values match to avoid clobbering the user's cursor on
   // their own typing.
+  //
+  // Also reset the scroll container to the top on content swap.
+  // ProseMirror's setContent places its selection at the end of the
+  // document and the parent overflow:auto container preserves whatever
+  // scrollTop was from a previous markdown — so opening a fresh file
+  // landed at the BOTTOM. Snapping to 0 here matches the "open file →
+  // see the title" behaviour the user expects.
   useEffect(() => {
     if (!editor) return;
     const current = getMarkdown(editor);
     if (current !== content) {
       editor.commands.setContent(content, { emitUpdate: false });
+      // Place the selection at the document start too, so any
+      // subsequent ↑/↓ in the editor begins from the top.
+      editor.commands.setTextSelection(0);
+      const el = scrollContainerRef.current;
+      if (el) el.scrollTop = 0;
+      // The DOM commit lands in the next animation tick — re-snap
+      // there too, otherwise ProseMirror's own scrollIntoView for the
+      // (now top-of-doc) selection still wins on first render.
+      requestAnimationFrame(() => {
+        const el2 = scrollContainerRef.current;
+        if (el2) el2.scrollTop = 0;
+      });
     }
   }, [editor, content]);
 
@@ -119,6 +140,7 @@ function RichView({
 
   return (
     <div
+      ref={scrollContainerRef}
       onClick={onContainerClick}
       style={{
         height: "100%",

@@ -916,7 +916,20 @@ fn install_gemini_hooks() {
     let Some(dir) = home_subdir(".gemini") else {
         return;
     };
-    if !dir.exists() {
+    // Proactively create ~/.gemini even if Gemini CLI has never been
+    // launched yet — mirrors the Claude installer path. Without this,
+    // a fresh Gemini install (binary in PATH but no ~/.gemini directory
+    // yet) silently runs without GLI's hooks attached, so the agent's
+    // BeforeAgent / AfterAgent lifecycle events never reach the
+    // spinner / activity-tracker on the GLI side. That manifests as
+    // "I typed `gemini` and nothing shows up" — the binary IS running,
+    // it just doesn't surface in GLI's chrome.
+    //
+    // Gemini reads settings.json eagerly on first invocation, so a
+    // pre-created file with our hooks is honoured the first time the
+    // user actually launches the CLI.
+    if let Err(e) = fs::create_dir_all(&dir) {
+        eprintln!("[gli-hooks] mkdir {} failed: {e}", dir.display());
         return;
     }
     let hooks_dir = dir.join("hooks");

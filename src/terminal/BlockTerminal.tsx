@@ -720,6 +720,18 @@ export function BlockTerminal({
   ]);
 
 
+  // Memoized `onSendBytes` adapter — `sendBytes` returns a Promise but
+  // the input components want a void-returning callback. Wrapping with
+  // useCallback (with `sendBytes` as the only dep) keeps the reference
+  // stable across renders, so the React.memo'd PromptInput +
+  // PtyPassthrough don't re-render every time a PTY frame lands.
+  const onSendBytesVoid = useCallback(
+    (b: Uint8Array) => {
+      void sendBytes(b);
+    },
+    [sendBytes],
+  );
+
   const onSubmit = useCallback(
     (text: string) => {
       setActiveCommand(text);
@@ -1009,7 +1021,7 @@ export function BlockTerminal({
         <PromptInput
           ref={promptRef}
           onSubmit={onSubmit}
-          onSendBytes={(b) => void sendBytes(b)}
+          onSendBytes={onSendBytesVoid}
           onPaste={onPaste}
           historyLength={history.length}
           historyAt={historyAt}
@@ -1020,7 +1032,7 @@ export function BlockTerminal({
       {foregroundIsAgent && !altScreen && (
         <PtyPassthrough
           ref={passthroughRef}
-          onSendBytes={(b) => void sendBytes(b)}
+          onSendBytes={onSendBytesVoid}
           appCursor={liveFrame?.app_cursor ?? false}
           bracketedPaste={liveFrame?.bracketed_paste ?? false}
           autoFocus={autoFocus}
