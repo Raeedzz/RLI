@@ -420,17 +420,97 @@ export function BlockTerminal({
   // paint as the layout that introduced the new content. Otherwise the
   // user sees a single frame at the old scroll position before we
   // catch up — which manifests as a visible jump.
-  useLayoutEffect(() => {
+  // Scroll anchoring state. `stickToBottomRef` is the bit that
+  // decides whether the next layout commit yanks scrollTop back to
+  // scrollHeight. Defaults to true so a freshly-mounted terminal
+  // anchors at the bottom the moment content arrives — the user's
+  // first view should be the most recent output, not the top of
+  // history.
+  //
+  // The flag flips OFF when the user actively scrolls away from the
+  // bottom (tracked via `onScroll` below), and flips back ON when
+  // they scroll back within range. While off, content commits don't
+  // touch scrollTop — preserving the user's "I'm reading history"
+  // position. While on, every content commit re-anchors.
+  //
+  // Critical: the flag is computed in `onScroll` (which fires
+  // BEFORE the next commit's useLayoutEffect), so the decision is
+  // based on the user's position PRE-commit. Computing it inside the
+  // useLayoutEffect — as the previous implementation did — produced
+  // false negatives at mount, where the post-commit distance jumps
+  // from 0 to scrollHeight-clientHeight in a single tick and reads
+  // as "far from bottom" even though the user never scrolled.
+  const stickToBottomRef = useRef(true);
+
+  // Anchor distance in CSS px. ~6 rows of the standard 13×1.35 cell
+  // metric — wide enough to absorb wheel-scroll-to-bottom rounding
+  // error without snapping while the user is actually browsing.
+  const STICK_TOLERANCE = 100;
+
+  const onScrollContainerScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    // Tolerance 100 — anything within ~6 rows of the bottom counts as
-    // "near the bottom", so the natural rounding error of a manual
-    // wheel-scroll-to-bottom doesn't disqualify the anchor.
-    if (distance < 100) {
-      el.scrollTop = el.scrollHeight;
-    }
+    stickToBottomRef.current = distance < STICK_TOLERANCE;
+  }, []);
+
+  useLayoutEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    if (!stickToBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
   }, [liveFrame?.seq, blocks.length, altScreen]);
+
+  // Force-stick when the terminal transitions from hidden to visible.
+  // The keepalive layer in MainColumn flips `display: none` ↔
+  // `display: flex` for tab switches; WKWebView resets the inner
+  // scrollTop on a reveal, and the user may also have scrolled up
+  // in the OTHER tab they were viewing — neither should leave them
+  // staring at the top of this one's history.
+  //
+  // Two-rAF snap because a single rAF can miss layout-settling
+  // content: the post-reveal first frame can arrive in the next
+  // animation tick, and the ResizeObserver re-fit dispatches a
+  // term_resize that bumps `liveFrame.seq` after that. Snapping in
+  // both ticks covers every observed ordering.
+  const prevVisibleRef = useRef(isVisible);
+  useLayoutEffect(() => {
+    const wasVisible = prevVisibleRef.current;
+    prevVisibleRef.current = isVisible;
+    if (wasVisible || !isVisible) return;
+    stickToBottomRef.current = true;
+    const snap = () => {
+      const el = scrollContainerRef.current;
+      if (!el) return;
+      el.scrollTop = el.scrollHeight;
+    };
+    snap();
+    const raf1 = requestAnimationFrame(() => {
+      snap();
+      const raf2 = requestAnimationFrame(snap);
+      // Stash the inner rAF id so cleanup cancels both.
+      (snap as unknown as { _raf2?: number })._raf2 = raf2;
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      const raf2 = (snap as unknown as { _raf2?: number })._raf2;
+      if (typeof raf2 === "number") cancelAnimationFrame(raf2);
+    };
+  }, [isVisible]);
+
+  // Also snap once when the BlockTerminal first mounts. The
+  // useLayoutEffect above will run on dependency changes, but the
+  // very first commit may have nothing in `liveFrame` yet — anchor
+  // anyway so that as soon as the first frame paints, scrollTop is
+  // already at the bottom and the user sees the live output, not
+  // the top of an empty buffer that's about to be backfilled with
+  // closed blocks.
+  useLayoutEffect(() => {
+    stickToBottomRef.current = true;
+    const el = scrollContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // PTY died (process crashed, backend restarted on a Rust hot-reload,
   // user `exit`-ed the shell, etc.). Drop out of agent mode so the
@@ -889,6 +969,7 @@ export function BlockTerminal({
       {!altScreen && (
         <div
           ref={scrollContainerRef}
+          onScroll={onScrollContainerScroll}
           style={{
             flex: 1,
             minHeight: 0,

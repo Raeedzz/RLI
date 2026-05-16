@@ -70,6 +70,15 @@ export interface CellSize {
 }
 
 const SHADER = /* wgsl */ `
+// All projection math runs in PHYSICAL device pixels — never CSS
+// pixels. Going through CSS introduces sub-pixel positioning bugs:
+// when the canvas's CSS width isn't a clean multiple of
+// 1/devicePixelRatio, cell edges land on fractional physical pixels
+// and bilinear glyph sampling smears them across two device pixels
+// each, which reads as low-resolution fuzz. With physical-pixel
+// projection, cell N's left edge is exactly N * cellWidthPx and the
+// viewport is exactly canvas.width physical pixels — guaranteed
+// integer alignment, crisp glyphs.
 struct Uniforms {
   cellSize: vec2<f32>,
   resolution: vec2<f32>,
@@ -215,8 +224,6 @@ export class GridRenderer {
   private quadBuffer: GPUBuffer;
   private instanceBuffer: GPUBuffer | null = null;
   private instanceCapacity = 0;
-  private cssWidth = 0;
-  private cssHeight = 0;
   /** Reused scratch buffer to avoid GC on every render. */
   private scratch = new ArrayBuffer(0);
   private scratchF32 = new Float32Array(0);
@@ -327,11 +334,28 @@ export class GridRenderer {
 
   resize(cssWidth: number, cssHeight: number, dpr: number): void {
     if (this.lost) return;
-    this.cssWidth = cssWidth;
-    this.cssHeight = cssHeight;
+    // 1. Compute physical (device) pixels from the CSS box. We round
+    //    UP (ceil), not down — flooring can leave the buffer one
+    //    physical pixel short of the content the atlas wants to draw
+    //    when DPR × CSS height isn't an integer (fractional DPRs like
+    //    1.5 or 3 are the common offenders). One-pixel-short buffers
+    //    clip the bottom of the last row, which is the symptom the
+    //    user reported as "text getting cut off."
+    const physWidth = Math.max(1, Math.ceil(cssWidth * dpr));
+    const physHeight = Math.max(1, Math.ceil(cssHeight * dpr));
+    // 2. Pin the canvas's CSS size to physWidth/dpr (instead of letting
+    //    the layout pick a fractional CSS size). This avoids browser
+    //    resampling between the pixel buffer and the displayed CSS box
+    //    — the dominant source of "fuzzy text" in WebGPU terminals.
+    //    Ceiling here may push the canvas CSS size to be at most one
+    //    device pixel wider/taller than the wrapper asked for; the
+    //    extra row of pixels is unfilled (cleared to background) and
+    //    invisible.
     const canvas = this.context.canvas as HTMLCanvasElement;
-    canvas.width = Math.max(1, Math.floor(cssWidth * dpr));
-    canvas.height = Math.max(1, Math.floor(cssHeight * dpr));
+    canvas.width = physWidth;
+    canvas.height = physHeight;
+    canvas.style.width = `${physWidth / dpr}px`;
+    canvas.style.height = `${physHeight / dpr}px`;
     // Force the next render to repaint regardless of seq dedupe.
     this.lastSeq = -1;
   }
@@ -405,7 +429,6 @@ export class GridRenderer {
     if (input.seq === this.lastSeq) return;
     this.lastSeq = input.seq;
 
-    const { cellWidthCss, cellHeightCss } = this.atlas;
     let count = 0;
     for (const dr of input.rows) {
       for (const span of dr.spans) {
@@ -575,11 +598,17 @@ export class GridRenderer {
       slot * BYTES_PER_CELL,
     );
 
+    // Project in PHYSICAL pixels so cells land on integer device-pixel
+    // boundaries — see the shader header for the why. `cellWidthPx` /
+    // `cellHeightPx` are the atlas's physical cell dims (already
+    // computed with DPR applied), and the viewport is canvas.width /
+    // canvas.height physical pixels.
+    const canvas = this.context.canvas as HTMLCanvasElement;
     const uniforms = new Float32Array([
-      cellWidthCss,
-      cellHeightCss,
-      this.cssWidth,
-      this.cssHeight,
+      this.atlas.cellWidthPx,
+      this.atlas.cellHeightPx,
+      canvas.width,
+      canvas.height,
       0,
       0,
       0,

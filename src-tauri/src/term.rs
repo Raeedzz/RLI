@@ -894,6 +894,9 @@ fn percent_decode(s: &str) -> String {
    shipped with, plus passes through 24-bit truecolor RGB.
    ------------------------------------------------------------------ */
 
+// Now only used by `snapshot_grid_legacy` + its tests. The production
+// snapshot path runs through `packed_color_to_css` instead.
+#[cfg(test)]
 fn color_to_css(c: Color, fallback: &'static str) -> Cow<'static, str> {
     match c {
         Color::Spec(Rgb { r, g, b }) => {
@@ -984,9 +987,34 @@ const ANSI_16: [&str; 16] = [
 
 /* ------------------------------------------------------------------
    Frame snapshot — walk the grid and compress styled runs.
-   ------------------------------------------------------------------ */
+   ------------------------------------------------------------------
+
+   Pipeline:
+     alacritty Term  ─►  FlatStorage (via alac_adapter)
+                                      │
+                                      ▼
+                          Vec<RowSnapshot>  (this fn)
+
+   The intermediate FlatStorage is the Warp-style flat-buffer + interval
+   map representation. Currently it adds an extra walk over alacritty's
+   grid, but routing through it now (a) validates the data shape with
+   real terminal output and (b) makes the alacritty side swappable —
+   the day a native `FlatTerm` parser lands, this function only needs
+   to drop the adapter call and take the FlatStorage directly.
+
+   The legacy direct-from-alacritty path stays alive as
+   `snapshot_grid_legacy`, used by parity tests to assert the new
+   pipeline produces byte-identical output. */
 
 fn snapshot_grid<E: EventListener>(term: &Term<E>) -> Vec<RowSnapshot> {
+    let fs = crate::flat_storage::alac_adapter::from_alacritty_term(term);
+    flat_storage_to_row_snapshots(&fs)
+}
+
+/// Direct alacritty walk. Same behaviour as `snapshot_grid` before the
+/// FlatStorage migration. Kept around exclusively for parity tests.
+#[cfg(test)]
+fn snapshot_grid_legacy<E: EventListener>(term: &Term<E>) -> Vec<RowSnapshot> {
     let cols = term.columns();
     let rows = term.screen_lines();
     let mut out = Vec::with_capacity(rows);
@@ -997,13 +1025,9 @@ fn snapshot_grid<E: EventListener>(term: &Term<E>) -> Vec<RowSnapshot> {
         for col_idx in 0..cols {
             let point = Point::new(Line(row_idx as i32), Column(col_idx));
             let cell: &Cell = &term.grid()[point];
-            // Skip the right half of wide chars — the left half already
-            // emitted the full glyph, and rendering a "spacer" produces
-            // double-printed CJK.
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-
             let span = cell_to_span(cell);
             match &mut current {
                 Some(c) if c.fg == span.fg
@@ -1031,6 +1055,158 @@ fn snapshot_grid<E: EventListener>(term: &Term<E>) -> Vec<RowSnapshot> {
         out.push(RowSnapshot { spans });
     }
     out
+}
+
+/// Translate a `FlatStorage` into the legacy `RowSnapshot` wire format.
+///
+/// Walks each row grapheme-by-grapheme, looking up fg + (bg, style) from
+/// the interval maps at the grapheme's byte offset and coalescing
+/// equal-attribute runs into a single span. Output matches what
+/// `snapshot_grid_legacy` produces for the same source grid (proven by
+/// the `flat_storage_path_matches_legacy_*` parity tests below).
+fn flat_storage_to_row_snapshots(
+    fs: &crate::flat_storage::FlatStorage,
+) -> Vec<RowSnapshot> {
+    let mut out = Vec::with_capacity(fs.row_count());
+    for row_idx in 0..fs.row_count() {
+        let row_range = fs
+            .row_byte_range(row_idx)
+            .expect("row_idx < row_count");
+        let row_text = fs.row(row_idx).expect("row_idx < row_count");
+        let mut spans: Vec<Span> = Vec::new();
+        let mut current: Option<Span> = None;
+        let mut byte = row_range.start;
+        for ch in row_text.chars() {
+            let fg = fs.fg_at(byte);
+            let bg_and_style = fs.bg_and_style_at(byte);
+            let span = packed_cell_to_span(ch, fg, bg_and_style);
+            match &mut current {
+                Some(c) if spans_match(c, &span) => {
+                    c.text.push_str(&span.text);
+                }
+                _ => {
+                    if let Some(c) = current.take() {
+                        spans.push(c);
+                    }
+                    current = Some(span);
+                }
+            }
+            byte += ch.len_utf8();
+        }
+        if let Some(c) = current.take() {
+            spans.push(c);
+        }
+        out.push(RowSnapshot { spans });
+    }
+    out
+}
+
+fn spans_match(a: &Span, b: &Span) -> bool {
+    a.fg == b.fg
+        && a.bg == b.bg
+        && a.bold == b.bold
+        && a.italic == b.italic
+        && a.underline == b.underline
+        && a.inverse == b.inverse
+        && a.dim == b.dim
+        && a.strikeout == b.strikeout
+}
+
+/// Build a Span for one grapheme, with attributes lifted from
+/// FlatStorage's packed encoding.
+fn packed_cell_to_span(
+    ch: char,
+    fg: crate::flat_storage::PackedColor,
+    bs: crate::flat_storage::BgAndStyle,
+) -> Span {
+    let mut text = String::new();
+    text.push(ch);
+    Span {
+        text,
+        fg: packed_color_to_css(fg, "var(--text-primary)"),
+        bg: packed_color_to_css(bs.bg, "var(--surface-0)"),
+        bold: bs.style.bold(),
+        italic: bs.style.italic(),
+        underline: bs.style.underline(),
+        inverse: bs.style.inverse(),
+        dim: bs.style.dim(),
+        strikeout: bs.style.strikeout(),
+    }
+}
+
+/// PackedColor → CSS, equivalent to `color_to_css(Color, fallback)`
+/// for the alacritty Color variants that our adapter actually
+/// produces. The `Named` variant uses the raw NamedColor index — see
+/// `alac_adapter::color_to_packed` for the mapping.
+fn packed_color_to_css(
+    c: crate::flat_storage::PackedColor,
+    fallback: &'static str,
+) -> Cow<'static, str> {
+    use crate::flat_storage::PackedColorKind;
+    match c.classify() {
+        PackedColorKind::Default => Cow::Borrowed(fallback),
+        PackedColorKind::Named(idx) => {
+            // Translate the packed named-color index back to alacritty's
+            // NamedColor enum, then through the legacy named_color
+            // helper so we keep one source of truth for the palette.
+            // Variants beyond the printable range produce the fallback.
+            named_color_from_raw_index(idx, fallback)
+        }
+        PackedColorKind::Indexed(idx) => indexed_color(idx),
+        PackedColorKind::Rgb(r, g, b) => {
+            Cow::Owned(format!("#{:02x}{:02x}{:02x}", r, g, b))
+        }
+    }
+}
+
+/// Translate a raw `NamedColor as u16` discriminant back into the CSS
+/// string the legacy path would have produced. The discriminants are
+/// the actual u16 values from alacritty's `NamedColor` declaration
+/// (`#[repr(u16)]`): 0..=15 for the 16 ANSI base colors, then 256..=268
+/// for the Foreground / Background / Cursor / Dim* / Bright* set.
+/// Variants outside those ranges produce the fallback.
+fn named_color_from_raw_index(
+    idx: u16,
+    fallback: &'static str,
+) -> Cow<'static, str> {
+    let name = match idx {
+        // 16 ANSI base colors (0..=15) — see vte::ansi::NamedColor.
+        0 => NamedColor::Black,
+        1 => NamedColor::Red,
+        2 => NamedColor::Green,
+        3 => NamedColor::Yellow,
+        4 => NamedColor::Blue,
+        5 => NamedColor::Magenta,
+        6 => NamedColor::Cyan,
+        7 => NamedColor::White,
+        8 => NamedColor::BrightBlack,
+        9 => NamedColor::BrightRed,
+        10 => NamedColor::BrightGreen,
+        11 => NamedColor::BrightYellow,
+        12 => NamedColor::BrightBlue,
+        13 => NamedColor::BrightMagenta,
+        14 => NamedColor::BrightCyan,
+        15 => NamedColor::BrightWhite,
+        // Specials (256..=268). 256/257 are Foreground/Background —
+        // alac_adapter collapses those to DEFAULT, so they shouldn't
+        // reach here; map them anyway so a future caller doesn't get
+        // surprise fallback colours.
+        256 => NamedColor::Foreground,
+        257 => NamedColor::Background,
+        258 => NamedColor::Cursor,
+        259 => NamedColor::DimBlack,
+        260 => NamedColor::DimRed,
+        261 => NamedColor::DimGreen,
+        262 => NamedColor::DimYellow,
+        263 => NamedColor::DimBlue,
+        264 => NamedColor::DimMagenta,
+        265 => NamedColor::DimCyan,
+        266 => NamedColor::DimWhite,
+        267 => NamedColor::BrightForeground,
+        268 => NamedColor::DimForeground,
+        _ => return Cow::Borrowed(fallback),
+    };
+    named_color(name, fallback)
 }
 
 /// A no-op `EventListener` for the throwaway `Term` instances used by
@@ -1092,6 +1268,7 @@ fn snapshot_transcript(transcript: &str, cols: u16, rows: u16) -> Vec<RowSnapsho
     snap
 }
 
+#[cfg(test)]
 fn cell_to_span(cell: &Cell) -> Span {
     let mut text = String::new();
     text.push(cell.c);
@@ -2451,6 +2628,81 @@ mod tests {
         // Caps to 1x1 internally — content gets clipped but no crash.
         assert!(!out.is_empty() || out.is_empty()); // tautology to assert "no panic"
         let _ = out;
+    }
+
+    /* ----------------------------------------------------------------
+       FlatStorage parity tests — feed identical bytes through both
+       paths (legacy direct alacritty walk vs. new FlatStorage pipeline)
+       and assert byte-identical RowSnapshot output. Locks the
+       migration in: any future drift between the paths trips a test.
+       ---------------------------------------------------------------- */
+
+    fn run_both_paths(transcript: &[u8], cols: usize, rows: usize) -> (Vec<RowSnapshot>, Vec<RowSnapshot>) {
+        let dims = Dims { cols: cols.max(1), rows: rows.max(1) };
+        let mut term = Term::new(TermConfig::default(), &dims, NullEventProxy);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, transcript);
+        let new_path = snapshot_grid(&term);
+        let legacy_path = snapshot_grid_legacy(&term);
+        (new_path, legacy_path)
+    }
+
+    #[test]
+    fn flat_storage_path_matches_legacy_plain_text() {
+        let (new_p, legacy_p) = run_both_paths(b"hello\r\nworld\r\n", 20, 4);
+        assert_eq!(new_p, legacy_p);
+    }
+
+    #[test]
+    fn flat_storage_path_matches_legacy_sgr_runs() {
+        // Multiple SGR transitions in one line — exercises the
+        // interval-map walk + span coalesce path.
+        let bytes = b"\x1b[31mRED \x1b[32mGREEN \x1b[1;33mBOLD-YELLOW\x1b[0m default";
+        let (new_p, legacy_p) = run_both_paths(bytes, 60, 2);
+        assert_eq!(new_p, legacy_p);
+    }
+
+    #[test]
+    fn flat_storage_path_matches_legacy_cr_overstrike() {
+        // Progress-bar-style CR redraw. The two paths must agree that
+        // only the FINAL row state shows, with no leaked attributes.
+        let bytes = b"first line\rSECOND";
+        let (new_p, legacy_p) = run_both_paths(bytes, 20, 2);
+        assert_eq!(new_p, legacy_p);
+    }
+
+    #[test]
+    fn flat_storage_path_matches_legacy_line_clear() {
+        // CSI K (erase-line) — same semantics check as CR overstrike,
+        // but the parser handles it via a different Handler method.
+        let bytes = b"keep this\x1b[2K\rgone";
+        let (new_p, legacy_p) = run_both_paths(bytes, 20, 2);
+        assert_eq!(new_p, legacy_p);
+    }
+
+    #[test]
+    fn flat_storage_path_matches_legacy_dim_and_underline() {
+        // Style bits — dim + underline + their cancels.
+        let bytes = b"\x1b[2;4mdim-under\x1b[22;24mclear\x1b[0m";
+        let (new_p, legacy_p) = run_both_paths(bytes, 40, 2);
+        assert_eq!(new_p, legacy_p);
+    }
+
+    #[test]
+    fn flat_storage_path_matches_legacy_truecolor() {
+        // 24-bit RGB SGR — exercises the PackedColor Rgb branch of
+        // the round-trip.
+        let bytes = b"\x1b[38;2;255;100;50mwarm\x1b[0m cool";
+        let (new_p, legacy_p) = run_both_paths(bytes, 20, 2);
+        assert_eq!(new_p, legacy_p);
+    }
+
+    #[test]
+    fn flat_storage_path_matches_legacy_inverse() {
+        // SGR 7 / 27 — inverse video.
+        let bytes = b"normal\x1b[7minv\x1b[27mnormal";
+        let (new_p, legacy_p) = run_both_paths(bytes, 30, 2);
+        assert_eq!(new_p, legacy_p);
     }
 
     #[test]

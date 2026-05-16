@@ -111,13 +111,46 @@ export function CanvasGrid({
   selectionRef.current = selection;
 
   // Auto-height: compute pixel height from row count + line metric.
-  // Uses the same constants as the renderer's atlas so the canvas
-  // surface matches what's rendered exactly.
-  const cellHeightCss = fontSizeCss * lineHeight;
+  //
+  // CRITICAL — must match the atlas's cell-height formula exactly, not
+  // the unrounded `fontSizeCss * lineHeight`. The atlas rounds UP to
+  // integer physical pixels:
+  //
+  //     cellHeightPx  = ceil(fontSizeCss * lineHeight * dpr)
+  //     cellHeightCss = cellHeightPx / dpr
+  //
+  // For 13px / 1.35 lineHeight at dpr=2 that's
+  // `ceil(35.1) / 2 = 18 CSS px` per row, NOT `17.55`. If we asked
+  // the wrapper for `rowCount × 17.55 px` while the renderer drew
+  // each row at 18 px, the bottom rows would visibly clip — the bug
+  // the user reported as "the bottom of the text is getting cut."
+  //
+  // The atlas constructor isn't reachable here (async creation), but
+  // we can replay its formula. We use `window.devicePixelRatio || 1`
+  // for the DPR — same value Atlas.ts reads, so they can never
+  // disagree.
+  const cellHeightCss = useMemo(() => {
+    const dpr = (typeof window !== "undefined"
+      ? window.devicePixelRatio
+      : 1) || 1;
+    const cellHeightPx = Math.ceil(fontSizeCss * lineHeight * dpr);
+    return cellHeightPx / dpr;
+  }, [fontSizeCss, lineHeight]);
   const autoHeightPx = useMemo(() => {
     if (mode !== "auto") return undefined;
     const rowCount = rows ? rows.length : (frame?.dirty.length ?? 0);
-    return Math.max(cellHeightCss, rowCount * cellHeightCss);
+    const raw = Math.max(cellHeightCss, rowCount * cellHeightCss);
+    // Snap to an integer number of physical pixels so the renderer's
+    // `resize()` ceil math never has to round up — that round-up
+    // would produce a 1-physical-pixel mismatch between the wrapper
+    // height (CSS) and the canvas height (CSS after re-derivation),
+    // visible as a stray blank stripe at the bottom of the block.
+    // Explicit snapping here also defends against future renderer
+    // changes that might switch the resize rounding strategy.
+    const dpr = (typeof window !== "undefined"
+      ? window.devicePixelRatio
+      : 1) || 1;
+    return Math.ceil(raw * dpr) / dpr;
   }, [mode, rows, frame?.dirty.length, cellHeightCss]);
 
   // Renderer bootstrap with device-loss recovery. `epoch` is bumped

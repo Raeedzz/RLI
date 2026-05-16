@@ -42,41 +42,47 @@
 
 use std::ops::Range;
 
-/// Packed foreground color. 0 = default; 1..=16 are the ANSI palette
-/// indices (named colors); 17..=256 covers the xterm 256-color cube
-/// when offset by 17; 257..=2^24+257 carries a 24-bit RGB truecolor
-/// payload. Encoded as `u32` so a single allocation per span isn't
-/// needed for the common case — strings stay on the wire-format
-/// boundary only.
+/// Packed color encoded as a tagged `u32`. The top two bits select the
+/// variant; the lower 30 carry the payload.
 ///
-/// We intentionally make the encoding match alacritty's `Color` enum
-/// classification so a thin adapter can translate between them
-/// without a lossy round-trip.
+///   0x0000_0000                                  → DEFAULT
+///   0x4000_0000 | u16_discriminant               → Named (alacritty's
+///                                                  NamedColor as u16)
+///   0x8000_0000 | u8_index                       → Indexed (256-color)
+///   0xC000_0000 | (R<<16 | G<<8 | B)             → Rgb truecolor
+///
+/// Named carries a full u16 because alacritty's `NamedColor` is
+/// `#[repr(u16)]` with discriminants in two ranges (0..=15 for the
+/// 16 ANSI base colors, 256+ for Foreground/Background/Cursor/Dim*).
+/// Truncating to u8 here would collide Black (0) with Foreground (256).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PackedColor(pub u32);
+
+const TAG_MASK: u32 = 0xC000_0000;
+const TAG_NAMED: u32 = 0x4000_0000;
+const TAG_INDEXED: u32 = 0x8000_0000;
+const TAG_RGB: u32 = 0xC000_0000;
+const PAYLOAD_MASK: u32 = !TAG_MASK;
 
 impl PackedColor {
     pub const DEFAULT: Self = Self(0);
 
-    pub fn named(idx: u8) -> Self {
-        // 1..=16 reserved for the 16 named ANSI colors; we expect
-        // callers to pass 0..=15 and bump by 1.
-        Self(1 + u32::from(idx))
+    /// Named color from its raw alacritty `NamedColor as u16`
+    /// discriminant. The conversion preserves all 65k possible
+    /// discriminants — `NamedColor::Foreground` (256) and friends
+    /// no longer alias the 0..=15 ANSI base colors.
+    pub fn named(discriminant: u16) -> Self {
+        Self(TAG_NAMED | u32::from(discriminant))
     }
 
     pub fn indexed(idx: u8) -> Self {
-        // Anything past the named palette lives in the 256-color cube.
-        Self(17 + u32::from(idx))
+        Self(TAG_INDEXED | u32::from(idx))
     }
 
-    /// 24-bit truecolor. Encoded as `273 + (R<<16 | G<<8 | B)`, which
-    /// puts every RGB value past the named (1..=16) and indexed
-    /// (17..=272) ranges. The whole space stays well inside u32
-    /// (273 + 2^24 ≈ 16.8M).
     pub fn rgb(r: u8, g: u8, b: u8) -> Self {
-        let packed =
+        let payload =
             (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
-        Self(273 + packed)
+        Self(TAG_RGB | payload)
     }
 
     /// True iff `self` is `DEFAULT`. Used by the interval map to fold
@@ -85,6 +91,39 @@ impl PackedColor {
     pub fn is_default(self) -> bool {
         self.0 == 0
     }
+
+    /// Classified view used by consumers that need to map the packed
+    /// encoding back to a richer color representation (e.g., CSS
+    /// strings for the wire format).
+    pub fn classify(self) -> PackedColorKind {
+        if self.0 == 0 {
+            return PackedColorKind::Default;
+        }
+        let payload = self.0 & PAYLOAD_MASK;
+        match self.0 & TAG_MASK {
+            TAG_NAMED => PackedColorKind::Named(payload as u16),
+            TAG_INDEXED => PackedColorKind::Indexed(payload as u8),
+            TAG_RGB => {
+                let r = ((payload >> 16) & 0xff) as u8;
+                let g = ((payload >> 8) & 0xff) as u8;
+                let b = (payload & 0xff) as u8;
+                PackedColorKind::Rgb(r, g, b)
+            }
+            _ => PackedColorKind::Default,
+        }
+    }
+}
+
+/// Decoded view of a `PackedColor`. The `Named` variant carries the
+/// full u16 discriminant from alacritty's `NamedColor` so callers can
+/// map back through their own enum table without `flat_storage` taking
+/// an alacritty dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackedColorKind {
+    Default,
+    Named(u16),
+    Indexed(u8),
+    Rgb(u8, u8, u8),
 }
 
 /// Style bits packed into a single byte. Layout — order matters
@@ -468,11 +507,16 @@ pub mod alac_adapter {
     /// `Foreground` / `Background` named colors collapse to DEFAULT
     /// — they're the "use whatever the renderer's default is"
     /// placeholders, which is exactly what DEFAULT signals.
+    ///
+    /// All other Named variants pass through with their full u16
+    /// discriminant. That's important because `NamedColor` is
+    /// `#[repr(u16)]` with a gap between the basic 16 (0..=15) and
+    /// the special set (256+) — truncating to u8 would alias them.
     fn color_to_packed(c: Color) -> PackedColor {
         match c {
             Color::Named(NamedColor::Foreground)
             | Color::Named(NamedColor::Background) => PackedColor::DEFAULT,
-            Color::Named(name) => PackedColor::named(name as u8),
+            Color::Named(name) => PackedColor::named(name as u16),
             Color::Indexed(idx) => PackedColor::indexed(idx),
             Color::Spec(Rgb { r, g, b }) => PackedColor::rgb(r, g, b),
         }
